@@ -434,7 +434,7 @@ pub fn pull_form() -> FormDialog {
     })
 }
 
-pub fn push_form(branch: Option<String>, remotes: Vec<String>, has_upstream: bool) -> FormDialog {
+pub fn push_form(branch: Option<String>, remotes: Vec<String>, has_upstream: bool, confirm_force: bool) -> FormDialog {
     let default_remote = remotes.iter().position(|r| r == "origin").unwrap_or(0);
     let mut f = FormDialog::new(if has_upstream { "Push" } else { "Publish branch" }, if has_upstream { "Push" } else { "Publish" });
     f.fields.push(Field::Choice { key: "remote", label: "Remote".into(), options: remotes, value: default_remote });
@@ -444,8 +444,12 @@ pub fn push_form(branch: Option<String>, remotes: Vec<String>, has_upstream: boo
         .check("force", "Force (can overwrite others' work)", false)
         .check("tags", "Include annotated tags", false)
         .check("no_verify", "Skip pre-push hook", false)
-        .on_submit(|v| {
-            run(ops::push(&ops::PushOpts {
+        .on_submit(move |v| {
+            // Git lets `--force` win, so the lease would quietly stop protecting anything.
+            if v.on("lease") && v.on("force") {
+                return Err("Choose Force with lease or Force, not both.".to_string());
+            }
+            let op = ops::push(&ops::PushOpts {
                 remote: v.opt("remote"),
                 refspec: v.opt("branch"),
                 set_upstream: v.on("upstream"),
@@ -453,7 +457,12 @@ pub fn push_form(branch: Option<String>, remotes: Vec<String>, has_upstream: boo
                 force: v.on("force"),
                 tags: v.on("tags"),
                 no_verify: v.on("no_verify"),
-            }))
+            });
+            if v.on("force") && confirm_force {
+                let (branch, remote) = (v.opt("branch").unwrap_or_else(|| "the current branch".to_string()), v.opt("remote").unwrap_or_else(|| "its remote".to_string()));
+                return Ok(vec![Action::Confirm { title: "Force push".into(), body: format!("Force push {branch} to {remote}? This replaces the branch there, including any commits others have pushed."), label: "Force push".into(), op }]);
+            }
+            run(op)
         })
 }
 

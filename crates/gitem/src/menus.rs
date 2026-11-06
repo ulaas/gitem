@@ -304,7 +304,7 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         }
         if item(ui, "Push…") {
             let remotes = cx.data.remotes().iter().map(|r| r.name.clone()).collect();
-            cx.form(forms::push_form(Some(name.clone()), remotes, b.upstream.is_some()));
+            cx.form(forms::push_form(Some(name.clone()), remotes, b.upstream.is_some(), cx.settings.confirm_destructive));
         }
     } else if item(ui, "Delete on remote…") {
         cx.confirm("Delete remote branch", &format!("Delete {name} on the remote? This affects everyone using it."), "Delete on remote", ops::branch_delete_remote(&name));

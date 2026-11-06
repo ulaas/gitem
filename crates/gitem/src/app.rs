@@ -769,11 +769,11 @@ impl GitemApp {
                 if upstream.is_some() {
                     out.push(Action::Run(ops::push(&ops::PushOpts::default())));
                 } else {
-                    out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), false)));
+                    out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), false, self.settings.confirm_destructive)));
                 }
             }
             if ui.small_button(chrome::icon::CARET_DOWN).on_hover_text("Push options").clicked() {
-                out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), upstream.is_some())));
+                out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), upstream.is_some(), self.settings.confirm_destructive)));
             }
             ui.separator();
             if chrome::tool_button(ui, chrome::icon::ARCHIVE, p.series[6], crate::i18n::t("Stash"), "Stash changes", false, &p).clicked() {

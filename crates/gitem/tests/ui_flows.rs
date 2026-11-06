@@ -2425,6 +2425,112 @@ fn rows_have_a_stage_button_in_the_tree() {
     stage_and_unstage_with_row_buttons(true);
 }
 
+fn push_form_open(h: &mut Harness<GitemApp>) {
+    let ctx = h.ctx.clone();
+    let confirm = h.state().settings.confirm_destructive;
+    h.state_mut().apply_action(&ctx, Action::Form(forms::push_form(Some("main".into()), vec!["origin".into()], true, confirm)));
+    pump_for_label(h, "Force (can overwrite others' work)");
+    wait_until_quiet(h);
+}
+
+fn rewrite_local_history(r: &Remote) {
+    r.f.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    r.f.write("rewritten.txt", "r\n");
+    r.f.commit("rewritten");
+}
+
+#[test]
+fn force_push_from_the_form_asks_first_and_shows_the_command() {
+    let r = with_remote();
+    rewrite_local_history(&r);
+    let before = r.remote_tip();
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    push_form_open(&mut h);
+    click(&mut h, "Force (can overwrite others' work)");
+    click_last(&mut h, "Push");
+    pump_for_any(&mut h, "Force push");
+    assert!(h.query_by_label_contains("git push --progress --force -- origin main").is_some(), "the exact command is shown");
+    assert_no_op_started(&mut h, "pushed without waiting for an answer");
+    assert_eq!(r.remote_tip(), before);
+    click(&mut h, "Cancel");
+    assert_no_op_started(&mut h, "pushed after Cancel");
+    assert_eq!(r.remote_tip(), before);
+
+    push_form_open(&mut h);
+    click(&mut h, "Force (can overwrite others' work)");
+    click_last(&mut h, "Push");
+    pump_for_any(&mut h, "Force push");
+    h.query_all_by_label("Force push").last().unwrap().click();
+    wait_for(&mut h, "the push", || r.remote_tip() != before);
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn force_push_runs_directly_with_confirmations_off() {
+    let r = with_remote();
+    rewrite_local_history(&r);
+    let before = r.remote_tip();
+    let mut h = harness(&r.f);
+    h.state_mut().settings.confirm_destructive = false;
+    settle(&mut h);
+    push_form_open(&mut h);
+    click(&mut h, "Force (can overwrite others' work)");
+    click_last(&mut h, "Push");
+    wait_for(&mut h, "the push", || r.remote_tip() != before);
+    no_errors(&h);
+}
+
+#[test]
+fn force_with_lease_alone_does_not_ask() {
+    let r = with_remote();
+    rewrite_local_history(&r);
+    r.f.git(&["fetch", "-q", "origin"]);
+    let before = r.remote_tip();
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    push_form_open(&mut h);
+    click(&mut h, "Force with lease");
+    click_last(&mut h, "Push");
+    wait_for(&mut h, "the push", || r.remote_tip() != before);
+    no_errors(&h);
+}
+
+#[test]
+fn ticking_both_force_options_is_refused_rather_than_dropping_the_lease() {
+    let r = with_remote();
+    rewrite_local_history(&r);
+    let before = r.remote_tip();
+    let mut h = harness(&r.f);
+    h.state_mut().settings.confirm_destructive = false;
+    settle(&mut h);
+    push_form_open(&mut h);
+    click(&mut h, "Force with lease");
+    click(&mut h, "Force (can overwrite others' work)");
+    click_last(&mut h, "Push");
+    pump_for_label(&mut h, "Choose Force with lease or Force, not both.");
+    assert_no_op_started(&mut h, "pushed with both ticked");
+    assert_eq!(r.remote_tip(), before);
+}
+
+fn pump_for_any(h: &mut Harness<GitemApp>, label: &str) {
+    let t = Instant::now();
+    while h.query_all_by_label(label).next().is_none() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "no widget labelled {label:?}");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+/// For a label that's also on something behind a dialog, or beside the list in view.
+fn click_last(h: &mut Harness<GitemApp>, label: &str) {
+    pump_for_any(h, label);
+    h.query_all_by_label(label).last().unwrap().click();
+    h.step();
+    h.step();
+}
+
 #[test]
 fn a_crash_report_is_offered_once_and_then_kept_quietly() {
     let f = Fx::new();

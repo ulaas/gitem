@@ -137,7 +137,7 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Git", "Push…", |cx| {
         let r = cx.data.remotes().iter().map(|x| x.name.clone()).collect();
         let has = cx.status().is_some_and(|s| s.upstream.is_some());
-        cx.form(forms::push_form(cx.current_branch(), r, has));
+        cx.form(forms::push_form(cx.current_branch(), r, has, cx.settings.confirm_destructive));
     }));
     v.push(item("Git", "Create Branch…", |cx| cx.form(forms::new_branch(None))));
     v.push(item("Git", "Create Tag…", |cx| cx.form(forms::new_tag(None))));
