@@ -2631,6 +2631,33 @@ fn a_revealed_secret_hides_when_you_leave_the_page_or_the_tab() {
     gitem_core::cred::delete(&target).unwrap();
 }
 
+fn git_commands_matching(f: &Fx, needle: &str) -> usize {
+    f.git.log.lock().unwrap().iter().filter(|e| e.command.contains(needle)).count()
+}
+
+#[test]
+fn the_co_authors_menu_reads_history_once_while_open() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("x.txt", "x
+");
+    f.git(&["add", "-A"]);
+    f.git(&["-c", "user.name=Other Person", "-c", "user.email=other@example.com", "commit", "-q", "-m", "by someone else"]);
+    f.write("y.txt", "y
+");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    wait_until_quiet(&mut h);
+    let before = git_commands_matching(&f, "user.email");
+    click(&mut h, "Co-authors ▾");
+    pump_for_label(&mut h, "Other Person <other@example.com>");
+    for _ in 0..10 {
+        h.step();
+    }
+    assert_eq!(git_commands_matching(&f, "user.email"), before + 1, "git should run once, however many frames the menu is open for");
+}
+
 #[test]
 fn a_crash_report_is_offered_once_and_then_kept_quietly() {
     let f = Fx::new();

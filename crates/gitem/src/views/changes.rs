@@ -58,6 +58,9 @@ pub struct ChangesView {
     ai: Task<String>,
     ai_stash: Task<String>,
     applied_prepared_for: Option<RepoOp>,
+    /// Everyone who has committed, for the Co-authors menu, and the refs it was read at.
+    people: Task<Vec<Contributor>>,
+    people_gen: Option<u64>,
     /// Message and HEAD at submission, kept until we know the commit landed.
     submitted: Option<(String, String)>,
     /// Ctrl-clicked paths, for batch actions.
@@ -345,7 +348,17 @@ impl ChangesView {
             });
             ui.menu_button("Co-authors ▾", |ui| {
                 ui.set_max_height(280.0);
-                let people = cx.repo.git.log.lock().ok().map(|_| ()).and_then(|_| cx.repo.contributors("HEAD", false).ok()).unwrap_or_default();
+                self.people.poll();
+                // Walks the whole history, so never on a frame, and only when it can have changed.
+                if self.people_gen != Some(cx.data.refs_gen) {
+                    self.people_gen = Some(cx.data.refs_gen);
+                    let repo = cx.repo.clone();
+                    self.people.spawn(ui.ctx(), move || repo.contributors("HEAD", false));
+                }
+                if self.people.busy() {
+                    spinner_row(ui, "Reading history…", &p);
+                }
+                let people = self.people.value.as_deref().unwrap_or_default();
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for c in people.iter().filter(|c| !c.is_you).take(60) {
                         if ui.button(format!("{} <{}>", c.name, c.email)).clicked() {
