@@ -1342,3 +1342,16 @@ fn the_sidebar_shows_incoming_and_outgoing_commits_on_a_branch() {
     }
     no_errors(&h);
 }
+
+#[test]
+fn active_tab_markers_can_find_their_tabs() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let dock = &h.state().repos[0].dock;
+    let (path, leaf) = dock.iter_leaves().next().unwrap();
+    let response = h.ctx.read_response(gitem::app::dock_tab_id(path, leaf.active.0));
+    assert!(response.is_some(), "egui_dock's tab ids have changed, so the markers aren't drawn");
+    assert!(response.unwrap().rect.width() > 10.0);
+}

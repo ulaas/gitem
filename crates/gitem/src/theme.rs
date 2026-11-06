@@ -175,23 +175,42 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Dock tabs in the app's colours, with an accent line under the tab row.
+/// Flat dock tabs: the active one shares the panel's colour and runs into its content,
+/// the rest sit in a darker bar. An outline only appears for keyboard focus.
 pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
+    use egui_dock::TabInteractionStyle;
+    let tab = |bg_fill: Color32, text_color: Color32, outline_color: Color32| TabInteractionStyle { outline_color, corner_radius: CornerRadius::ZERO, bg_fill, text_color };
+    let none = Color32::TRANSPARENT;
     let mut s = egui_dock::Style::from_egui(style);
     s.tab_bar.bg_fill = p.bg;
-    s.tab_bar.hline_color = p.accent;
-    s.tab.active.bg_fill = p.panel;
-    s.tab.active.text_color = p.text;
-    s.tab.active.outline_color = p.border;
-    s.tab.focused.bg_fill = p.panel;
-    s.tab.focused.text_color = p.text;
-    s.tab.focused.outline_color = p.accent;
-    s.tab.inactive.bg_fill = p.bg;
-    s.tab.inactive.text_color = p.dim;
-    s.tab.inactive.outline_color = Color32::TRANSPARENT;
-    s.tab.hovered.bg_fill = p.hover;
-    s.tab.hovered.text_color = p.text;
-    s.tab.hovered.outline_color = Color32::TRANSPARENT;
+    s.tab_bar.height = 30.0;
+    s.tab_bar.hline_color = p.border;
+    s.tab.hline_below_active_tab_name = false;
+    s.tab.spacing = 0.0;
+    s.tab.active = tab(p.panel, p.text, none);
+    s.tab.focused = tab(p.panel, p.text, none);
+    s.tab.inactive = tab(p.bg, p.dim, none);
+    s.tab.hovered = tab(p.hover, p.text, none);
+    s.tab.active_with_kb_focus = tab(p.panel, p.text, p.accent);
+    s.tab.focused_with_kb_focus = tab(p.panel, p.text, p.accent);
+    s.tab.inactive_with_kb_focus = tab(p.bg, p.text, p.accent);
+    s.tab.tab_body.stroke = Stroke::NONE;
+    s.tab.tab_body.bg_fill = p.panel;
+    s.tab.tab_body.corner_radius = CornerRadius::ZERO;
+    s.buttons.close_tab_color = p.faint;
+    s.buttons.close_tab_active_color = p.text;
+    s.buttons.close_tab_bg_fill = p.hover;
+    s.buttons.add_tab_color = p.faint;
+    s.buttons.add_tab_active_color = p.text;
+    s.buttons.add_tab_bg_fill = p.hover;
+    s.buttons.add_tab_border_color = none;
+    s.buttons.close_all_tabs_color = p.faint;
+    s.buttons.close_all_tabs_active_color = p.text;
+    s.buttons.close_all_tabs_bg_fill = p.hover;
+    s.buttons.close_all_tabs_border_color = none;
+    s.separator.color_idle = p.border;
+    s.separator.color_hovered = p.accent;
+    s.separator.color_dragged = p.accent;
     s
 }
 

@@ -182,6 +182,25 @@ impl RepoTab {
     }
 }
 
+const DOCK_ID: &str = "gitem-dock";
+
+/// The id egui_dock gives a tab's title in a pane. It's internal to that crate, so if
+/// an upgrade changes it the markers simply disappear; a test watches for that.
+pub fn dock_tab_id(path: egui_dock::NodePath, tab: usize) -> egui::Id {
+    egui::Id::new(DOCK_ID).with((path.surface, "surface")).with((path.node, "node")).with((tab, "tab"))
+}
+
+/// A thin line on top of each pane's active tab, like the repository tabs have. The
+/// pane in use gets the accent. egui_dock has no style for this, so it's drawn over.
+fn paint_active_tab_markers(ui: &Ui, dock: &DockState<Tab>, p: &Palette) {
+    let focused = dock.focused_leaf().or_else(|| dock.iter_leaves().next().map(|(path, _)| path));
+    for (path, leaf) in dock.iter_leaves() {
+        let Some(tab) = ui.ctx().read_response(dock_tab_id(path, leaf.active.0)) else { continue };
+        let line = egui::Rect::from_min_size(tab.rect.min, egui::vec2(tab.rect.width(), 2.0));
+        ui.painter().with_clip_rect(leaf.rect.intersect(ui.clip_rect())).rect_filled(line, 0.0, if focused == Some(path) { p.accent } else { p.faint });
+    }
+}
+
 /// The tab arrangement, splits included, without one-off tabs.
 pub fn layout_to_json(dock: &DockState<Tab>) -> Option<String> {
     serde_json::to_string(&dock.filter_map_tabs(|t: &Tab| t.spec())).ok()
@@ -1193,7 +1212,8 @@ impl GitemApp {
             let style = theme::dock_style(ui.style(), &pal);
             let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out } };
             egui::CentralPanel::no_frame().show(ui, |ui| {
-                DockArea::new(dock).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_inside(ui, &mut viewer);
+                DockArea::new(dock).id(egui::Id::new(DOCK_ID)).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_inside(ui, &mut viewer);
+                paint_active_tab_markers(ui, dock, &pal);
             });
 
             if let Some(pl) = &mut self.palette {
