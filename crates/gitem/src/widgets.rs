@@ -306,6 +306,24 @@ pub fn file_row(ui: &mut Ui, change: &FileChange, selected: bool, p: &Palette) -
     resp
 }
 
+/// A small action at the right end of a row, there while the pointer is over the row.
+/// The row's click doesn't fire with it, since this is on top of the row.
+pub fn row_button(ui: &mut Ui, row: &Response, glyph: &str, name: &str, selected: bool, p: &Palette) -> bool {
+    if !ui.rect_contains_pointer(row.rect) {
+        return false;
+    }
+    let rect = Rect::from_center_size(pos2(row.rect.right() - 14.0, row.rect.center().y), vec2(22.0, row.rect.height() - 2.0));
+    let resp = ui.interact(rect, row.id.with("row-button"), Sense::click()).on_hover_text(name);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    // Opaque, as the file name may run underneath.
+    ui.painter().rect_filled(rect, 3.0, if selected { p.selection } else { p.hover });
+    if resp.hovered() {
+        ui.painter().rect(rect, 3.0, p.button, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    }
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, prop(13.0), p.text);
+    resp.clicked()
+}
+
 /// Width of one level of a tree list.
 pub const TREE_INDENT: f32 = 14.0;
 

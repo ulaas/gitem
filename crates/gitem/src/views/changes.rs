@@ -584,7 +584,11 @@ fn changed_file_row(ui: &mut Ui, ch: &FileChange, selected: bool, leaf: Leaf, p:
 fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, selected: &mut HashSet<String>, leaf: Leaf) {
     let p = cx.pal.clone();
     let ch = change_of(e, true);
-    let resp = changed_file_row(ui, &ch, selected.contains(&e.path), leaf, &p);
+    let is_selected = selected.contains(&e.path);
+    let resp = changed_file_row(ui, &ch, is_selected, leaf, &p);
+    if row_button(ui, &resp, crate::chrome::icon::MINUS, &format!("Unstage {}", e.path), is_selected, &p) {
+        cx.run(ops::unstage_paths(std::slice::from_ref(&e.path), !st.head_sha.is_empty()));
+    }
     if select_click(ui, &resp, &e.path, selected) {
     } else if resp.clicked() {
         cx.diff(DiffSource::Staged, Some(&e.path));
@@ -610,7 +614,11 @@ fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, selected: &mut HashSe
     let p = cx.pal.clone();
     let untracked = e.worktree == FileStatus::Untracked;
     let ch = change_of(e, false);
-    let resp = changed_file_row(ui, &ch, selected.contains(&e.path), leaf, &p);
+    let is_selected = selected.contains(&e.path);
+    let resp = changed_file_row(ui, &ch, is_selected, leaf, &p);
+    if row_button(ui, &resp, crate::chrome::icon::PLUS, &format!("Stage {}", e.path), is_selected, &p) {
+        cx.run(ops::stage_paths(std::slice::from_ref(&e.path)));
+    }
     let src = if untracked { DiffSource::Untracked } else { DiffSource::Unstaged };
     if select_click(ui, &resp, &e.path, selected) {
     } else if resp.clicked() {

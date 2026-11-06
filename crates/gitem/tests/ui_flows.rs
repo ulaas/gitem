@@ -2373,6 +2373,58 @@ fn the_composer_refuses_to_commit_during_a_merge() {
     assert!(h.query_by_label_contains("Finish or abort it first").is_some(), "the reason isn't on screen");
 }
 
+fn tab_titles(h: &Harness<GitemApp>) -> Vec<String> {
+    h.state().repos[0].dock.iter_all_tabs().map(|(_, t)| t.title()).collect()
+}
+
+fn stage_and_unstage_with_row_buttons(tree: bool) {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("b.txt", "changed\n");
+    f.write("dir/deep.txt", "new\n");
+    let mut h = harness(&f);
+    h.state_mut().settings.changes_tree = tree;
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    let open_tabs = tab_titles(&h).len();
+
+    pump_for_label(&mut h, "b.txt");
+    assert!(h.query_by_label("Stage b.txt").is_none(), "only on the row under the pointer");
+    h.get_by_label("b.txt").hover();
+    h.step();
+    h.step();
+    click(&mut h, "Stage b.txt");
+    wait_for(&mut h, "b.txt to be staged", || f.git(&["status", "--short"]).contains("M  b.txt"));
+    wait_until_quiet(&mut h);
+
+    pump_for_label(&mut h, "dir/deep.txt");
+    h.get_by_label("dir/deep.txt").hover();
+    h.step();
+    h.step();
+    click(&mut h, "Stage dir/deep.txt");
+    wait_for(&mut h, "dir/deep.txt to be staged", || f.git(&["status", "--short"]).contains("A  dir/deep.txt"));
+    wait_until_quiet(&mut h);
+
+    h.get_by_label("b.txt").hover();
+    h.step();
+    h.step();
+    click(&mut h, "Unstage b.txt");
+    wait_for(&mut h, "b.txt to be unstaged", || f.git(&["status", "--short"]).contains(" M b.txt"));
+    wait_until_quiet(&mut h);
+    assert_eq!(tab_titles(&h).len(), open_tabs, "the button must not also open the diff: {:?}", tab_titles(&h));
+    no_errors(&h);
+}
+
+#[test]
+fn rows_have_a_stage_button_in_the_flat_list() {
+    stage_and_unstage_with_row_buttons(false);
+}
+
+#[test]
+fn rows_have_a_stage_button_in_the_tree() {
+    stage_and_unstage_with_row_buttons(true);
+}
+
 #[test]
 fn a_crash_report_is_offered_once_and_then_kept_quietly() {
     let f = Fx::new();
