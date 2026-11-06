@@ -918,6 +918,15 @@ impl GraphView {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DropChoice {
+    Merge,
+    Rebase,
+    Compare,
+    Move,
+    Reset,
+}
+
 fn drop_ref(cx: &mut Cx, name: &str, target: &Commit) {
     let short = target.short().to_string();
     let target_sha = target.sha.clone();
@@ -925,32 +934,27 @@ fn drop_ref(cx: &mut Cx, name: &str, target: &Commit) {
     let is_local = cx.data.local_branches().any(|b| b.name == name);
     let is_current = cx.current_branch().as_deref() == Some(name);
     let mut f = forms::FormDialog::new(format!("{name} → {short}"), "Run");
-    let mut options: Vec<&str> = vec!["Merge the dragged ref into the current branch", "Rebase the current branch onto this commit", "Compare the dragged ref with this commit"];
+    let mut options = vec![(DropChoice::Merge, "Merge the dragged ref into the current branch"), (DropChoice::Rebase, "Rebase the current branch onto this commit"), (DropChoice::Compare, "Compare the dragged ref with this commit")];
     if is_local && !is_current {
-        options.push("Move the dragged branch to this commit");
+        options.push((DropChoice::Move, "Move the dragged branch to this commit"));
     }
     if is_local && is_current {
-        options.push("Reset the current branch to this commit");
+        options.push((DropChoice::Reset, "Reset the current branch to this commit"));
     }
-    f = f.choice("what", "What should happen?", &options, 0).on_submit(move |v| {
+    f = f.choice_of("what", "What should happen?", &options, 0).on_submit(move |v| {
         use crate::action::Action;
-        let w = v.text("what");
-        Ok(if w.starts_with("Merge") {
-            vec![Action::Form(forms::merge_form(name_s.clone()))]
-        } else if w.starts_with("Rebase") {
-            vec![Action::Form(forms::rebase_form(target_sha.clone()))]
-        } else if w.starts_with("Compare") {
-            vec![Action::OpenTab(Tab::compare(&name_s, &target_sha))]
-        } else if w.starts_with("Move") {
-            vec![Action::Confirm {
+        Ok(vec![match v.picked("what", &options) {
+            DropChoice::Merge => Action::Form(forms::merge_form(name_s.clone())),
+            DropChoice::Rebase => Action::Form(forms::rebase_form(target_sha.clone())),
+            DropChoice::Compare => Action::OpenTab(Tab::compare(&name_s, &target_sha)),
+            DropChoice::Move => Action::Confirm {
                 title: "Move branch".into(),
                 body: format!("Move {name_s} to {}? Commits only reachable from its old position may be lost.", gitem_core::util::prefix(&target_sha, 8)),
                 label: "Move".into(),
                 op: ops::branch_force_move(&name_s, &target_sha),
-            }]
-        } else {
-            vec![Action::Form(forms::reset_form(target_sha.clone()))]
-        })
+            },
+            DropChoice::Reset => Action::Form(forms::reset_form(target_sha.clone())),
+        }])
     });
     cx.form(f);
 }

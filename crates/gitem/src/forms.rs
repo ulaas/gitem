@@ -21,17 +21,29 @@ pub enum Field {
     Path { key: &'static str, label: String, value: String, folder: bool },
 }
 
-pub struct Values(HashMap<&'static str, String>);
+pub struct Values {
+    text: HashMap<&'static str, String>,
+    choices: HashMap<&'static str, usize>,
+}
 
 impl Values {
     pub fn text(&self, k: &str) -> String {
-        self.0.get(k).cloned().unwrap_or_default()
+        self.text.get(k).cloned().unwrap_or_default()
     }
     pub fn opt(&self, k: &str) -> Option<String> {
-        self.0.get(k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        self.text.get(k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     }
     pub fn on(&self, k: &str) -> bool {
-        self.0.get(k).is_some_and(|v| v == "1")
+        self.text.get(k).is_some_and(|v| v == "1")
+    }
+    /// Position of the option chosen in a `Choice`.
+    pub fn index(&self, k: &str) -> usize {
+        self.choices.get(k).copied().unwrap_or(0)
+    }
+    /// The value behind the chosen option of a `choice_of`. It goes by position, so
+    /// rewording or translating a label can never change which command runs.
+    pub fn picked<T: Copy>(&self, k: &str, table: &[(T, &str)]) -> T {
+        table.get(self.index(k)).unwrap_or(&table[0]).0
     }
 }
 
@@ -76,6 +88,11 @@ impl FormDialog {
         self.fields.push(Field::Choice { key, label: label.into(), options: options.iter().map(|s| s.to_string()).collect(), value });
         self
     }
+    /// A choice where each option stands for a value. Read it back with `Values::picked`.
+    pub fn choice_of<T>(self, key: &'static str, label: &str, table: &[(T, &str)], value: usize) -> Self {
+        let options: Vec<&str> = table.iter().map(|o| o.1).collect();
+        self.choice(key, label, &options, value)
+    }
     pub fn pick(mut self, key: &'static str, label: &str, options: Vec<String>, value: &str) -> Self {
         self.fields.push(Field::Pick { key, label: label.into(), options, value: value.into() });
         self
@@ -99,6 +116,7 @@ impl FormDialog {
 
     fn values(&self) -> Values {
         let mut m = HashMap::new();
+        let mut choices = HashMap::new();
         for f in &self.fields {
             match f {
                 Field::Text { key, value, .. } | Field::Multiline { key, value, .. } | Field::Pick { key, value, .. } | Field::Path { key, value, .. } => {
@@ -109,11 +127,12 @@ impl FormDialog {
                 }
                 Field::Choice { key, options, value, .. } => {
                     m.insert(*key, options.get(*value).cloned().unwrap_or_default());
+                    choices.insert(*key, *value);
                 }
                 Field::Info(_) => {}
             }
         }
-        Values(m)
+        Values { text: m, choices }
     }
 
     /// Draws the form. Returns actions when submitted, or `None` while open;
@@ -265,23 +284,16 @@ pub fn new_tag(rev: Option<String>) -> FormDialog {
         })
 }
 
+const MERGE_MODES: [(ops::MergeMode, &str); 5] = [
+    (ops::MergeMode::Default, "Default (fast-forward when possible)"),
+    (ops::MergeMode::NoFf, "Always create a merge commit (--no-ff)"),
+    (ops::MergeMode::FfOnly, "Fast-forward only (--ff-only)"),
+    (ops::MergeMode::Squash, "Squash (--squash)"),
+    (ops::MergeMode::NoCommit, "Merge without committing (--no-commit)"),
+];
+
 pub fn merge_form(target: String) -> FormDialog {
-    let modes = ["Default (fast-forward when possible)", "Always create a merge commit (--no-ff)", "Fast-forward only (--ff-only)", "Squash (--squash)", "Merge without committing (--no-commit)"];
-    FormDialog::new(format!("Merge {target} into the current branch"), "Merge").choice("mode", "Strategy", &modes, 0).on_submit(move |v| {
-        let m = v.text("mode");
-        let mode = if m.contains("no-ff") {
-            ops::MergeMode::NoFf
-        } else if m.contains("ff-only") {
-            ops::MergeMode::FfOnly
-        } else if m.contains("squash") {
-            ops::MergeMode::Squash
-        } else if m.contains("no-commit") {
-            ops::MergeMode::NoCommit
-        } else {
-            ops::MergeMode::Default
-        };
-        run(ops::merge(&target, mode))
-    })
+    FormDialog::new(format!("Merge {target} into the current branch"), "Merge").choice_of("mode", "Strategy", &MERGE_MODES, 0).on_submit(move |v| run(ops::merge(&target, v.picked("mode", &MERGE_MODES))))
 }
 
 pub fn rebase_form(onto: String) -> FormDialog {
@@ -294,18 +306,15 @@ pub fn rebase_form(onto: String) -> FormDialog {
         })
 }
 
+const RESET_MODES: [(ops::ResetMode, &str); 4] = [
+    (ops::ResetMode::Mixed, "Mixed: keep file changes, unstage them"),
+    (ops::ResetMode::Soft, "Soft: keep file changes and staging"),
+    (ops::ResetMode::Keep, "Keep: reset, but keep local changes"),
+    (ops::ResetMode::Hard, "Hard: discard all local changes"),
+];
+
 pub fn reset_form(rev: String) -> FormDialog {
-    let modes = ["Mixed: keep file changes, unstage them", "Soft: keep file changes and staging", "Keep: reset, but keep local changes", "Hard: discard all local changes"];
-    FormDialog::new(format!("Reset the current branch to {}", gitem_core::util::prefix(&rev, 10)), "Reset").danger().choice("mode", "Mode", &modes, 0).on_submit(move |v| {
-        let m = v.text("mode");
-        let mode = match m.split(':').next().unwrap_or("") {
-            "Soft" => ops::ResetMode::Soft,
-            "Hard" => ops::ResetMode::Hard,
-            "Keep" => ops::ResetMode::Keep,
-            _ => ops::ResetMode::Mixed,
-        };
-        run(ops::reset(&rev, mode))
-    })
+    FormDialog::new(format!("Reset the current branch to {}", gitem_core::util::prefix(&rev, 10)), "Reset").danger().choice_of("mode", "Mode", &RESET_MODES, 0).on_submit(move |v| run(ops::reset(&rev, v.picked("mode", &RESET_MODES))))
 }
 
 pub fn cherry_pick_form(shas: Vec<String>) -> FormDialog {
@@ -416,22 +425,15 @@ pub fn fetch_form(remotes: Vec<String>, prune: bool) -> FormDialog {
     .check("prune", "Prune deleted remote branches", prune)
     .check("tags", "Fetch all tags", false)
     .on_submit(|v| {
-        let r = v.text("remote");
-        run(ops::fetch(&ops::FetchOpts { all: r == "All remotes", remote: (r != "All remotes").then_some(r), prune: v.on("prune"), tags: v.on("tags") }))
+        let all = v.index("remote") == 0;
+        run(ops::fetch(&ops::FetchOpts { all, remote: (!all).then(|| v.text("remote")), prune: v.on("prune"), tags: v.on("tags") }))
     })
 }
 
+const PULL_MODES: [(ops::PullMode, &str); 4] = [(ops::PullMode::Default, "Repository default"), (ops::PullMode::FfOnly, "Fast-forward only"), (ops::PullMode::Rebase, "Rebase"), (ops::PullMode::Merge, "Merge")];
+
 pub fn pull_form() -> FormDialog {
-    let modes = ["Repository default", "Fast-forward only", "Rebase", "Merge"];
-    FormDialog::new("Pull", "Pull").choice("mode", "How to integrate", &modes, 0).check("autostash", "Stash local changes first", false).on_submit(|v| {
-        let mode = match v.text("mode").as_str() {
-            "Fast-forward only" => ops::PullMode::FfOnly,
-            "Rebase" => ops::PullMode::Rebase,
-            "Merge" => ops::PullMode::Merge,
-            _ => ops::PullMode::Default,
-        };
-        run(ops::pull(mode, v.on("autostash")))
-    })
+    FormDialog::new("Pull", "Pull").choice_of("mode", "How to integrate", &PULL_MODES, 0).check("autostash", "Stash local changes first", false).on_submit(|v| run(ops::pull(v.picked("mode", &PULL_MODES), v.on("autostash"))))
 }
 
 pub fn push_form(branch: Option<String>, remotes: Vec<String>, has_upstream: bool, confirm_force: bool) -> FormDialog {
@@ -570,4 +572,282 @@ pub fn commits_since(repo: &Repo, base: Option<&str>) -> Result<Vec<Commit>, Str
     let mut c = repo.log(&q).map_err(|e| e.to_string())?;
     c.reverse();
     Ok(c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fill a field the way the user would: a check takes "1" or "0", a choice takes
+    /// the label of its option, and anything else takes text.
+    fn set(form: &mut FormDialog, k: &str, input: &str) {
+        for f in &mut form.fields {
+            match f {
+                Field::Text { key, value, .. } | Field::Multiline { key, value, .. } | Field::Pick { key, value, .. } | Field::Path { key, value, .. } if *key == k => {
+                    *value = input.to_string();
+                    return;
+                }
+                Field::Check { key, value, .. } if *key == k => {
+                    *value = input == "1";
+                    return;
+                }
+                Field::Choice { key, options, value, .. } if *key == k => {
+                    *value = options.iter().position(|o| o == input).unwrap_or_else(|| panic!("{k} has no option {input:?}: {options:?}"));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        panic!("the form has no field {k}");
+    }
+
+    fn step_text(s: &ops::Step) -> String {
+        let quoted: Vec<String> = s.args.iter().map(|a| if a.contains(' ') || a.is_empty() { format!("'{a}'") } else { a.clone() }).collect();
+        let stdin = s.stdin.as_ref().map(|i| format!(" <<< {}", String::from_utf8_lossy(i))).unwrap_or_default();
+        format!("{}{stdin}", quoted.join(" "))
+    }
+
+    fn op_text(op: &GitOp) -> String {
+        op.steps.iter().map(step_text).collect::<Vec<_>>().join(" && ")
+    }
+
+    /// What the submitted form would run, as exact arguments.
+    fn outcome(actions: &[Action]) -> String {
+        let shown: Vec<String> = actions
+            .iter()
+            .map(|a| match a {
+                Action::Run(op) => op_text(op),
+                Action::Confirm { op, .. } => format!("ask first: {}", op_text(op)),
+                Action::RunGlobal { op, open_after } => format!("{} then open {}", op_text(op), open_after.as_ref().map(|p| p.display().to_string()).unwrap_or_default()),
+                _ => panic!("the forms here only run git"),
+            })
+            .collect();
+        shown.join(" ; ")
+    }
+
+    fn submit(form: &mut FormDialog) -> Result<Vec<Action>, String> {
+        let values = form.values();
+        (form.on_submit)(&values)
+    }
+
+    fn check(what: &str, mut form: FormDialog, inputs: &[(&str, &str)], expected: &str) {
+        for (k, input) in inputs {
+            set(&mut form, k, input);
+        }
+        let got = submit(&mut form).unwrap_or_else(|e| panic!("{what}: refused: {e}"));
+        assert_eq!(outcome(&got), expected, "{what}");
+    }
+
+    fn s(x: &str) -> String {
+        x.to_string()
+    }
+
+    fn sv(x: &[&str]) -> Vec<String> {
+        x.iter().map(|y| y.to_string()).collect()
+    }
+
+    #[test]
+    fn branch_forms() {
+        check("switch to new", new_branch(None), &[("name", "feature/x")], "switch -c feature/x");
+        check("don't switch", new_branch(None), &[("name", "feature/x"), ("switch", "0")], "branch feature/x");
+        check("from a commit", new_branch(Some(s("abc"))), &[("name", "x")], "switch -c x abc");
+        check("from a commit, stay", new_branch(Some(s("abc"))), &[("name", "x"), ("switch", "0")], "branch x abc");
+        check("rename", rename_branch(s("old")), &[("name", "new")], "branch -m old new");
+        check("upstream", set_upstream(s("x"), sv(&["origin/x"])), &[("up", "origin/x")], "branch --set-upstream-to=origin/x x");
+        check("move", move_branch(s("x"), vec![]), &[("to", "abc")], "branch -f x abc");
+        assert!(move_branch(s("x"), vec![]).danger);
+    }
+
+    #[test]
+    fn tag_form() {
+        check("lightweight", new_tag(None), &[("name", "v1")], "tag v1");
+        check("annotated, at a commit", new_tag(Some(s("abc"))), &[("name", "v1"), ("message", "a note")], "tag -a -m 'a note' v1 abc");
+        check("signed", new_tag(None), &[("name", "v1"), ("sign", "1")], "tag -s -m v1 v1");
+        check("signed with a message", new_tag(None), &[("name", "v1"), ("sign", "1"), ("message", "m")], "tag -s -m m v1");
+    }
+
+    #[test]
+    fn merge_form_runs_each_mode() {
+        check("opens on the default", merge_form(s("x")), &[], "merge --no-edit x");
+        for (mode, flag) in [("Always create a merge commit (--no-ff)", "--no-ff "), ("Fast-forward only (--ff-only)", "--ff-only "), ("Squash (--squash)", "--squash "), ("Merge without committing (--no-commit)", "--no-commit "), ("Default (fast-forward when possible)", "")] {
+            check(mode, merge_form(s("x")), &[("mode", mode)], &format!("merge --no-edit {flag}x"));
+        }
+    }
+
+    #[test]
+    fn reset_form_runs_each_mode() {
+        check("opens on mixed, the mode that loses nothing", reset_form(s("abc")), &[], "reset --mixed abc");
+        for (mode, flag) in [("Mixed: keep file changes, unstage them", "--mixed"), ("Soft: keep file changes and staging", "--soft"), ("Keep: reset, but keep local changes", "--keep"), ("Hard: discard all local changes", "--hard")] {
+            check(mode, reset_form(s("abc")), &[("mode", mode)], &format!("reset {flag} abc"));
+        }
+        assert!(reset_form(s("abc")).danger);
+    }
+
+    /// The labels are text for people. Rewording or translating one must not change the command.
+    #[test]
+    fn a_reworded_choice_still_runs_the_same_command() {
+        let relabel = |form: &mut FormDialog, labels: &[&str]| {
+            let Some(Field::Choice { options, .. }) = form.fields.iter_mut().find(|f| matches!(f, Field::Choice { .. })) else { panic!("no choice") };
+            assert_eq!(options.len(), labels.len());
+            *options = sv(labels);
+        };
+        // Every label now reads like some other mode, which would fool a test of the text.
+        let mut f = reset_form(s("abc"));
+        relabel(&mut f, &["Hard: A", "Hard: B", "Soft: C", "Soft: D"]);
+        for (label, flag) in [("Hard: A", "--mixed"), ("Hard: B", "--soft"), ("Soft: C", "--keep"), ("Soft: D", "--hard")] {
+            set(&mut f, "mode", label);
+            assert_eq!(outcome(&submit(&mut f).unwrap()), format!("reset {flag} abc"));
+        }
+        let mut f = merge_form(s("x"));
+        relabel(&mut f, &["squash", "squash no-ff", "no-commit", "Birle\u{15f}tir", "ff-only"]);
+        for (label, flag) in [("squash", ""), ("squash no-ff", "--no-ff "), ("no-commit", "--ff-only "), ("Birle\u{15f}tir", "--squash "), ("ff-only", "--no-commit ")] {
+            set(&mut f, "mode", label);
+            assert_eq!(outcome(&submit(&mut f).unwrap()), format!("merge --no-edit {flag}x"));
+        }
+        let mut f = pull_form();
+        relabel(&mut f, &["Rebase", "Merge", "Fast-forward only", "Repository default"]);
+        for (label, flag) in [("Rebase", ""), ("Merge", " --ff-only"), ("Fast-forward only", " --rebase"), ("Repository default", " --no-rebase")] {
+            set(&mut f, "mode", label);
+            assert_eq!(outcome(&submit(&mut f).unwrap()), format!("pull --progress{flag}"));
+        }
+    }
+
+    #[test]
+    fn rebase_cherry_pick_and_revert_forms() {
+        check("stashes by default", rebase_form(s("main")), &[], "rebase --autostash main");
+        check("nothing ticked", rebase_form(s("main")), &[("autostash", "0")], "rebase main");
+        check("everything ticked", rebase_form(s("main")), &[("merges", "1"), ("update_refs", "1")], "rebase --autostash --rebase-merges --update-refs main");
+        check("pick", cherry_pick_form(sv(&["a", "b"])), &[], "cherry-pick a b");
+        check("pick with -x", cherry_pick_form(sv(&["a"])), &[("x", "1")], "cherry-pick -x a");
+        check("pick without committing", cherry_pick_form(sv(&["a"])), &[("no_commit", "1")], "cherry-pick --no-commit a");
+        check("revert", revert_form(s("abc"), false), &[], "revert --no-edit abc");
+        check("revert a merge", revert_form(s("abc"), true), &[], "revert --no-edit -m 1 abc");
+        check("revert without committing", revert_form(s("abc"), false), &[("no_commit", "1")], "revert --no-edit --no-commit abc");
+    }
+
+    #[test]
+    fn stash_forms() {
+        check("defaults", stash_form(vec![]), &[], "stash push --include-untracked");
+        check("message", stash_form(vec![]), &[("message", " wip now "), ("untracked", "0")], "stash push -m 'wip now'");
+        check("keep index", stash_form(vec![]), &[("keep_index", "1")], "stash push --include-untracked --keep-index");
+        check("staged only leaves untracked out", stash_form(vec![]), &[("staged", "1")], "stash push --staged");
+        check("named files", stash_form(sv(&["a b", "c"])), &[("untracked", "0")], "stash push -- 'a b' c");
+        check("rename", stash_rename(s("stash@{1}"), s("abc"), s("old")), &[("message", "new")], "stash drop stash@{1} && stash store -m new abc");
+        check("to a branch", stash_to_branch(s("stash@{0}")), &[("name", "x")], "stash branch x stash@{0}");
+    }
+
+    #[test]
+    fn worktree_forms() {
+        let d = tempfile::tempdir().unwrap();
+        let git = gitem_core::GitExe::discover(None).unwrap();
+        git.run(Some(d.path()), &["init", "-q"]).unwrap();
+        let repo = Repo::open(git, d.path()).unwrap();
+        check("existing branch", add_worktree(&repo, vec![], Some(s("x"))), &[("path", "/w")], "worktree add /w x");
+        check("new branch", add_worktree(&repo, vec![], Some(s("main"))), &[("path", "/w"), ("new_branch", "n")], "worktree add -b n /w main");
+        check("new branch wins over detach", add_worktree(&repo, vec![], None), &[("path", "/w"), ("new_branch", "n"), ("detach", "1")], "worktree add -b n /w");
+        check("detached", add_worktree(&repo, vec![], Some(s("abc"))), &[("path", "/w"), ("detach", "1")], "worktree add --detach /w abc");
+        let leaf = add_worktree(&repo, vec![], Some(s("feature/x")));
+        let Field::Path { value, .. } = &leaf.fields[2] else { panic!("the third field is the location") };
+        assert!(value.ends_with(".worktrees/feature-x"), "a branch's slash doesn't make a folder: {value}");
+        check("move", move_worktree(s("/a")), &[("to", "/b")], "worktree move /a /b");
+        check("lock", lock_worktree(s("/a")), &[], "worktree lock /a");
+        check("lock with a reason", lock_worktree(s("/a")), &[("reason", "on usb")], "worktree lock --reason 'on usb' /a");
+    }
+
+    #[test]
+    fn remote_forms() {
+        check("add", add_remote(), &[("url", "u")], "remote add -- origin u");
+        let edit = || edit_remote(s("o"), s("u"));
+        check("no change runs nothing", edit(), &[], "");
+        check("url", edit(), &[("url", "v")], "remote set-url -- o v");
+        check("name", edit(), &[("name", "p")], "remote rename o p");
+        // In this order: set-url has to find the remote under its old name.
+        check("both", edit(), &[("name", "p"), ("url", "v")], "remote set-url -- o v ; remote rename o p");
+        check("all remotes", fetch_form(sv(&["origin"]), false), &[], "fetch --progress --all");
+        check("one remote", fetch_form(sv(&["origin"]), false), &[("remote", "origin")], "fetch --progress -- origin");
+        check("prune from settings", fetch_form(vec![], true), &[], "fetch --progress --all --prune");
+        check("tags", fetch_form(vec![], false), &[("tags", "1")], "fetch --progress --all --tags");
+    }
+
+    #[test]
+    fn pull_form_runs_each_mode() {
+        check("default", pull_form(), &[], "pull --progress");
+        check("ff", pull_form(), &[("mode", "Fast-forward only")], "pull --progress --ff-only");
+        check("rebase", pull_form(), &[("mode", "Rebase"), ("autostash", "1")], "pull --progress --rebase --autostash");
+        check("merge", pull_form(), &[("mode", "Merge")], "pull --progress --no-rebase");
+    }
+
+    #[test]
+    fn push_form_options() {
+        let remotes = || sv(&["fork", "origin"]);
+        let main = || Some(s("main"));
+        check("prefers origin", push_form(main(), remotes(), true, true), &[], "push --progress -- origin main");
+        check("publishes a new branch", push_form(main(), remotes(), false, true), &[("remote", "fork")], "push --progress --set-upstream -- fork main");
+        check("lease goes straight through", push_form(main(), remotes(), true, true), &[("lease", "1")], "push --progress --force-with-lease -- origin main");
+        check("force asks", push_form(main(), remotes(), true, true), &[("force", "1")], "ask first: push --progress --force -- origin main");
+        check("force, confirmations off", push_form(main(), remotes(), true, false), &[("force", "1")], "push --progress --force -- origin main");
+        check("tags and no hook", push_form(main(), remotes(), true, true), &[("tags", "1"), ("no_verify", "1")], "push --progress --follow-tags --no-verify -- origin main");
+        let mut both = push_form(main(), remotes(), true, true);
+        set(&mut both, "lease", "1");
+        set(&mut both, "force", "1");
+        assert!(submit(&mut both).is_err(), "force would quietly turn the lease off");
+    }
+
+    #[test]
+    fn clone_and_init_forms() {
+        check("name from the url", clone_form(), &[("url", "https://x.invalid/o/r.git"), ("parent", "/p/")], "clone --progress --recurse-submodules -- https://x.invalid/o/r.git /p/r then open /p/r");
+        check("every option", clone_form(), &[("url", "u"), ("parent", "/p"), ("name", "n"), ("branch", "b"), ("depth", "3"), ("recursive", "0")], "clone --progress --depth=3 --branch b -- u /p/n then open /p/n");
+        let mut bad_depth = clone_form();
+        for (k, input) in [("url", "u"), ("parent", "/p"), ("depth", "lots")] {
+            set(&mut bad_depth, k, input);
+        }
+        assert!(submit(&mut bad_depth).is_err());
+        check("init", init_form(), &[("path", "/p")], "init --initial-branch=main /p then open /p");
+        check("init, git's default branch", init_form(), &[("path", "/p"), ("branch", "")], "init /p then open /p");
+    }
+
+    #[test]
+    fn patch_note_bisect_and_other_forms() {
+        check("submodule", add_submodule(), &[("url", "u"), ("path", "p")], "submodule add -- u p");
+        check("patch, three-way by default", apply_patch_form(), &[("file", "f")], "apply --whitespace=nowarn --3way f");
+        check("patch", apply_patch_form(), &[("file", "f"), ("three", "0")], "apply --whitespace=nowarn f");
+        check("email patch", apply_patch_form(), &[("file", "f"), ("am", "1")], "am --3way f");
+        check("export", format_patch_form(s("a..b")), &[("dir", "/o")], "format-patch -o /o a..b");
+        check("archive, zip by default", archive_form(s("abc")), &[("path", "o.zip")], "archive --format=zip -o o.zip abc");
+        check("archive tar.gz", archive_form(s("abc")), &[("path", "o"), ("format", "tar.gz")], "archive --format=tar.gz -o o abc");
+        check("note", note_form(s("abc"), s("")), &[("note", "hello")], "notes add -f -F - abc <<< hello");
+        check("emptying a note removes it", note_form(s("abc"), s("old")), &[("note", "  ")], "notes remove abc");
+        check("bisect", bisect_start_form(s("bad1"), vec![]), &[("good", "good1")], "bisect start bad1 good1");
+        check("config", raw_config_form("local"), &[("key", "a.b"), ("value", "c d")], "config --local a.b 'c d'");
+        check("global config", raw_config_form("global"), &[("key", "a.b"), ("value", "")], "config --global a.b ''");
+        check("lfs", lfs_track_form(), &[("pattern", "*.psd")], "lfs track *.psd && add .gitattributes");
+    }
+
+    /// Submitting with a required field left empty, or only spaces, runs nothing.
+    #[test]
+    fn required_fields_are_refused() {
+        let cases: Vec<(&str, FormDialog, &str)> = vec![
+            ("new branch", new_branch(None), "name"),
+            ("rename", rename_branch(s("x")), "name"),
+            ("upstream", set_upstream(s("x"), vec![]), "up"),
+            ("move", move_branch(s("x"), vec![]), "to"),
+            ("tag", new_tag(None), "name"),
+            ("stash rename", stash_rename(s("a"), s("b"), s("c")), "message"),
+            ("stash branch", stash_to_branch(s("a")), "name"),
+            ("move worktree", move_worktree(s("a")), "to"),
+            ("remote", add_remote(), "url"),
+            ("clone", clone_form(), "url"),
+            ("init", init_form(), "path"),
+            ("patch", apply_patch_form(), "file"),
+            ("export", format_patch_form(s("r")), "dir"),
+            ("archive", archive_form(s("r")), "path"),
+            ("bisect", bisect_start_form(s("b"), vec![]), "good"),
+            ("config", raw_config_form("local"), "key"),
+            ("lfs", lfs_track_form(), "pattern"),
+        ];
+        for (what, mut form, field) in cases {
+            set(&mut form, field, "   ");
+            assert!(submit(&mut form).is_err(), "{what} ran with nothing in {field}");
+        }
+    }
 }
