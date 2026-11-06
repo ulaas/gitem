@@ -1,0 +1,382 @@
+//! Credential manager: forge tokens, git HTTPS credentials, SSH keys, the askpass
+//! and credential-helper wiring, and commit-signing setup.
+use egui::{RichText, Ui};
+use gitem_core::cred::{self, PREFIX_FORGE, PREFIX_GIT};
+use gitem_core::ops;
+
+use crate::action::{Action, Cx};
+use crate::forms::FormDialog;
+use crate::task::Task;
+use crate::widgets::*;
+
+#[derive(PartialEq, Clone, Copy, Default)]
+enum Page {
+    #[default]
+    Vault,
+    Ssh,
+    Helper,
+    Signing,
+}
+
+#[derive(Default)]
+pub struct CredentialsView {
+    page: Page,
+    entries: Vec<(String, String)>,
+    revealed: Option<(String, String)>,
+    loaded: bool,
+    ssh_keys: Vec<cred::SshKey>,
+    ssh_loaded: bool,
+    agent: Task<String>,
+    test_host: String,
+    test: Task<String>,
+    helper_value: Option<String>,
+    signing: Option<(String, String, String, String)>,
+    signing_gen: u64,
+    signers: Option<String>,
+}
+
+fn add_token_form() -> FormDialog {
+    FormDialog::new("Add API token", "Save")
+        .info("Used for pull requests and issues. Jira and Linear use the hosts \"jira\" and \"linear\".")
+        .text("host", "Host", "github.com")
+        .text("user", "Username (Bitbucket, Azure DevOps)", "")
+        .password("token", "Token")
+        .on_submit(|v| {
+            let h = v.opt("host").ok_or("A host is required.")?;
+            let t = v.opt("token").ok_or("A token is required.")?;
+            cred::set_forge_token(&h, &v.text("user"), &t).map_err(|e| e.to_string())?;
+            Ok(vec![Action::Toast(format!("Saved token for {h}"))])
+        })
+}
+
+fn add_git_cred_form() -> FormDialog {
+    FormDialog::new("Add git credential", "Save")
+        .info("Served to git over HTTPS when gitem is the credential helper.")
+        .text("url", "URL", "https://github.com")
+        .text("user", "Username", "")
+        .password("pass", "Password or token")
+        .on_submit(|v| {
+            let u = v.opt("url").ok_or("A URL is required.")?;
+            let target = format!("{PREFIX_GIT}{}", u.trim_end_matches('/'));
+            cred::store(&target, &v.text("user"), &v.text("pass")).map_err(|e| e.to_string())?;
+            Ok(vec![Action::Toast("Credential saved".into())])
+        })
+}
+
+fn generate_key_form() -> FormDialog {
+    FormDialog::new("Generate SSH key", "Generate")
+        .info("Creates an ed25519 key pair in your .ssh folder.")
+        .text("name", "File name", "id_ed25519")
+        .text("comment", "Comment", "")
+        .hint("you@example.com")
+        .password("pass", "Passphrase (leave blank for none)")
+        .on_submit(|v| {
+            let name = v.opt("name").ok_or("A file name is required.")?;
+            let path = cred::ssh_generate(&name, &v.text("comment"), &v.text("pass")).map_err(|e| e.to_string())?;
+            Ok(vec![Action::Toast(format!("Created {path}"))])
+        })
+}
+
+impl CredentialsView {
+    pub fn key(&self) -> String {
+        "credentials".into()
+    }
+    pub fn title(&self) -> String {
+        "Credentials".into()
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.page, Page::Vault, "Stored secrets");
+            ui.selectable_value(&mut self.page, Page::Ssh, "SSH keys");
+            ui.selectable_value(&mut self.page, Page::Helper, "Git integration");
+            ui.selectable_value(&mut self.page, Page::Signing, "Commit signing");
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().id_salt("creds").auto_shrink([false, false]).show(ui, |ui| match self.page {
+            Page::Vault => self.vault(ui, cx),
+            Page::Ssh => self.ssh(ui, cx),
+            Page::Helper => self.helper(ui, cx),
+            Page::Signing => self.signing(ui, cx),
+        });
+    }
+
+    fn vault(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        if !self.loaded {
+            self.loaded = true;
+            self.entries = cred::list_all();
+        }
+        ui.label(RichText::new(format!("Stored in: {}", cred::backend_name())).small().color(p.faint));
+        ui.horizontal(|ui| {
+            if ui.button("Add API token…").clicked() {
+                cx.form(add_token_form());
+                self.loaded = false;
+            }
+            if ui.button("Add git credential…").clicked() {
+                cx.form(add_git_cred_form());
+                self.loaded = false;
+            }
+            if ui.button("Import from GitHub CLI").on_hover_text("Reads the token from `gh auth token`").clicked() {
+                match import_gh() {
+                    Ok(()) => {
+                        cx.toast("Imported the GitHub CLI token");
+                        self.loaded = false;
+                    }
+                    Err(e) => cx.error(e),
+                }
+            }
+            if ui.button("Refresh").clicked() {
+                self.loaded = false;
+            }
+        });
+        ui.add_space(6.0);
+        let groups: [(&str, &str, &str); 4] = [("API tokens", PREFIX_FORGE, "Tokens for hosts and issue trackers"), ("Git HTTPS credentials", PREFIX_GIT, "Served by gitem's credential helper"), ("AI keys", cred::PREFIX_AI, "Set these in Settings > AI"), ("Git Credential Manager", "git:", "Stored by another helper; shown so you can remove stale entries")];
+        let entries = self.entries.clone();
+        let mut reload = false;
+        for (title, prefix, hint) in groups {
+            let items: Vec<&(String, String)> = entries.iter().filter(|(t, _)| t.starts_with(prefix)).collect();
+            section(ui, &format!("{title} ({})", items.len()), &p);
+            ui.label(RichText::new(hint).small().color(p.faint));
+            for (target, user) in items {
+                ui.horizontal(|ui| {
+                    let name = target.strip_prefix(prefix).unwrap_or(target);
+                    ui.add(egui::Label::new(RichText::new(name).monospace()).truncate());
+                    if !user.is_empty() {
+                        ui.label(RichText::new(user).small().color(p.dim));
+                    }
+                    let is_rev = self.revealed.as_ref().is_some_and(|(t, _)| t == target);
+                    if is_rev {
+                        if let Some((_, s)) = &self.revealed {
+                            ui.label(RichText::new(s).monospace().color(p.warn));
+                            if ui.small_button("Copy").clicked() {
+                                cx.copy(s.clone());
+                            }
+                        }
+                        if ui.small_button("Hide").clicked() {
+                            self.revealed = None;
+                        }
+                    } else if ui.small_button("Reveal").clicked() {
+                        match cred::get(target) {
+                            Ok(Some(c)) => self.revealed = Some((target.clone(), c.secret)),
+                            _ => cx.error("Could not read this secret."),
+                        }
+                    }
+                    if ui.small_button("Delete").clicked() {
+                        if let Err(e) = cred::delete(target) {
+                            cx.error(e.to_string());
+                        }
+                        reload = true;
+                    }
+                });
+            }
+        }
+        if reload {
+            self.loaded = false;
+        }
+    }
+
+    fn ssh(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        self.agent.poll();
+        self.test.poll();
+        if !self.ssh_loaded {
+            self.ssh_loaded = true;
+            self.ssh_keys = cred::list_ssh_keys();
+            self.agent.spawn(ui.ctx(), cred::ssh_agent_list);
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Generate key…").clicked() {
+                cx.form(generate_key_form());
+                self.ssh_loaded = false;
+            }
+            if ui.button("Refresh").clicked() {
+                self.ssh_loaded = false;
+            }
+        });
+        section(ui, &format!("Keys in {}", cred::ssh_dir().display()), &p);
+        if self.ssh_keys.is_empty() {
+            ui.label(RichText::new("No public keys found.").color(p.dim));
+        }
+        for k in self.ssh_keys.clone() {
+            egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&k.name).strong());
+                    chip(ui, &k.kind, p.series[6]);
+                    ui.label(RichText::new(&k.comment).small().color(p.dim));
+                });
+                ui.horizontal(|ui| {
+                    if ui.small_button("Copy public key").clicked() {
+                        cx.copy(k.public.clone());
+                    }
+                    if !k.private_path.is_empty() && ui.small_button("Add to agent").clicked() {
+                        match cred::ssh_agent_add(&k.private_path) {
+                            Ok(m) => {
+                                cx.toast(m.trim().to_string());
+                                self.ssh_loaded = false;
+                            }
+                            Err(e) => cx.error(e.to_string()),
+                        }
+                    }
+                    if ui.small_button("Use for signing").clicked() {
+                        cx.run(ops::config_set("gpg.format", "ssh", "global"));
+                        cx.run(ops::config_set("user.signingkey", &k.public_path.replace('\\', "/"), "global"));
+                    }
+                });
+            });
+            ui.add_space(3.0);
+        }
+        section(ui, "SSH agent", &p);
+        match (&self.agent.value, &self.agent.error) {
+            (_, Some(e)) => {
+                ui.colored_label(p.warn, format!("Agent unavailable: {e}"));
+            }
+            (Some(t), _) => {
+                ui.label(RichText::new(t.trim()).monospace().small());
+            }
+            _ => spinner_row(ui, "Asking the agent…", &p),
+        }
+        section(ui, "Test a connection", &p);
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.test_host).hint_text("github.com").desired_width(220.0));
+            let host = self.test_host.trim().to_string();
+            if ui.add_enabled(!host.is_empty(), egui::Button::new("Test")).clicked() {
+                self.test.spawn(ui.ctx(), move || -> Result<String, String> { Ok(cred::ssh_test(&host)) });
+            }
+            if self.test.busy() {
+                ui.add(egui::Spinner::new().size(14.0));
+            }
+        });
+        if let Some(t) = self.test.get() {
+            ui.label(RichText::new(t.trim()).monospace().small());
+        }
+    }
+
+    fn helper(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        let current = self.helper_value.get_or_insert_with(|| cx.repo.config_get("credential.helper").unwrap_or_default()).clone();
+        section(ui, "Credential helper", &p);
+        ui.label(RichText::new(if current.is_empty() { "No credential helper is configured.".to_string() } else { format!("Current: {current}") }).color(p.dim));
+        if let Some(exe) = cx.repo.git.helper.clone() {
+            let value = cred::helper_config_value(&exe);
+            ui.horizontal(|ui| {
+                if ui.button("Use gitem for this repository").clicked() {
+                    cx.run(ops::config_set("credential.helper", &value, "local"));
+                    self.helper_value = None;
+                }
+                if ui.button("Use gitem for all repositories").clicked() {
+                    cx.confirm("Change global credential helper", "Set gitem as the credential helper for every repository on this machine?", "Set globally", ops::config_set("credential.helper", &value, "global"));
+                    self.helper_value = None;
+                }
+                if ui.button("Stop using it here").clicked() {
+                    cx.run(ops::config_unset("credential.helper", "local"));
+                    self.helper_value = None;
+                }
+            });
+            section(ui, "Git tools", &p);
+            ui.label(RichText::new("Make gitem git's diff tool, merge tool, and rebase editor everywhere, including the command line.").color(p.dim));
+            let h = exe.to_string_lossy().replace('\\', "/");
+            ui.horizontal(|ui| {
+                if ui.button("Register as difftool and mergetool").clicked() {
+                    cx.run(
+                        ops::GitOp::new("Register gitem as difftool and mergetool")
+                            .step(&["config", "--global", "difftool.gitem.cmd", &format!("\"{h}\" --difftool \"$LOCAL\" \"$REMOTE\"")])
+                            .step(&["config", "--global", "diff.tool", "gitem"])
+                            .step(&["config", "--global", "mergetool.gitem.cmd", &format!("\"{h}\" --mergetool \"$BASE\" \"$LOCAL\" \"$REMOTE\" \"$MERGED\"")])
+                            .step(&["config", "--global", "mergetool.gitem.trustExitCode", "true"])
+                            .step(&["config", "--global", "merge.tool", "gitem"]),
+                    );
+                }
+                if ui.button("Register as rebase editor").clicked() {
+                    cx.run(ops::config_set("sequence.editor", &format!("\"{h}\" --rebase-editor"), "global"));
+                }
+            });
+        }
+        section(ui, "Prompts", &p);
+        ui.label(RichText::new("When git asks for a username, password, or SSH passphrase, gitem shows a small dialog. Nothing you type there is stored unless a credential helper saves it.").color(p.dim));
+    }
+
+    fn signing(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        if self.signing_gen != cx.data.status_gen {
+            self.signing_gen = cx.data.status_gen;
+            self.signing = None;
+        }
+        let (fmt, key, sign, tag) = self
+            .signing
+            .get_or_insert_with(|| {
+                let get = |k: &str| cx.repo.config_get(k).unwrap_or_default();
+                (get("gpg.format"), get("user.signingkey"), get("commit.gpgsign"), get("tag.gpgsign"))
+            })
+            .clone();
+        egui::Grid::new("sign-grid").num_columns(2).show(ui, |ui| {
+            ui.label("Format");
+            ui.label(if fmt.is_empty() { "openpgp (default)" } else { &fmt });
+            ui.end_row();
+            ui.label("Signing key");
+            ui.label(if key.is_empty() { "not set" } else { &key });
+            ui.end_row();
+            ui.label("Sign all commits");
+            ui.label(if sign == "true" { "yes" } else { "no" });
+            ui.end_row();
+            ui.label("Sign all tags");
+            ui.label(if tag == "true" { "yes" } else { "no" });
+            ui.end_row();
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button(if sign == "true" { "Stop signing commits" } else { "Sign all commits" }).clicked() {
+                cx.run(ops::config_set("commit.gpgsign", if sign == "true" { "false" } else { "true" }, "global"));
+                self.signing = None;
+            }
+            if ui.button(if tag == "true" { "Stop signing tags" } else { "Sign all tags" }).clicked() {
+                cx.run(ops::config_set("tag.gpgsign", if tag == "true" { "false" } else { "true" }, "global"));
+                self.signing = None;
+            }
+            if ui.button("Set signing key…").clicked() {
+                cx.form(FormDialog::new("Set signing key", "Save").text("key", "GPG key ID, or path to an SSH public key", &key).check("ssh", "It's an SSH key", fmt == "ssh").on_submit(|v| {
+                    let k = v.opt("key").ok_or("A key is required.")?;
+                    Ok(vec![Action::Run(ops::config_set("user.signingkey", &k, "global")), Action::Run(ops::config_set("gpg.format", if v.on("ssh") { "ssh" } else { "openpgp" }, "global"))])
+                }));
+            }
+        });
+        ui.label(RichText::new("Signing status appears on each commit in the Inspect panel.").small().color(p.faint));
+        section(ui, "SSH allowed signers", &p);
+        ui.label(RichText::new("Whose SSH signatures to trust, one per line: email, then the public key.").small().color(p.faint));
+        let configured = cx.repo.config_get("gpg.ssh.allowedSignersFile");
+        let path = configured.clone().map(std::path::PathBuf::from).unwrap_or_else(|| cred::ssh_dir().join("allowed_signers"));
+        let text = self.signers.get_or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
+        ui.add(egui::TextEdit::multiline(text).code_editor().desired_rows(5).desired_width(f32::INFINITY));
+        if ui.button("Save allowed signers").clicked() {
+            match std::fs::write(&path, text.as_bytes()) {
+                Ok(()) => {
+                    if configured.is_none() {
+                        cx.run(ops::config_set("gpg.ssh.allowedSignersFile", &path.to_string_lossy().replace('\\', "/"), "global"));
+                    }
+                    cx.toast("Saved allowed signers");
+                }
+                Err(e) => cx.error(format!("Could not save: {e}")),
+            }
+        }
+    }
+}
+
+fn import_gh() -> Result<(), String> {
+    let mut c = std::process::Command::new("gh");
+    c.args(["auth", "token"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    let o = c.output().map_err(|e| format!("Could not run gh: {e}"))?;
+    if !o.status.success() {
+        return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+    }
+    let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    if t.is_empty() {
+        return Err("GitHub CLI returned no token.".to_string());
+    }
+    cred::set_forge_token("github.com", "", &t).map_err(|e| e.to_string())
+}

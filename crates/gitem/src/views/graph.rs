@@ -1,0 +1,1028 @@
+//! The commit graph: virtualised table with lanes, ref badges, search with
+//! highlighting, branch filters, a minimap, and drag-and-drop between refs.
+use std::collections::{HashMap, HashSet};
+
+use egui::epaint::CubicBezierShape;
+use egui::{Align2, Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
+use gitem_core::graph::{self, GraphRow};
+use gitem_core::model::*;
+use gitem_core::ops;
+use gitem_core::repo::parse_search;
+
+use crate::action::Cx;
+use crate::forms;
+use crate::menus;
+use crate::task::Task;
+use crate::views::Tab;
+use crate::widgets::*;
+
+const ROW_H: f32 = 24.0;
+const LANE_W: f32 = 14.0;
+const WIP: &str = "__WIP__";
+
+struct Graph {
+    commits: Vec<Commit>,
+    rows: Vec<GraphRow>,
+    index: HashMap<String, usize>,
+    max_width: u16,
+}
+
+#[derive(Clone, PartialEq, Default)]
+struct Filters {
+    remotes: bool,
+    tags: bool,
+    stashes: bool,
+    no_merges: bool,
+    first_parent: bool,
+    only_current: bool,
+    hidden: Vec<String>,
+    solo: Option<String>,
+    /// Smart or Favorites preset: show exactly these refs.
+    preset: Option<Vec<String>>,
+}
+
+pub struct GraphView {
+    data: Task<Graph>,
+    loaded_gen: u64,
+    loaded_status_gen: u64,
+    limit: usize,
+    filters: Filters,
+    selected: Vec<String>,
+    last_clicked: Option<usize>,
+    scroll_to: Option<usize>,
+    query: String,
+    matches: Task<HashSet<String>>,
+    match_list: Vec<usize>,
+    match_pos: usize,
+    filter_to_matches: bool,
+    show_author: bool,
+    show_date: bool,
+    show_sha: bool,
+    show_refs: bool,
+    wip: bool,
+    match_all: bool,
+    match_case: bool,
+    regex: bool,
+    focus_search: bool,
+    finder: Option<String>,
+    stats: Task<HashMap<String, (u32, u32)>>,
+    stats_gen: Option<u64>,
+    /// Filters changed from outside the toolbar.
+    pending_reload: bool,
+    /// Lanes drawn narrow, by column.
+    folded: HashSet<u16>,
+    fold_request: std::cell::Cell<Option<Option<u16>>>,
+    minimap_lines: bool,
+    show_minimap: bool,
+    columns: Vec<String>,
+    layout_applied: bool,
+    worktree_counts: Task<HashMap<String, usize>>,
+    counts_gen: Option<u64>,
+}
+
+const DEFAULT_COLUMNS: [&str; 6] = ["refs", "graph", "message", "author", "date", "sha"];
+const FOLDED_W: f32 = 3.0;
+
+impl Default for GraphView {
+    fn default() -> Self {
+        Self {
+            data: Task::default(),
+            loaded_gen: u64::MAX,
+            loaded_status_gen: u64::MAX,
+            limit: 0,
+            filters: Filters { remotes: true, tags: true, stashes: true, ..Default::default() },
+            selected: Vec::new(),
+            last_clicked: None,
+            scroll_to: None,
+            query: String::new(),
+            matches: Task::default(),
+            match_list: Vec::new(),
+            match_pos: 0,
+            filter_to_matches: false,
+            show_author: true,
+            show_date: true,
+            show_sha: true,
+            show_refs: true,
+            wip: false,
+            match_all: false,
+            match_case: false,
+            regex: true,
+            focus_search: false,
+            finder: None,
+            stats: Task::default(),
+            stats_gen: None,
+            pending_reload: false,
+            folded: HashSet::new(),
+            fold_request: std::cell::Cell::new(None),
+            minimap_lines: false,
+            show_minimap: true,
+            columns: DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect(),
+            layout_applied: false,
+            worktree_counts: Task::default(),
+            counts_gen: None,
+        }
+    }
+}
+
+fn build_query(f: &Filters, limit: usize, stash_shas: &[String], cur: Option<&str>) -> LogQuery {
+    let mut q = LogQuery { limit, exclude_stash: true, no_merges: f.no_merges, first_parent: f.first_parent, ..Default::default() };
+    if let Some(s) = &f.solo {
+        q.revs.push(s.clone());
+        return q;
+    }
+    if let Some(p) = &f.preset {
+        q.revs = p.clone();
+        return q;
+    }
+    if f.only_current {
+        q.revs.push("HEAD".into());
+        if let Some(c) = cur {
+            q.revs.push(format!("{c}@{{upstream}}"));
+        }
+        return q;
+    }
+    if !f.remotes {
+        q.excludes.push("refs/remotes/*".into());
+    }
+    if !f.tags {
+        q.excludes.push("refs/tags/*".into());
+    }
+    for h in &f.hidden {
+        q.excludes.push(format!("refs/heads/{h}"));
+        q.excludes.push(format!("refs/remotes/{h}"));
+    }
+    q.all = true;
+    if f.stashes {
+        q.revs.extend(stash_shas.iter().cloned());
+    }
+    q
+}
+
+impl GraphView {
+    pub fn key(&self) -> String {
+        "graph".into()
+    }
+    pub fn title(&self) -> String {
+        "Commit Graph".into()
+    }
+
+    /// Show only this ref.
+    pub fn focus_ref(&mut self, name: &str) {
+        self.filters.solo = Some(name.to_string());
+        self.filters.preset = None;
+        self.pending_reload = true;
+    }
+
+    pub fn hide_ref(&mut self, name: &str) {
+        if !self.filters.hidden.iter().any(|h| h == name) {
+            self.filters.hidden.push(name.to_string());
+        }
+        self.pending_reload = true;
+    }
+
+    /// Commits currently laid out.
+    pub fn loaded_commits(&self) -> usize {
+        self.data.get().map_or(0, |g| g.commits.len())
+    }
+
+    fn reload(&mut self, ctx: &egui::Context, cx: &Cx) {
+        if self.limit == 0 {
+            self.limit = cx.settings.graph_page_size.max(100);
+        }
+        let repo = cx.repo.clone();
+        let stash_shas: Vec<String> = cx.data.stashes().iter().map(|s| s.sha.clone()).collect();
+        let f = self.filters.clone();
+        let limit = self.limit;
+        let head = cx.status().map(|s| s.head_sha.clone()).unwrap_or_default();
+        let branch = cx.current_branch();
+        let dirty = cx.status().is_some_and(|s| !s.entries.is_empty());
+        self.wip = dirty;
+        self.data.spawn(ctx, move || -> Result<Graph, String> {
+            let mut q = build_query(&f, limit, &stash_shas, branch.as_deref());
+            let mut commits = match repo.log(&q) {
+                Ok(c) => c,
+                // A branch with no upstream makes the `@{upstream}` rev invalid.
+                Err(_) if f.only_current => {
+                    q.revs.truncate(1);
+                    repo.log(&q).map_err(|e| e.to_string())?
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+            commits = graph::hide_stash_internals(commits, &stash_shas);
+            for c in &mut commits {
+                if stash_shas.contains(&c.sha) && !c.refs.iter().any(|r| r.kind == RefKind::Stash) {
+                    c.refs.push(RefLabel { kind: RefKind::Stash, name: "stash".into(), current: false });
+                }
+            }
+            if dirty && !head.is_empty() {
+                commits.insert(0, Commit { sha: WIP.into(), parents: vec![head], subject: "Work in progress".into(), ..Default::default() });
+            }
+            let rows = graph::layout(&commits);
+            let max_width = rows.iter().map(|r| r.width).max().unwrap_or(1);
+            let index = commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect();
+            Ok(Graph { commits, rows, index, max_width })
+        });
+    }
+
+    fn run_search(&mut self, ctx: &egui::Context, cx: &Cx) {
+        let q = self.query.trim().to_string();
+        if q.is_empty() {
+            self.matches = Task::default();
+            self.match_list.clear();
+            return;
+        }
+        let repo = cx.repo.clone();
+        let opts = (self.match_all, self.match_case, self.regex);
+        self.matches.spawn(ctx, move || -> Result<HashSet<String>, String> {
+            let mut lq = parse_search(&q);
+            lq.limit = 5000;
+            lq.all_match = opts.0;
+            lq.regex_ignore_case = !opts.1;
+            lq.fixed_strings = !opts.2;
+            Ok(repo.log(&lq).map_err(|e| e.to_string())?.into_iter().map(|c| c.sha).collect())
+        });
+    }
+
+    fn toolbar(&mut self, ui: &mut Ui, cx: &mut Cx) -> bool {
+        let p = cx.pal.clone();
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search: message, @me, @:author, committer:, file:, change:, #:sha").desired_width(280.0));
+            if std::mem::take(&mut self.focus_search) {
+                r.request_focus();
+            }
+            if toggle(ui, &mut self.match_all, "All", "Match all terms") | toggle(ui, &mut self.match_case, "Aa", "Match case") | toggle(ui, &mut self.regex, ".*", "Regular expression") {
+                self.run_search(ui.ctx(), cx);
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.run_search(ui.ctx(), cx);
+            }
+            if self.matches.busy() {
+                ui.add(egui::Spinner::new().size(14.0));
+            }
+            if !self.match_list.is_empty() || self.matches.get().is_some() {
+                ui.label(RichText::new(format!("{} of {}", if self.match_list.is_empty() { 0 } else { self.match_pos + 1 }, self.match_list.len())).color(p.dim));
+                if ui.small_button("▲").on_hover_text("Previous match").clicked() && !self.match_list.is_empty() {
+                    self.match_pos = (self.match_pos + self.match_list.len() - 1) % self.match_list.len();
+                    self.scroll_to = Some(self.match_list[self.match_pos]);
+                }
+                if ui.small_button("▼").on_hover_text("Next match").clicked() && !self.match_list.is_empty() {
+                    self.match_pos = (self.match_pos + 1) % self.match_list.len();
+                    self.scroll_to = Some(self.match_list[self.match_pos]);
+                }
+                toggle(ui, &mut self.filter_to_matches, "Only matches", "Hide commits that don't match");
+                if ui.small_button("✖").on_hover_text("Clear search").clicked() {
+                    self.query.clear();
+                    self.matches = Task::default();
+                    self.match_list.clear();
+                    self.filter_to_matches = false;
+                }
+            }
+            ui.separator();
+            let f = &mut self.filters;
+            changed |= toggle(ui, &mut f.only_current, "Current", "Only the current branch and its upstream");
+            let mut smart = f.preset.is_some();
+            if toggle(ui, &mut smart, "Smart", "Current branch, its upstream, the default branch, and favorites") {
+                f.preset = smart.then(|| {
+                    let mut v = vec!["HEAD".to_string()];
+                    if let Some(u) = cx.status().and_then(|s| s.upstream.clone()) {
+                        v.push(u);
+                    }
+                    let base = cx.data.base_branch();
+                    if cx.data.branches().iter().any(|b| b.name == base) {
+                        v.push(base);
+                    }
+                    v.extend(cx.settings.favorite_branches.iter().cloned());
+                    v
+                });
+                changed = true;
+            }
+            changed |= toggle(ui, &mut f.remotes, "Remotes", "Show remote branches");
+            changed |= toggle(ui, &mut f.tags, "Tags", "Show tags");
+            changed |= toggle(ui, &mut f.stashes, "Stashes", "Show stashes");
+            changed |= toggle(ui, &mut f.no_merges, "No merges", "Hide merge commits");
+            changed |= toggle(ui, &mut f.first_parent, "First parent", "Follow only first parents");
+            ui.menu_button("Branches ▾", |ui| {
+                ui.set_max_height(400.0);
+                if ui.button("Show all").clicked() {
+                    f.hidden.clear();
+                    f.solo = None;
+                    f.preset = None;
+                    changed = true;
+                }
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for b in cx.data.branches() {
+                        ui.horizontal(|ui| {
+                            let mut vis = !f.hidden.contains(&b.name);
+                            if ui.checkbox(&mut vis, b.name.as_str()).changed() {
+                                if vis {
+                                    f.hidden.retain(|h| *h != b.name);
+                                } else {
+                                    f.hidden.push(b.name.clone());
+                                }
+                                f.solo = None;
+                                changed = true;
+                            }
+                            if ui.small_button("solo").on_hover_text("Show only this branch").clicked() {
+                                f.solo = Some(b.name.clone());
+                                changed = true;
+                            }
+                        });
+                    }
+                });
+            });
+            if self.filters.solo.is_some() {
+                let s = self.filters.solo.clone().unwrap_or_default();
+                chip(ui, &format!("only {s}"), p.accent);
+            }
+            ui.menu_button("Columns ▾", |ui| {
+                ui.checkbox(&mut self.show_refs, "Branch / tag");
+                ui.checkbox(&mut self.show_author, "Author");
+                ui.checkbox(&mut self.show_date, "Date");
+                ui.checkbox(&mut self.show_sha, "SHA");
+                let mut changes = cx.settings.graph_changes_column;
+                if ui.checkbox(&mut changes, "Changes").changed() {
+                    cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.graph_changes_column = changes)));
+                }
+                ui.separator();
+                ui.label("Order");
+                for i in 0..self.columns.len() {
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).clicked() {
+                            self.columns.swap(i, i - 1);
+                        }
+                        if ui.add_enabled(i + 1 < self.columns.len(), egui::Button::new("▼").small()).clicked() {
+                            self.columns.swap(i, i + 1);
+                        }
+                        ui.label(self.columns[i].as_str());
+                    });
+                }
+                ui.separator();
+                if ui.button("Save as default layout").clicked() {
+                    let hidden: Vec<String> = [("refs", self.show_refs), ("author", self.show_author), ("date", self.show_date), ("sha", self.show_sha)].iter().filter(|x| !x.1).map(|x| x.0.to_string()).collect();
+                    let l = gitem_core::settings::GraphLayout { columns: self.columns.clone(), hidden };
+                    cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.graph_layout = Some(l))));
+                    ui.close();
+                }
+                if ui.button("Apply saved layout").clicked() {
+                    self.layout_applied = false;
+                    ui.close();
+                }
+                if ui.button("Reset layout").clicked() {
+                    self.columns = DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect();
+                    (self.show_refs, self.show_author, self.show_date, self.show_sha) = (true, true, true, true);
+                    ui.close();
+                }
+                ui.separator();
+                ui.checkbox(&mut self.show_minimap, "Minimap");
+                ui.checkbox(&mut self.minimap_lines, "Minimap shows lines changed");
+                if !self.folded.is_empty() && ui.button("Unfold all lanes").clicked() {
+                    self.folded.clear();
+                    ui.close();
+                }
+                let mut dim = cx.settings.graph_dim_merges;
+                if ui.checkbox(&mut dim, "Dim merge commits").changed() {
+                    cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.graph_dim_merges = dim)));
+                }
+            });
+            if ui.small_button("HEAD").on_hover_text("Jump to the current commit").clicked() {
+                self.jump_to_ref("HEAD", cx);
+            }
+            if let Some(u) = cx.status().and_then(|s| s.upstream.clone())
+                && ui.small_button("Upstream").on_hover_text(format!("Jump to {u}")).clicked() {
+                    self.jump_to_ref(&u, cx);
+                }
+            if ui.small_button("Find ref").on_hover_text("Find a branch, tag, or worktree (/)").clicked() {
+                self.finder = Some(String::new());
+            }
+            if self.data.busy() {
+                ui.add(egui::Spinner::new().size(14.0));
+            }
+        });
+        changed
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let ctx = ui.ctx().clone();
+        if self.data.poll() {
+            self.recompute_matches();
+        }
+        if self.matches.poll() {
+            self.recompute_matches();
+            self.match_pos = 0;
+            self.scroll_to = self.match_list.first().copied();
+        }
+        // The WIP row only depends on dirtiness, so plain status churn doesn't reload.
+        let dirty = cx.status().is_some_and(|s| !s.entries.is_empty());
+        let status_changed = self.loaded_status_gen != cx.data.status_gen && (dirty != self.wip);
+        if self.loaded_gen != cx.data.refs_gen || status_changed {
+            self.loaded_gen = cx.data.refs_gen;
+            self.loaded_status_gen = cx.data.status_gen;
+            self.reload(&ctx, cx);
+        }
+
+        if !self.layout_applied {
+            self.layout_applied = true;
+            if let Some(l) = &cx.settings.graph_layout {
+                self.columns = l.columns.clone();
+                self.show_refs = !l.hidden.iter().any(|h| h == "refs");
+                self.show_author = !l.hidden.iter().any(|h| h == "author");
+                self.show_date = !l.hidden.iter().any(|h| h == "date");
+                self.show_sha = !l.hidden.iter().any(|h| h == "sha");
+            }
+        }
+        match self.fold_request.take() {
+            Some(Some(c)) => {
+                if !self.folded.remove(&c) {
+                    self.folded.insert(c);
+                }
+            }
+            Some(None) => self.folded.clear(),
+            None => {}
+        }
+        let changed = self.toolbar(ui, cx);
+        self.worktree_pills(ui, cx);
+        if changed || std::mem::take(&mut self.pending_reload) {
+            self.reload(&ctx, cx);
+        }
+        self.keys(ui, cx);
+        self.ref_finder(ui, cx);
+        self.stats.poll();
+        if (cx.settings.graph_changes_column || self.minimap_lines) && self.stats_gen != Some(cx.data.refs_gen) {
+            self.stats_gen = Some(cx.data.refs_gen);
+            let (r, limit) = (cx.repo.clone(), self.limit.max(1));
+            self.stats.spawn(&ctx, move || r.commit_stats(&[], true, limit));
+        }
+        ui.add_space(2.0);
+
+        if let Some(e) = &self.data.error {
+            error_box(ui, e, cx.pal);
+        }
+        let Some(g) = self.data.value.take() else {
+            spinner_row(ui, "Loading commits…", cx.pal);
+            return;
+        };
+        self.table(ui, cx, &g);
+        self.data.value = Some(g);
+    }
+
+    /// One pill per other worktree, with its uncommitted-change count.
+    fn worktree_pills(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let trees = cx.data.worktrees().to_vec();
+        if trees.len() < 2 {
+            return;
+        }
+        self.worktree_counts.poll();
+        if self.counts_gen != Some(cx.data.status_gen) && !self.worktree_counts.busy() {
+            self.counts_gen = Some(cx.data.status_gen);
+            let git = cx.repo.git.clone();
+            let paths: Vec<String> = trees.iter().filter(|w| !w.bare && w.prunable.is_none()).map(|w| w.path.clone()).collect();
+            self.worktree_counts.spawn(ui.ctx(), move || -> Result<HashMap<String, usize>, String> {
+                Ok(paths.into_iter().filter_map(|p| gitem_core::Repo::open(git.clone(), std::path::Path::new(&p)).and_then(|r| r.status()).ok().map(|s| (p, s.entries.len()))).collect())
+            });
+        }
+        let mut focus = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Worktrees").small().color(cx.pal.faint));
+            for w in &trees {
+                let name = w.branch.clone().unwrap_or_else(|| "detached".to_string());
+                let n = self.worktree_counts.get().and_then(|m| m.get(&w.path)).copied().unwrap_or(0);
+                let text = if n > 0 { format!("{name} ({n})") } else { name.clone() };
+                if ui.selectable_label(w.is_current, RichText::new(text).small()).on_hover_text(format!("{}\nClick to focus the graph on it", w.path)).clicked() {
+                    focus = Some(name);
+                }
+            }
+        });
+        if let Some(n) = focus {
+            self.focus_ref(&n);
+        }
+    }
+
+    fn jump_to_ref(&mut self, name: &str, cx: &mut Cx) {
+        let Ok(sha) = cx.repo.resolve(name) else { return };
+        match self.data.get().and_then(|g| g.index.get(&sha).copied()) {
+            Some(i) => {
+                self.scroll_to = Some(i);
+                self.selected = vec![sha.clone()];
+                self.last_clicked = Some(i);
+                cx.inspect(&sha);
+            }
+            None => cx.toast(format!("{name} isn't among the commits showing. A filter may be hiding it.")),
+        }
+    }
+
+    fn keys(&mut self, ui: &Ui, cx: &mut Cx) {
+        let typing = ui.ctx().memory(|m| m.focused().is_some());
+        let (find, slash, next, prev) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::F), i.key_pressed(egui::Key::Slash), i.key_pressed(egui::Key::F3) && !i.modifiers.shift, i.key_pressed(egui::Key::F3) && i.modifiers.shift));
+        if find {
+            self.focus_search = true;
+        }
+        if slash && !typing {
+            self.finder = Some(String::new());
+        }
+        if (next || prev) && !self.match_list.is_empty() {
+            let n = self.match_list.len();
+            self.match_pos = if next { (self.match_pos + 1) % n } else { (self.match_pos + n - 1) % n };
+            self.scroll_to = Some(self.match_list[self.match_pos]);
+        }
+        let _ = cx;
+    }
+
+    fn ref_finder(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let Some(mut q) = self.finder.take() else { return };
+        let mut close = false;
+        let mut pick = None;
+        egui::Frame::new().fill(cx.pal.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+            let r = ui.add(egui::TextEdit::singleline(&mut q).hint_text("Jump to a branch, tag, or worktree").desired_width(f32::INFINITY));
+            r.request_focus();
+            let mut names = cx.data.ref_names();
+            names.extend(cx.data.worktrees().iter().filter_map(|w| w.branch.clone()));
+            names.dedup();
+            let mut scored: Vec<(i32, String)> = names.into_iter().filter_map(|n| gitem_core::util::fuzzy_score(&q, &n).map(|s| (s, n))).collect();
+            scored.sort_by_key(|x| std::cmp::Reverse(x.0));
+            for (i, (_, n)) in scored.iter().take(8).enumerate() {
+                if ui.selectable_label(i == 0, n.as_str()).clicked() {
+                    pick = Some(n.clone());
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                pick = scored.first().map(|x| x.1.clone());
+            }
+            close = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        });
+        if let Some(n) = pick {
+            self.jump_to_ref(&n, cx);
+            close = true;
+        }
+        if !close {
+            self.finder = Some(q);
+        }
+    }
+
+    fn recompute_matches(&mut self) {
+        let (Some(g), Some(m)) = (self.data.get(), self.matches.get()) else {
+            self.match_list.clear();
+            return;
+        };
+        self.match_list = g.commits.iter().enumerate().filter(|(_, c)| m.contains(&c.sha)).map(|(i, _)| i).collect();
+        if self.match_pos >= self.match_list.len() {
+            self.match_pos = 0;
+        }
+    }
+
+    fn table(&mut self, ui: &mut Ui, cx: &mut Cx, g: &Graph) {
+        let p = cx.pal.clone();
+        let total_w = ui.available_width();
+        let minimap_w = if self.show_minimap { 14.0 } else { 0.0 };
+        let w = total_w - minimap_w;
+        let refs_w = if self.show_refs { 190.0 } else { 0.0 };
+        // Folded lanes stay visible as thin lines, so history remains connected.
+        let mut lane_offsets: Vec<f32> = Vec::with_capacity(g.max_width as usize + 1);
+        let mut lane_acc = 10.0;
+        for c in 0..=g.max_width {
+            lane_offsets.push(lane_acc);
+            lane_acc += if self.folded.contains(&c) { FOLDED_W } else { LANE_W };
+        }
+        let graph_w = lane_acc.clamp(60.0, 260.0);
+        let show_changes = cx.settings.graph_changes_column;
+        let changes_w = if show_changes { 90.0 } else { 0.0 };
+        let author_w = if self.show_author { 130.0 } else { 0.0 } + changes_w;
+        let date_w = if self.show_date { 100.0 } else { 0.0 };
+        let sha_w = if self.show_sha { 66.0 } else { 0.0 };
+        let msg_w = (w - refs_w - graph_w - author_w - date_w - sha_w).max(120.0);
+        let (mut x_refs, mut x_graph, mut x_msg, mut x_author, mut x_date, mut x_sha) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut x_acc = 0.0;
+        for col in &self.columns {
+            match col.as_str() {
+                "refs" => {
+                    x_refs = x_acc;
+                    x_acc += refs_w;
+                }
+                "graph" => {
+                    x_graph = x_acc;
+                    x_acc += graph_w;
+                }
+                "message" => {
+                    x_msg = x_acc;
+                    x_acc += msg_w;
+                }
+                "author" => {
+                    x_author = x_acc;
+                    x_acc += author_w;
+                }
+                "date" => {
+                    x_date = x_acc;
+                    x_acc += date_w;
+                }
+                "sha" => {
+                    x_sha = x_acc;
+                    x_acc += sha_w;
+                }
+                _ => {}
+            }
+        }
+
+        // Header
+        let (hdr, _) = ui.allocate_exact_size(vec2(total_w, 20.0), Sense::hover());
+        ui.painter().rect_filled(hdr, 0.0, p.panel2);
+        let htext = |ui: &Ui, x: f32, t: &str| {
+            ui.painter().text(pos2(hdr.left() + x + 6.0, hdr.center().y), Align2::LEFT_CENTER, t, prop(11.0), p.dim);
+        };
+        if self.show_refs {
+            htext(ui, x_refs, "BRANCH / TAG");
+        }
+        htext(ui, x_graph, "GRAPH");
+        htext(ui, x_msg, "COMMIT MESSAGE");
+        if self.show_author {
+            htext(ui, x_author, if show_changes { "CHANGES" } else { "AUTHOR" });
+        }
+        if self.show_date {
+            htext(ui, x_date, "DATE");
+        }
+        if self.show_sha {
+            htext(ui, x_sha, "SHA");
+        }
+
+        // Row order: all commits, or only matches when filtering.
+        let visible: Vec<usize> = if self.filter_to_matches && self.matches.get().is_some() { self.match_list.clone() } else { (0..g.commits.len()).collect() };
+        let match_set: Option<&HashSet<String>> = self.matches.get();
+
+        let area_h = ui.available_height();
+        let area_top = ui.cursor().top();
+        let mut sa = egui::ScrollArea::vertical().id_salt("graph-rows").auto_shrink([false, false]).max_width(total_w - minimap_w);
+        if let Some(target) = self.scroll_to.take() {
+            let pos = visible.iter().position(|&v| v == target).unwrap_or(0);
+            sa = sa.vertical_scroll_offset(((pos as f32) * (ROW_H + ui.spacing().item_spacing.y) - area_h / 3.0).max(0.0));
+        }
+        let mut clicked_row: Option<(usize, egui::Modifiers)> = None;
+        let mut scroll_y = 0.0;
+
+        let out = ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            sa.show_rows(ui, ROW_H, visible.len(), |ui, range| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for vi in range {
+                    let i = visible[vi];
+                    let c = &g.commits[i];
+                    let r = &g.rows[i];
+                    let is_wip = c.sha == WIP;
+                    let selected = self.selected.contains(&c.sha);
+                    let (rect, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, c.subject.as_str()));
+                    let hovered = resp.hovered();
+                    let is_match = match_set.is_some_and(|m| m.contains(&c.sha));
+                    let bg = if selected {
+                        p.selection
+                    } else if is_match {
+                        p.warn.gamma_multiply(0.16)
+                    } else if hovered {
+                        p.hover
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    if bg != Color32::TRANSPARENT {
+                        ui.painter().rect_filled(rect, 0.0, bg);
+                    }
+
+                    let lane_x = |col: u16| rect.left() + x_graph + lane_offsets[(col as usize).min(lane_offsets.len() - 1)];
+                    let graph_clip = Rect::from_min_size(pos2(rect.left() + x_graph, rect.top()), vec2(graph_w, ROW_H));
+                    let painter = ui.painter().with_clip_rect(graph_clip.intersect(ui.clip_rect()));
+                    let (top, mid, bot) = (rect.top(), rect.center().y, rect.bottom());
+                    let draw = |from: Pos2, to: Pos2, color: Color32| {
+                        let s = Stroke::new(1.6, color);
+                        if (from.x - to.x).abs() < 0.5 {
+                            painter.line_segment([from, to], s);
+                        } else {
+                            let dy = (to.y - from.y) * 0.5;
+                            let b = CubicBezierShape::from_points_stroke([from, pos2(from.x, from.y + dy), pos2(to.x, to.y - dy), to], false, Color32::TRANSPARENT, s);
+                            painter.add(Shape::CubicBezier(b));
+                        }
+                    };
+                    for e in &r.top {
+                        draw(pos2(lane_x(e.from), top), pos2(lane_x(e.to), mid), p.lane(e.color));
+                    }
+                    for e in &r.bottom {
+                        draw(pos2(lane_x(e.from), mid), pos2(lane_x(e.to), bot), p.lane(e.color));
+                    }
+                    let node = pos2(lane_x(r.column), mid);
+                    let node_color = p.lane(r.color);
+                    if is_wip {
+                        painter.circle(node, 5.0, p.bg, Stroke::new(1.5, p.warn));
+                    } else if c.is_merge() {
+                        painter.circle_filled(node, 3.5, node_color);
+                    } else {
+                        let is_head = c.refs.iter().any(|x| x.current);
+                        painter.circle(node, 5.0, node_color, Stroke::new(if is_head { 2.0 } else { 1.0 }, if is_head { p.text } else { p.bg }));
+                    }
+
+                    // Ref badges, draggable onto other rows.
+                    if self.show_refs && !c.refs.is_empty() {
+                        let clip = Rect::from_min_size(pos2(rect.left() + x_refs, rect.top()), vec2(refs_w - 4.0, ROW_H));
+                        let mut x = clip.left() + 4.0;
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(clip));
+                        child.set_clip_rect(clip.intersect(ui.clip_rect()));
+                        for lab in &c.refs {
+                            if x > clip.right() - 20.0 {
+                                break;
+                            }
+                            let br = paint_badge(&child, pos2(x, rect.top() + 3.0), ROW_H - 6.0, lab, &p);
+                            let id = ui.id().with(("badge", i, &lab.name));
+                            let bresp = ui.interact(br.intersect(clip), id, Sense::drag());
+                            if lab.kind != RefKind::Stash {
+                                bresp.dnd_set_drag_payload(lab.name.clone());
+                            }
+                            if bresp.dragged() {
+                                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), id.with("drag"), egui::PopupAnchor::Pointer).show(|ui| {
+                                    ui.label(format!("Drop {} on a commit to merge or rebase", lab.name));
+                                });
+                            }
+                            x = br.right() + 3.0;
+                        }
+                        let hidden = c.refs.iter().fold(clip.left() + 4.0, |acc, l| acc + badge_width(ui, l) + 3.0) > clip.right();
+                        if hidden {
+                            resp.clone().on_hover_ui(|ui| {
+                                for l in &c.refs {
+                                    ui.label(l.name.as_str());
+                                }
+                            });
+                        }
+                    }
+
+                    let text_col = if is_wip {
+                        p.warn
+                    } else if c.is_merge() {
+                        if cx.settings.graph_dim_merges { p.faint } else { p.dim }
+                    } else {
+                        p.text
+                    };
+                    if let Some((a, d)) = show_changes.then(|| self.stats.get().and_then(|s| s.get(&c.sha).copied())).flatten() {
+                        let cr = Rect::from_min_size(pos2(rect.left() + x_author + 6.0, rect.top()), vec2(changes_w - 8.0, ROW_H));
+                        paint_text(ui, cr, &format!("+{a}"), mono(11.0), p.add_fg);
+                        paint_text(ui, Rect::from_min_size(cr.min + vec2(42.0, 0.0), vec2(40.0, ROW_H)), &format!("-{d}"), mono(11.0), p.del_fg);
+                    }
+                    let mr = Rect::from_min_size(pos2(rect.left() + x_msg + 6.0, rect.top()), vec2(msg_w - 10.0, ROW_H));
+                    paint_text(ui, mr, &c.subject, prop(13.0), text_col);
+                    if !is_wip {
+                        if self.show_author {
+                            let cy = rect.center().y;
+                            paint_avatar(ui, pos2(rect.left() + x_author + changes_w + 15.0, cy), 8.0, &c.author_name, &c.author_email, &p, cx.settings.gravatar);
+                            paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_author + changes_w + 27.0, rect.top()), vec2(author_w - changes_w - 30.0, ROW_H)), &c.author_name, prop(12.0), p.dim);
+                        }
+                        if self.show_date {
+                            let t = time_label(c.commit_time, cx.settings.date_relative);
+                            paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_date + 6.0, rect.top()), vec2(date_w - 8.0, ROW_H)), &t, prop(12.0), p.dim);
+                        }
+                        if self.show_sha {
+                            paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_sha + 6.0, rect.top()), vec2(sha_w - 8.0, ROW_H)), c.short(), mono(11.5), p.faint);
+                        }
+                    } else if let Some(s) = cx.status() {
+                        paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_author + 6.0, rect.top()), vec2(author_w - 8.0, ROW_H)), &format!("{} file(s)", s.entries.len()), prop(12.0), p.dim);
+                    }
+
+                    if resp.clicked() {
+                        clicked_row = Some((i, ui.input(|x| x.modifiers)));
+                    }
+                    if resp.double_clicked() && !is_wip {
+                        cx.diff(gitem_core::repo::DiffSource::Commit(c.sha.clone()), None);
+                    }
+                    if !is_wip {
+                        let resp = resp.on_hover_ui(|ui| {
+                            commit_card(ui, &c.sha, &c.author_name, &c.author_email, c.author_time, &c.subject, &p, cx.settings.gravatar);
+                        });
+                        resp.context_menu(|ui| {
+                            let folded = self.folded.contains(&r.column);
+                            if ui.button(if folded { "Unfold this lane" } else { "Fold this lane" }).clicked() {
+                                self.fold_request.set(Some(Some(r.column)));
+                                ui.close();
+                            }
+                            if !self.folded.is_empty() && ui.button("Unfold all lanes").clicked() {
+                                self.fold_request.set(Some(None));
+                                ui.close();
+                            }
+                            ui.separator();
+                            self.row_menu(ui, cx, c, g);
+                        });
+                        // Drop a dragged ref on this commit.
+                        if let Some(name) = resp.dnd_release_payload::<String>() {
+                            drop_ref(cx, &name, c);
+                        } else if resp.dnd_hover_payload::<String>().is_some() {
+                            ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.5, p.accent), egui::StrokeKind::Inside);
+                        }
+                    } else {
+                        resp.context_menu(|ui| {
+                            if ui.button("Open Changes").clicked() {
+                                cx.open(Tab::changes());
+                                ui.close();
+                            }
+                            if ui.button("Stash…").clicked() {
+                                cx.form(forms::stash_form(Vec::new()));
+                                ui.close();
+                            }
+                        });
+                    }
+                }
+            })
+        });
+        scroll_y += out.inner.state.offset.y;
+        let content_h = visible.len() as f32 * ROW_H;
+
+        if let Some((i, mods)) = clicked_row {
+            self.on_click(i, mods, g, cx);
+        }
+        self.keyboard(ui, g, cx, &visible);
+
+        // Minimap: commit density over the loaded history, with markers.
+        let map = Rect::from_min_size(pos2(hdr.right() - minimap_w, area_top), vec2(minimap_w, area_h));
+        if self.show_minimap {
+            self.minimap(ui, map, &visible, g, content_h, scroll_y, area_h, cx);
+        }
+
+        // Load-more affordance.
+        if g.commits.len() >= self.limit && !self.data.busy() && scroll_y + area_h + 200.0 >= content_h {
+            self.limit += cx.settings.graph_page_size.max(100);
+            self.reload(&ui.ctx().clone(), cx);
+        }
+    }
+
+    fn row_menu(&self, ui: &mut Ui, cx: &mut Cx, c: &Commit, g: &Graph) {
+        if self.selected.len() == 2 && self.selected.contains(&c.sha) {
+            if ui.button("Compare the two selected commits").clicked() {
+                cx.open(Tab::compare(&self.selected[1], &self.selected[0]));
+                ui.close();
+            }
+            ui.separator();
+        }
+        if self.selected.len() > 1 && self.selected.contains(&c.sha) && ui.button(format!("Cherry-pick {} selected commits…", self.selected.len())).clicked() {
+            // Oldest first, so picks apply in history order.
+            let mut shas = self.selected.clone();
+            shas.sort_by_key(|s| std::cmp::Reverse(g.index.get(s).copied().unwrap_or(0)));
+            cx.form(forms::cherry_pick_form(shas));
+            ui.close();
+        }
+        // Branch-specific commands for refs on this commit.
+        for r in c.refs.iter().filter(|r| matches!(r.kind, RefKind::Branch | RefKind::Remote)) {
+            if let Some(b) = cx.data.branches().iter().find(|b| b.name == r.name).cloned() {
+                ui.menu_button(format!("Branch {}", r.name), |ui| menus::branch_menu(ui, cx, &b));
+            }
+        }
+        for r in c.refs.iter().filter(|r| r.kind == RefKind::Tag) {
+            if let Some(t) = cx.data.tags().iter().find(|t| t.name == r.name).cloned() {
+                ui.menu_button(format!("Tag {}", r.name), |ui| menus::tag_menu(ui, cx, &t));
+            }
+        }
+        if let Some(s) = cx.data.stashes().iter().find(|s| s.sha == c.sha).cloned() {
+            ui.menu_button(format!("Stash {}", s.selector), |ui| menus::stash_menu(ui, cx, &s));
+            ui.separator();
+        } else if !c.refs.is_empty() {
+            ui.separator();
+        }
+        if self.selected.len() > 1 && self.selected.contains(&c.sha) && ui.button("Changelog with AI for selection").clicked() {
+            let text: String = g.commits.iter().filter(|x| self.selected.contains(&x.sha)).map(|x| format!("- {}\n", x.message().replace('\n', " "))).collect();
+            crate::views::textview::ai_tab(cx, "Changelog", move |_| Ok(gitem_core::ai::changelog_prompt(&text)));
+            ui.close();
+        }
+        menus::commit_menu(ui, cx, c);
+    }
+
+    fn on_click(&mut self, i: usize, mods: egui::Modifiers, g: &Graph, cx: &mut Cx) {
+        let sha = g.commits[i].sha.clone();
+        if sha == WIP {
+            self.selected.clear();
+            cx.open(Tab::changes());
+            return;
+        }
+        if mods.ctrl || mods.command {
+            if let Some(pos) = self.selected.iter().position(|s| *s == sha) {
+                self.selected.remove(pos);
+            } else {
+                self.selected.push(sha.clone());
+            }
+        } else if mods.shift {
+            if let Some(a) = self.last_clicked {
+                let (lo, hi) = (a.min(i), a.max(i));
+                self.selected = (lo..=hi).map(|k| g.commits[k].sha.clone()).filter(|s| s != WIP).collect();
+            }
+        } else {
+            self.selected = vec![sha.clone()];
+        }
+        self.last_clicked = Some(i);
+        cx.inspect(&sha);
+    }
+
+    fn keyboard(&mut self, ui: &Ui, g: &Graph, cx: &mut Cx, visible: &[usize]) {
+        if ui.ctx().memory(|m| m.focused().is_some()) || visible.is_empty() {
+            return;
+        }
+        let (down, up) = ui.input(|i| (i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::J), i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::K)));
+        if !down && !up {
+            return;
+        }
+        let cur = self.selected.last().and_then(|s| g.index.get(s)).and_then(|i| visible.iter().position(|v| v == i));
+        let next = match cur {
+            Some(c) if down => (c + 1).min(visible.len() - 1),
+            Some(c) => c.saturating_sub(1),
+            None => 0,
+        };
+        let i = visible[next];
+        if g.commits[i].sha != WIP {
+            self.selected = vec![g.commits[i].sha.clone()];
+            self.last_clicked = Some(i);
+            self.scroll_to = Some(i);
+            cx.inspect(&g.commits[i].sha);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn minimap(&mut self, ui: &mut Ui, map: Rect, visible: &[usize], g: &Graph, content_h: f32, scroll_y: f32, area_h: f32, cx: &Cx) {
+        let p = cx.pal;
+        ui.painter().rect_filled(map, 0.0, p.panel2);
+        if visible.is_empty() {
+            return;
+        }
+        let n = visible.len() as f32;
+        let buckets = (map.height() / 2.0).max(1.0) as usize;
+        let mut counts = vec![0u32; buckets];
+        let stats = self.minimap_lines.then(|| self.stats.get()).flatten();
+        for (vi, &i) in visible.iter().enumerate() {
+            let b = ((vi as f32 / n) * buckets as f32) as usize;
+            let weight = match stats {
+                Some(s) => s.get(&g.commits[i].sha).map_or(0, |(a, d)| a + d),
+                None => 1,
+            };
+            counts[b.min(buckets - 1)] += weight;
+        }
+        let max = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
+        for (b, c) in counts.iter().enumerate() {
+            if *c == 0 {
+                continue;
+            }
+            let y = map.top() + b as f32 * 2.0;
+            let width = (*c as f32 / max) * (map.width() - 4.0);
+            ui.painter().rect_filled(Rect::from_min_size(pos2(map.left() + 2.0, y), vec2(width.max(1.0), 2.0)), 0.0, p.heat(0.35));
+        }
+        let mark = |vi: usize, color: Color32, ui: &Ui| {
+            let y = map.top() + (vi as f32 / n) * map.height();
+            ui.painter().line_segment([pos2(map.left(), y), pos2(map.right(), y)], Stroke::new(1.5, color));
+        };
+        for (vi, &i) in visible.iter().enumerate() {
+            let c = &g.commits[i];
+            if c.refs.iter().any(|r| r.current) {
+                mark(vi, p.accent, ui);
+            } else if self.matches.get().is_some_and(|m| m.contains(&c.sha)) {
+                mark(vi, p.warn, ui);
+            } else if let Some(r) = c.refs.first() {
+                mark(vi, ref_color(r.kind, false, p).gamma_multiply(0.8), ui);
+            }
+        }
+        // Viewport indicator
+        if content_h > 0.0 {
+            let y0 = map.top() + (scroll_y / content_h).clamp(0.0, 1.0) * map.height();
+            let h = (area_h / content_h).clamp(0.02, 1.0) * map.height();
+            ui.painter().rect_stroke(Rect::from_min_size(pos2(map.left(), y0), vec2(map.width(), h)), 0.0, Stroke::new(1.0, p.dim), egui::StrokeKind::Inside);
+        }
+        let resp = ui.interact(map, ui.id().with("minimap"), Sense::click_and_drag());
+        if (resp.clicked() || resp.dragged())
+            && let Some(pos) = resp.interact_pointer_pos() {
+                let t = ((pos.y - map.top()) / map.height()).clamp(0.0, 1.0);
+                self.scroll_to = visible.get((t * n) as usize).copied();
+            }
+    }
+}
+
+fn drop_ref(cx: &mut Cx, name: &str, target: &Commit) {
+    let short = target.short().to_string();
+    let target_sha = target.sha.clone();
+    let name_s = name.to_string();
+    let is_local = cx.data.local_branches().any(|b| b.name == name);
+    let is_current = cx.current_branch().as_deref() == Some(name);
+    let mut f = forms::FormDialog::new(format!("{name} → {short}"), "Run");
+    let mut options: Vec<&str> = vec!["Merge the dragged ref into the current branch", "Rebase the current branch onto this commit", "Compare the dragged ref with this commit"];
+    if is_local && !is_current {
+        options.push("Move the dragged branch to this commit");
+    }
+    if is_local && is_current {
+        options.push("Reset the current branch to this commit");
+    }
+    f = f.choice("what", "What should happen?", &options, 0).on_submit(move |v| {
+        use crate::action::Action;
+        let w = v.text("what");
+        Ok(if w.starts_with("Merge") {
+            vec![Action::Form(forms::merge_form(name_s.clone()))]
+        } else if w.starts_with("Rebase") {
+            vec![Action::Form(forms::rebase_form(target_sha.clone()))]
+        } else if w.starts_with("Compare") {
+            vec![Action::OpenTab(Tab::compare(&name_s, &target_sha))]
+        } else if w.starts_with("Move") {
+            vec![Action::Confirm {
+                title: "Move branch".into(),
+                body: format!("Move {name_s} to {}? Commits only reachable from its old position may be lost.", gitem_core::util::prefix(&target_sha, 8)),
+                label: "Move".into(),
+                op: ops::branch_force_move(&name_s, &target_sha),
+            }]
+        } else {
+            vec![Action::Form(forms::reset_form(target_sha.clone()))]
+        })
+    });
+    cx.form(f);
+}

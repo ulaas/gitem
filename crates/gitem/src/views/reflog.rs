@@ -1,0 +1,205 @@
+//! Reflog browser (recover lost work) and the guided bisect view.
+use egui::{RichText, Ui};
+use gitem_core::model::*;
+use gitem_core::ops;
+use gitem_core::repo::DiffSource;
+
+use crate::action::Cx;
+use crate::forms;
+use crate::task::Task;
+use crate::widgets::*;
+
+pub struct ReflogView {
+    rev: String,
+    entries: Task<Vec<ReflogEntry>>,
+    loaded_gen: u64,
+    limit: usize,
+    filter: String,
+}
+
+impl Default for ReflogView {
+    fn default() -> Self {
+        Self { rev: "HEAD".into(), entries: Task::default(), loaded_gen: u64::MAX, limit: 1000, filter: String::new() }
+    }
+}
+
+impl ReflogView {
+    pub fn key(&self) -> String {
+        "reflog".into()
+    }
+    pub fn title(&self) -> String {
+        "Reflog".into()
+    }
+
+    fn load(&mut self, ctx: &egui::Context, cx: &Cx) {
+        let (r, rev, limit) = (cx.repo.clone(), self.rev.clone(), self.limit);
+        self.entries.spawn(ctx, move || r.reflog(&rev, limit));
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        self.entries.poll();
+        if self.loaded_gen != cx.data.status_gen {
+            self.loaded_gen = cx.data.status_gen;
+            self.load(&ui.ctx().clone(), cx);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Ref");
+            let r = ui.add(egui::TextEdit::singleline(&mut self.rev).desired_width(160.0));
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.load(&ui.ctx().clone(), cx);
+            }
+            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(200.0));
+            ui.label(RichText::new("Every position HEAD has been at. Use it to recover lost commits.").small().color(p.faint));
+        });
+        ui.separator();
+        if let Some(e) = &self.entries.error {
+            error_box(ui, e, &p);
+        }
+        let Some(list) = self.entries.value.take() else {
+            spinner_row(ui, "Reading reflog…", &p);
+            return;
+        };
+        let q = self.filter.to_lowercase();
+        let shown: Vec<&ReflogEntry> = list.iter().filter(|e| q.is_empty() || e.action.to_lowercase().contains(&q) || e.message.to_lowercase().contains(&q)).collect();
+        if shown.is_empty() {
+            empty_state(ui, "Nothing here", "The reflog is empty or nothing matches.", &p);
+        }
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::ScrollArea::vertical().id_salt("reflog").auto_shrink([false, false]).show_rows(ui, 24.0, shown.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for i in range {
+                let e = shown[i];
+                let (rect, resp) = row(ui, 24.0, false, &p);
+                let x = rect.left();
+                let cell = |a: f32, w: f32| egui::Rect::from_min_size(egui::pos2(x + a, rect.top()), egui::vec2(w, 24.0));
+                paint_text(ui, cell(6.0, 80.0), &e.selector, mono(11.5), p.faint);
+                paint_text(ui, cell(90.0, 66.0), gitem_core::util::prefix(&e.sha, 8), mono(11.5), p.dim);
+                paint_text(ui, cell(160.0, 110.0), &e.action, prop(12.0), p.series[6]);
+                paint_text(ui, cell(274.0, (rect.width() - 400.0).max(60.0)), &e.message, prop(13.0), p.text);
+                paint_text(ui, cell(rect.width() - 120.0, 116.0), &time_label(e.date, cx.settings.date_relative), prop(12.0), p.dim);
+                if resp.clicked() {
+                    cx.inspect(&e.sha);
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Open changes").clicked() {
+                        cx.diff(DiffSource::Commit(e.sha.clone()), None);
+                        ui.close();
+                    }
+                    if ui.button("Create branch here…").clicked() {
+                        cx.form(forms::new_branch(Some(e.sha.clone())));
+                        ui.close();
+                    }
+                    if ui.button("Reset current branch here…").clicked() {
+                        cx.form(forms::reset_form(e.sha.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Cherry-pick…").clicked() {
+                        cx.form(forms::cherry_pick_form(vec![e.sha.clone()]));
+                        ui.close();
+                    }
+                    if ui.button("Copy SHA").clicked() {
+                        cx.copy(e.sha.clone());
+                        ui.close();
+                    }
+                });
+            }
+        });
+        self.entries.value = Some(list);
+    }
+}
+
+#[derive(Default)]
+pub struct BisectView {
+    state: Option<BisectState>,
+    loaded_gen: u64,
+    current: Task<Commit>,
+    remaining: Task<String>,
+    run_cmd: String,
+}
+
+impl BisectView {
+    pub fn key(&self) -> String {
+        "bisect".into()
+    }
+    pub fn title(&self) -> String {
+        "Bisect".into()
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        self.current.poll();
+        self.remaining.poll();
+        if self.state.is_none() || self.loaded_gen != cx.data.status_gen {
+            self.loaded_gen = cx.data.status_gen;
+            self.state = Some(cx.repo.bisect_state());
+            let r = cx.repo.clone();
+            self.current.spawn(ui.ctx(), move || r.commit("HEAD"));
+            let r = cx.repo.clone();
+            self.remaining.spawn(ui.ctx(), move || -> Result<String, String> {
+                let o = r.git.run_raw(Some(&r.root), &["bisect", "visualize", "--oneline"]).map_err(|e| e.to_string())?;
+                Ok(o.text().lines().count().to_string())
+            });
+        }
+        let st = self.state.clone().unwrap_or_default();
+        if !st.active {
+            ui.add_space(8.0);
+            ui.heading("Find the commit that introduced a bug");
+            ui.label(RichText::new("Bisect walks your history by binary search. You mark commits good or bad until one remains.").color(p.dim));
+            ui.add_space(8.0);
+            if ui.button("Start bisect…").clicked() {
+                cx.form(forms::bisect_start_form("HEAD".to_string(), cx.data.ref_names()));
+            }
+            return;
+        }
+        ui.add_space(4.0);
+        ui.heading("Bisect in progress");
+        if let Some(n) = self.remaining.get() {
+            ui.label(RichText::new(format!("About {n} commit(s) left to check")).color(p.dim));
+        }
+        if let Some(c) = self.current.get() {
+            ui.add_space(6.0);
+            egui::Frame::new().fill(p.panel2).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
+                ui.label(RichText::new("Now testing").small().color(p.faint));
+                ui.label(RichText::new(&c.subject).strong());
+                ui.label(RichText::new(format!("{} · {} · {}", c.short(), c.author_name, time_label(c.commit_time, true))).small().color(p.dim));
+                if ui.small_button("Inspect").clicked() {
+                    cx.inspect(&c.sha);
+                }
+            });
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(RichText::new("✔ Good").color(p.on_accent)).fill(p.good)).clicked() {
+                cx.run(ops::bisect_mark("good"));
+            }
+            if ui.add(egui::Button::new(RichText::new("✖ Bad").color(p.on_accent)).fill(p.danger)).clicked() {
+                cx.run(ops::bisect_mark("bad"));
+            }
+            if ui.button("Skip").clicked() {
+                cx.run(ops::bisect_mark("skip"));
+            }
+            if ui.button("End bisect").clicked() {
+                cx.run(ops::bisect_reset());
+            }
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Automate with a test command");
+            ui.add(egui::TextEdit::singleline(&mut self.run_cmd).hint_text("cargo test failing_case").desired_width(280.0));
+            if ui.add_enabled(!self.run_cmd.trim().is_empty(), egui::Button::new("Run")).clicked() {
+                cx.run(ops::bisect_run(self.run_cmd.trim()));
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new(format!("Marked good: {}", st.good.len())).small().color(p.dim));
+        if let Some(b) = &st.bad {
+            ui.label(RichText::new(format!("Marked bad: {}", gitem_core::util::prefix(b, 10))).small().color(p.dim));
+        }
+        egui::CollapsingHeader::new("Bisect log").show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                ui.label(RichText::new(&st.log).monospace().small());
+            });
+        });
+    }
+}

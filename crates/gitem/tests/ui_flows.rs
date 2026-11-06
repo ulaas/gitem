@@ -1,0 +1,1065 @@
+//! Headless end-to-end tests: drive the real UI by clicking widgets, then verify
+//! the outcome with git itself. Temp repositories only; nothing touches a remote.
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use egui::vec2;
+use egui_kittest::kittest::Queryable;
+use egui_kittest::{Harness, HarnessBuilder};
+use gitem::action::Action;
+use gitem::app::GitemApp;
+use gitem::forms;
+use gitem::views::Tab;
+use gitem_core::repo::DiffSource;
+use gitem_core::{GitExe, LogQuery, ops};
+
+struct Fx {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    git: GitExe,
+}
+
+fn real_git() -> GitExe {
+    let mut g = GitExe::discover(None).expect("git");
+    // Use the actual built binary as git's helper, as in production.
+    g.helper = Some(PathBuf::from(env!("CARGO_BIN_EXE_gitem")));
+    g
+}
+
+impl Fx {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let git = real_git();
+        let f = Self { _dir: dir, root, git };
+        f.git(&["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Test User"), ("user.email", "test@example.com"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
+            f.git(&["config", k, v]);
+        }
+        f
+    }
+    fn git(&self, args: &[&str]) -> String {
+        self.git.run(Some(&self.root), args).unwrap_or_else(|e| panic!("git {args:?}: {e}")).text()
+    }
+    fn write(&self, p: &str, s: &str) {
+        let f = self.root.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, s).unwrap();
+    }
+    fn commit(&self, msg: &str) {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-q", "-m", msg]);
+    }
+    fn subjects(&self) -> Vec<String> {
+        self.git(&["log", "--format=%s"]).lines().map(String::from).collect()
+    }
+}
+
+fn harness<'a>(f: &Fx) -> Harness<'a, GitemApp> {
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, gitem_core::settings::Settings::default());
+    app.git = Ok(f.git.clone());
+    let root = f.root.clone();
+    let mut opened = false;
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5);
+    builder.build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    )
+}
+
+fn pump(h: &mut Harness<GitemApp>, cond: impl Fn(&GitemApp) -> bool, what: &str) {
+    let t = Instant::now();
+    loop {
+        h.step();
+        if cond(h.state()) {
+            h.step();
+            return;
+        }
+        assert!(t.elapsed() < Duration::from_secs(25), "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+/// Step until all background reads have had a chance to land.
+fn settle(h: &mut Harness<GitemApp>) {
+    pump(h, |a| a.repos.first().is_some_and(|r| r.data.status.get().is_some() && r.data.refs.get().is_some()), "repo data");
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(500) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn click(h: &mut Harness<GitemApp>, label: &str) {
+    pump_for_label(h, label);
+    h.get_by_label(label).click();
+    h.step();
+    h.step();
+}
+
+fn pump_for_label(h: &mut Harness<GitemApp>, label: &str) {
+    let t = Instant::now();
+    while h.query_by_label(label).is_none() {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(25), "no widget labelled {label:?}");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+fn no_errors(h: &Harness<GitemApp>) {
+    assert!(h.query_by_label("Something went wrong").is_none(), "an error dialog is showing");
+}
+
+fn all_tabs() -> Vec<Tab> {
+    vec![
+        Tab::home(),
+        Tab::graph(),
+        Tab::changes(),
+        Tab::Launchpad(Box::default()),
+        Tab::Search(Box::default()),
+        Tab::search("=:first"),
+        Tab::compare("main~1", "main"),
+        Tab::Worktrees(Box::default()),
+        Tab::Contributors(Box::default()),
+        Tab::Reflog(Box::default()),
+        Tab::rebase(Some("HEAD~1".into())),
+        Tab::Bisect(Box::default()),
+        Tab::Patches(Box::default()),
+        Tab::Composer(Box::default()),
+        Tab::Tools(Box::default()),
+        Tab::Config(Box::default()),
+        Tab::Credentials(Box::default()),
+        Tab::Console(Box::default()),
+        Tab::Settings(Box::default()),
+        Tab::file("a.txt", None, Some(2)),
+        Tab::file("a.txt", Some("HEAD".into()), None),
+        Tab::file_history("a.txt"),
+        Tab::line_history("a.txt", 1, 1),
+        Tab::visual("a.txt"),
+        Tab::tree("HEAD"),
+        Tab::Agents(Box::default()),
+        Tab::Review(Box::default()),
+        Tab::diff(DiffSource::Unstaged, None),
+        Tab::diff(DiffSource::Staged, None),
+        Tab::diff(DiffSource::Commit("HEAD".into()), None),
+        Tab::diff(DiffSource::Untracked, Some("untracked.txt".into())),
+    ]
+}
+
+/// Each view opens as the active tab, with its background load allowed to finish.
+fn visit_all(h: &mut Harness<GitemApp>) {
+    for tab in all_tabs() {
+        let title = tab.title();
+        h.state_mut().repos[0].open_tab(tab);
+        for _ in 0..10 {
+            h.step();
+            std::thread::sleep(Duration::from_millis(12));
+        }
+        assert!(h.query_by_label("Something went wrong").is_none(), "error showing after opening {title}");
+    }
+}
+
+fn sample_history(f: &Fx) {
+    f.write("a.txt", "one\ntwo\nthree\n");
+    f.commit("first");
+    f.write("a.txt", "one\nTWO\nthree\n");
+    f.write("b.txt", "fn main() {}\n");
+    f.commit("second");
+}
+
+#[test]
+fn every_view_renders_on_an_ordinary_repo() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("a.txt", "one\nTWO\nthree\nmore\n");
+    f.write("untracked.txt", "new\n");
+    f.git(&["tag", "v1"]);
+    f.git(&["branch", "side"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    visit_all(&mut h);
+}
+
+#[test]
+fn every_view_renders_on_an_empty_repo() {
+    let f = Fx::new();
+    let mut h = harness(&f);
+    settle(&mut h);
+    for tab in [Tab::home(), Tab::graph(), Tab::changes(), Tab::Worktrees(Box::default()), Tab::Contributors(Box::default()), Tab::Reflog(Box::default()), Tab::Composer(Box::default()), Tab::Console(Box::default())] {
+        h.state_mut().repos[0].open_tab(tab);
+        for _ in 0..8 {
+            h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        no_errors(&h);
+    }
+}
+
+#[test]
+fn switches_theme_without_trouble() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    for t in [gitem_core::settings::ThemeChoice::Light, gitem_core::settings::ThemeChoice::Midnight, gitem_core::settings::ThemeChoice::Dark] {
+        h.state_mut().settings.theme = t;
+        for _ in 0..4 {
+            h.step();
+        }
+    }
+    no_errors(&h);
+}
+
+#[test]
+fn commit_through_the_changes_view() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("c.txt", "new\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "Commit to main");
+    let t = h.get_by_role(egui::accesskit::Role::MultilineTextInput);
+    t.focus();
+    h.step();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text("Add c file");
+    h.step();
+    h.step();
+    click(&mut h, "Stage all and commit 1 file(s)");
+    let t0 = Instant::now();
+    while f.subjects()[0] != "Add c file" {
+        h.step();
+        assert!(t0.elapsed() < Duration::from_secs(20), "commit never landed: {:?}", f.subjects());
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert_eq!(f.git(&["status", "--short"]), "");
+    no_errors(&h);
+}
+
+fn wait_for(h: &mut Harness<GitemApp>, what: &str, cond: impl Fn() -> bool) {
+    let t = Instant::now();
+    while !cond() {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(20), "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    h.step();
+}
+
+#[test]
+fn stage_a_hunk_from_the_diff_view() {
+    let f = Fx::new();
+    let base: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+    f.write("f.txt", &base);
+    f.commit("base");
+    f.write("f.txt", &base.replace("line 2\n", "line 2 x\n").replace("line 25\n", "line 25 y\n"));
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("f.txt".into())));
+    pump_for_label(&mut h, "Stage file");
+    // Two hunks, so two buttons; stage the first.
+    let t = Instant::now();
+    while h.query_all_by_label("Stage hunk").count() < 2 {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(15));
+    }
+    h.query_all_by_label("Stage hunk").next().unwrap().click();
+    h.step();
+    wait_for(&mut h, "hunk staged", || !f.git(&["diff", "--cached"]).is_empty());
+    let staged = f.git(&["diff", "--cached"]);
+    assert!(staged.contains("line 2 x"), "{staged}");
+    assert!(!staged.contains("line 25 y"), "only one hunk staged: {staged}");
+    assert!(f.git(&["diff"]).contains("line 25 y"));
+    no_errors(&h);
+}
+
+fn make_conflict(f: &Fx) {
+    f.write("c.txt", "top\nmiddle\nbottom\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.write("c.txt", "TOP-SIDE\nmiddle\nbottom\n");
+    f.commit("side change");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "TOP-MAIN\nmiddle\nbottom\n");
+    f.commit("main change");
+    assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok(), "merge should conflict");
+}
+
+#[test]
+fn resolve_a_conflict_with_the_merge_tool_and_finish_the_merge() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    // The operation banner offers Resolve and Abort.
+    pump_for_label(&mut h, "Abort");
+    click(&mut h, "Resolve");
+    pump_for_label(&mut h, "Take theirs");
+    click(&mut h, "Take theirs");
+    pump_for_label(&mut h, "Save and mark resolved");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "conflict cleared", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(std::fs::read_to_string(f.root.join("c.txt")).unwrap(), "TOP-SIDE\nmiddle\nbottom\n");
+    pump_for_label(&mut h, "Continue");
+    click(&mut h, "Continue");
+    wait_for(&mut h, "merge committed", || !f.root.join(".git/MERGE_HEAD").exists());
+    assert_eq!(f.git(&["log", "-1", "--format=%p"]).split_whitespace().count(), 2, "merge commit has two parents");
+    no_errors(&h);
+}
+
+#[test]
+fn every_view_renders_during_a_conflict() {
+    let f = Fx::new();
+    make_conflict(&f);
+    f.write("a.txt", "x\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::merge("c.txt"));
+    pump_for_label(&mut h, "Take ours");
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "Commit to main");
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    no_errors(&h);
+}
+
+#[test]
+fn interactive_rebase_through_the_real_sequence_editor_helper() {
+    let f = Fx::new();
+    f.write("base", "b\n");
+    f.commit("base");
+    let base = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    for (n, m) in [("x", "one"), ("y", "two"), ("z", "three")] {
+        f.write(n, "1\n");
+        f.commit(m);
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    let rebase = gitem::views::rebase::RebaseView::new(Some(base));
+    h.state_mut().repos[0].open_tab(Tab::Rebase(Box::new(rebase)));
+    pump_for_label(&mut h, "Rebase 3 commit(s)");
+    // Edit the plan directly: drop "two", which the view would do via its combo box.
+    for (_, t) in h.state_mut().repos[0].dock.iter_all_tabs_mut() {
+        if let Tab::Rebase(r) = t {
+            r.items[1].action = gitem_core::rebase::RebaseAction::Drop;
+        }
+    }
+    h.step();
+    click(&mut h, "Rebase 3 commit(s)");
+    wait_for(&mut h, "rebase done", || f.subjects().len() == 3);
+    assert_eq!(f.subjects(), vec!["three", "one", "base"]);
+    assert!(!f.root.join("y").exists());
+    no_errors(&h);
+}
+
+#[test]
+fn a_form_creates_a_branch() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_branch(None)));
+    pump_for_label(&mut h, "Create");
+    // Forms focus their first field.
+    h.step();
+    h.event(egui::Event::Text("feature/from-form".into()));
+    h.step();
+    h.step();
+    click(&mut h, "Create");
+    wait_for(&mut h, "branch created", || f.git(&["branch", "--show-current"]).trim() == "feature/from-form");
+    no_errors(&h);
+}
+
+#[test]
+fn a_form_rejects_missing_input() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_tag(None)));
+    // New windows spend their first frame invisible, measuring themselves.
+    for _ in 0..3 {
+        h.step();
+    }
+    click(&mut h, "Create");
+    pump_for_label(&mut h, "A name is required.");
+    assert!(f.git(&["tag"]).is_empty());
+}
+
+#[test]
+fn destructive_ops_wait_for_confirmation() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "doomed"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let confirm = |h: &mut Harness<GitemApp>| {
+        h.state_mut().apply_action(&ctx, Action::Confirm { title: "Delete branch".into(), body: "Delete doomed?".into(), label: "Yes, delete".into(), op: ops::branch_delete("doomed", false) });
+        h.step();
+    };
+    confirm(&mut h);
+    pump_for_label(&mut h, "Yes, delete");
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(f.git(&["branch"]).contains("doomed"), "nothing happens before confirming");
+    click(&mut h, "Cancel");
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(f.git(&["branch"]).contains("doomed"), "cancel leaves it alone");
+    confirm(&mut h);
+    click(&mut h, "Yes, delete");
+    wait_for(&mut h, "branch deleted", || !f.git(&["branch"]).contains("doomed"));
+}
+
+#[test]
+fn failed_ops_show_the_error_and_drop_queued_followups() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::checkout("no-such-branch")));
+    h.state_mut().apply_action(&ctx, Action::Run(ops::tag_create("must-not-exist", None, None, false)));
+    pump_for_label(&mut h, "Something went wrong");
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(f.git(&["tag"]).is_empty(), "the queued step after a failure must not run");
+    click(&mut h, "Dismiss");
+    no_errors(&h);
+}
+
+#[test]
+fn external_edits_refresh_the_status_on_their_own() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert!(h.state().repos[0].data.status.get().unwrap().is_clean());
+    f.write("appeared.txt", "hi\n");
+    pump(&mut h, |a| a.repos[0].data.status.get().is_some_and(|s| !s.is_clean()), "the watcher to notice the new file");
+    no_errors(&h);
+}
+
+#[test]
+fn the_palette_filters_and_runs_a_command() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::OpenPalette);
+    h.step();
+    h.step();
+    h.event(egui::Event::Text("reflog".into()));
+    h.step();
+    h.step();
+    h.key_press(egui::Key::Enter);
+    h.step();
+    h.step();
+    let opened = h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Reflog(_)));
+    assert!(opened, "Enter runs the best match");
+}
+
+#[test]
+fn opening_a_folder_that_is_not_a_repo_reports_it() {
+    let f = Fx::new();
+    let not_repo = tempfile::tempdir().unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let p: &Path = not_repo.path();
+    h.state_mut().apply_action(&ctx, Action::OpenRepo(p.to_path_buf()));
+    pump_for_label(&mut h, "Something went wrong");
+    assert_eq!(h.state().repos.len(), 1);
+}
+
+#[test]
+fn file_view_navigates_revisions() {
+    let f = Fx::new();
+    f.write("n.txt", "1\n");
+    f.commit("rev one");
+    f.write("n.txt", "2\n");
+    f.commit("rev two");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("n.txt", None, None));
+    pump_for_label(&mut h, "◀ Older");
+    let rev_of = |a: &GitemApp| a.repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::File(v) = t { Some(v.rev.clone()) } else { None }).flatten();
+    click(&mut h, "◀ Older");
+    let two = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let one = f.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    pump(&mut h, |a| rev_of(a).as_deref() == Some(two.as_str()), "first step back");
+    click(&mut h, "◀ Older");
+    pump(&mut h, |a| rev_of(a).as_deref() == Some(one.as_str()), "second step back");
+    click(&mut h, "Newer ▶");
+    pump(&mut h, |a| rev_of(a).as_deref() == Some(two.as_str()), "step forward");
+    no_errors(&h);
+}
+
+#[test]
+fn log_query_helpers_used_by_views_work() {
+    let f = Fx::new();
+    sample_history(&f);
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    let c = repo.log(&LogQuery { all: true, excludes: vec!["refs/tags/*".into()], ..Default::default() }).unwrap();
+    assert_eq!(c.len(), 2);
+}
+
+
+/// Not part of the normal run: `cargo test --release -- --ignored large_history`.
+#[test]
+#[ignore]
+fn large_history_stays_responsive() {
+    let f = Fx::new();
+    let n = 30_000;
+    let mut s = String::new();
+    for i in 0..n {
+        let mark = i + 1;
+        let parent = if i > 0 { format!("from :{}\n", i) } else { String::new() };
+        // Every 10th commit merges a side commit made just before it.
+        let merge = if i > 20 && i % 10 == 0 { format!("merge :{}\n", i - 5) } else { String::new() };
+        s.push_str(&format!("commit refs/heads/main\nmark :{mark}\ncommitter T <t@x> {} +0000\ndata 8\nc{:06}\n{parent}{merge}M 100644 inline f{}.txt\ndata 2\n{}\n\n", 1_500_000_000 + i * 600, i % 1_000_000, i % 50, i % 10));
+    }
+    let op = gitem_core::ops::GitOp::new("import").step(&["fast-import", "--quiet"]).stdin(s.into_bytes());
+    op.run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap();
+    f.git(&["reset", "-q", "--hard", "main"]);
+
+    let ctx = egui::Context::default();
+    let mut settings = gitem_core::settings::Settings::default();
+    settings.graph_page_size = 30_000;
+    let mut app = GitemApp::with_settings(&ctx, settings);
+    app.git = Ok(f.git.clone());
+    let root = f.root.clone();
+    let mut opened = false;
+    let mut h: Harness<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5).build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    );
+    settle(&mut h);
+    let loaded = |a: &GitemApp| a.repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Graph(g) = t { Some(g.loaded_commits()) } else { None }).unwrap_or(0);
+    let load_start = Instant::now();
+    pump(&mut h, |a| loaded(a) == n as usize, "the commits to load");
+    eprintln!("loaded {} commits in {:.2} s", loaded(h.state()), load_start.elapsed().as_secs_f32());
+    let t = Instant::now();
+    for _ in 0..120 {
+        h.step();
+    }
+    let per_frame = t.elapsed().as_secs_f32() * 1000.0 / 120.0;
+    eprintln!("graph with {n} commits: {per_frame:.1} ms per frame");
+    assert!(per_frame < 40.0, "{per_frame} ms per frame");
+}
+
+#[test]
+fn a_confirmation_runs_in_the_repository_it_was_asked_about() {
+    let a = Fx::new();
+    sample_history(&a);
+    a.git(&["branch", "doomed"]);
+    let b = Fx::new();
+    sample_history(&b);
+    b.git(&["branch", "doomed"]);
+    let mut h = harness(&a);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Confirm { title: "Delete".into(), body: "Delete?".into(), label: "Yes, delete".into(), op: ops::branch_delete("doomed", false) });
+    h.step();
+    // Switch to another repository while the dialog is open.
+    h.state_mut().open_repo(&ctx, &b.root, false);
+    assert_eq!(h.state().active, 1);
+    pump_for_label(&mut h, "Yes, delete");
+    h.step();
+    h.step();
+    click(&mut h, "Yes, delete");
+    wait_for(&mut h, "branch deleted in the first repo", || !a.git(&["branch"]).contains("doomed"));
+    assert!(b.git(&["branch"]).contains("doomed"), "the repo being shown must be untouched");
+    assert_eq!(h.state().active, 1, "the view stays where it was");
+}
+
+#[test]
+fn a_form_runs_in_the_repository_it_was_opened_for() {
+    let a = Fx::new();
+    sample_history(&a);
+    let b = Fx::new();
+    sample_history(&b);
+    let mut h = harness(&a);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_tag(None)));
+    h.step();
+    h.state_mut().open_repo(&ctx, &b.root, false);
+    for _ in 0..3 {
+        h.step();
+    }
+    h.event(egui::Event::Text("v9".into()));
+    h.step();
+    h.step();
+    click(&mut h, "Create");
+    wait_for(&mut h, "tag created", || a.git(&["tag"]).contains("v9"));
+    assert!(b.git(&["tag"]).is_empty());
+}
+
+#[test]
+fn non_utf8_conflicts_are_never_rewritten_as_text() {
+    let f = Fx::new();
+    let bytes = |s: &[u8]| s.to_vec();
+    std::fs::write(f.root.join("t.txt"), bytes(b"caf\xe9 one\nkeep\n")).unwrap();
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    std::fs::write(f.root.join("t.txt"), bytes(b"caf\xe9 side\nkeep\n")).unwrap();
+    f.commit("side");
+    f.git(&["switch", "-q", "main"]);
+    std::fs::write(f.root.join("t.txt"), bytes(b"caf\xe9 main\nkeep\n")).unwrap();
+    f.commit("main");
+    assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok());
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::merge("t.txt"));
+    pump_for_label(&mut h, "Keep theirs");
+    assert!(h.query_by_label("Save and mark resolved").is_none(), "no text merge is offered");
+    click(&mut h, "Keep theirs");
+    wait_for(&mut h, "conflict cleared", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(std::fs::read(f.root.join("t.txt")).unwrap(), b"caf\xe9 side\nkeep\n", "bytes preserved exactly");
+}
+
+#[test]
+fn merge_tab_reloads_when_the_conflict_changes_and_refuses_stale_saves() {
+    let f = Fx::new();
+    f.write("c.txt", "top\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "mine"]);
+    f.write("c.txt", "mine one\n");
+    f.commit("first");
+    f.write("c.txt", "mine two\n");
+    f.commit("second");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "main\n");
+    f.commit("main change");
+    f.git(&["switch", "-q", "mine"]);
+    assert!(!f.git.run_raw(Some(&f.root), &["rebase", "main"]).unwrap().ok(), "first step conflicts");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::merge("c.txt"));
+    // During a rebase the sides are named for what they really are.
+    pump_for_label(&mut h, "Take your commit");
+    assert!(h.query_by_label("Take theirs").is_none());
+    // Keeping upstream here means the next commit conflicts with it as well.
+    click(&mut h, "Take upstream");
+    pump_for_label(&mut h, "Save and mark resolved");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    pump_for_label(&mut h, "✔ This file is no longer in conflict");
+    assert_eq!(std::fs::read_to_string(f.root.join("c.txt")).unwrap(), "main\n");
+    // The next step conflicts on the same file, with new versions.
+    let cont = f.git.run_opts(Some(&f.root), &["rebase".to_string(), "--continue".to_string()], &gitem_core::runner::RunOpts { env: vec![("GIT_EDITOR".into(), "true".into())], ..Default::default() }, &mut |_| {}).unwrap();
+    assert!(!cont.ok(), "second step conflicts too: {}", cont.text());
+    let t = Instant::now();
+    while h.query_by_label("Take your commit").is_none() {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(20), "tab did not reload for the new conflict");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    click(&mut h, "Take your commit");
+    pump_for_label(&mut h, "Save and mark resolved");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "resolved again", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(std::fs::read_to_string(f.root.join("c.txt")).unwrap(), "mine two\n", "the second commit's content, not the first resolution");
+}
+
+#[test]
+fn a_rebase_plan_refuses_to_run_if_head_moved() {
+    let f = Fx::new();
+    f.write("base", "b\n");
+    f.commit("base");
+    let base = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    f.write("x", "1\n");
+    f.commit("one");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::rebase(Some(base.clone())));
+    pump_for_label(&mut h, "Rebase 1 commit(s)");
+    // A new commit lands while the plan is open; the plan doesn't include it.
+    f.write("y", "1\n");
+    f.commit("two");
+    for _ in 0..5 {
+        h.step();
+    }
+    click(&mut h, "Rebase 1 commit(s)");
+    pump_for_label(&mut h, "HEAD moved since this plan was made, so it was not started.");
+    assert_eq!(f.subjects(), vec!["two", "one", "base"], "no commit lost");
+    click(&mut h, "Rebuild plan");
+    pump_for_label(&mut h, "Rebase 2 commit(s)");
+}
+
+#[test]
+fn rebase_with_update_refs_keeps_dependent_branches_through_the_real_helper() {
+    let f = Fx::new();
+    f.write("base", "b\n");
+    f.commit("base");
+    let base = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    f.git(&["switch", "-q", "-c", "stack"]);
+    f.write("a", "1\n");
+    f.commit("stack commit");
+    f.git(&["switch", "-q", "-c", "top"]);
+    f.write("drop-me", "1\n");
+    f.commit("droppable");
+    f.write("c", "1\n");
+    f.commit("top commit");
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    let commits = forms::commits_since(&repo, Some(&base)).unwrap();
+    let mut items: Vec<gitem_core::rebase::TodoItem> = commits.iter().map(gitem_core::rebase::TodoItem::from_commit).collect();
+    items[1].action = gitem_core::rebase::RebaseAction::Drop;
+    let o = ops::RebaseOpts { update_refs: true, ..Default::default() };
+    let op = forms::start_interactive_rebase(&repo, Some(&base), &items, o).unwrap();
+    op.run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap();
+    assert_eq!(f.subjects(), vec!["top commit", "stack commit", "base"]);
+    let stack_parent = f.git(&["rev-parse", "stack"]);
+    let expected = f.git(&["rev-parse", "HEAD~1"]);
+    assert_eq!(stack_parent, expected, "the dependent branch still points into the stack");
+}
+
+#[test]
+fn a_second_edit_to_a_modified_file_refreshes_an_open_diff() {
+    let f = Fx::new();
+    f.write("f.txt", "one\n");
+    f.commit("base");
+    f.write("f.txt", "two\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("f.txt".into())));
+    pump_for_label(&mut h, "Stage hunk");
+    let gen0 = h.state().repos[0].data.status_gen;
+    // Status still reads " M f.txt", so its summary doesn't change.
+    f.write("f.txt", "three\n");
+    pump(&mut h, |a| a.repos[0].data.status_gen != gen0, "the change to be noticed");
+    no_errors(&h);
+}
+
+#[test]
+fn a_rejected_commit_keeps_the_message() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("c.txt", "new\n");
+    let hook = f.root.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho nope >&2\nexit 1\n").unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "Commit to main");
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
+    h.step();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text("Precious message");
+    h.step();
+    h.step();
+    click(&mut h, "Stage all and commit 1 file(s)");
+    pump_for_label(&mut h, "Something went wrong");
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let kept = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Changes(c) = t { Some(c.message.clone()) } else { None }).unwrap();
+    assert_eq!(kept, "Precious message");
+    assert_eq!(f.subjects()[0], "second", "nothing was committed");
+}
+
+#[test]
+fn context_menus_work_on_graph_rows_and_sidebar_branches() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "side"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    // A graph row: subject text labels the row.
+    pump_for_label(&mut h, "first");
+    h.get_by_label("first").click_secondary();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Create tag here…");
+    click(&mut h, "Create tag here…");
+    for _ in 0..3 {
+        h.step();
+    }
+    h.event(egui::Event::Text("from-menu".into()));
+    h.step();
+    h.step();
+    click(&mut h, "Create");
+    wait_for(&mut h, "tag from the context menu", || f.git(&["tag"]).contains("from-menu"));
+    let first = f.git(&["rev-parse", "HEAD~1"]);
+    assert_eq!(f.git(&["rev-list", "-n1", "from-menu"]), first, "tagged the commit that was right-clicked");
+
+    // A sidebar branch.
+    pump_for_label(&mut h, "side");
+    h.get_by_label("side").click_secondary();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Switch to");
+    click(&mut h, "Switch to");
+    wait_for(&mut h, "switched", || f.git(&["branch", "--show-current"]).trim() == "side");
+    no_errors(&h);
+}
+
+#[test]
+fn undo_commit_from_the_context_menu() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "second");
+    h.get_by_label("second").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Undo commit");
+    wait_for(&mut h, "commit undone", || f.subjects() == vec!["first"]);
+    assert!(f.git(&["status", "--short"]).contains("A  b.txt"), "changes stay staged");
+}
+
+#[test]
+fn reword_from_the_menu_opens_a_plan_with_that_commit_marked() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("z", "1\n");
+    f.commit("third");
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "second");
+    h.get_by_label("second").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Drop…");
+    pump_for_label(&mut h, "Rebase 2 commit(s)");
+    let action = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Rebase(r) = t { r.items.iter().find(|i| i.text == "second").map(|i| i.action) } else { None });
+    assert_eq!(action, Some(gitem_core::rebase::RebaseAction::Drop));
+    assert_eq!(f.subjects().len(), 3, "nothing runs until the plan is confirmed");
+}
+
+#[test]
+fn dragging_a_ref_onto_a_commit_offers_actions() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["tag", "v-drag"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "first");
+    h.step();
+    let source = h.get_by_label("second").rect();
+    let target = h.get_by_label("first").rect();
+    // The ref badges sit at the row's left edge.
+    let from = source.left_center() + vec2(24.0, 0.0);
+    let to = target.center();
+    let press = |h: &Harness<GitemApp>, pressed: bool, p: egui::Pos2| {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    };
+    h.event(egui::Event::PointerMoved(from));
+    h.step();
+    press(&h, true, from);
+    h.step();
+    h.event(egui::Event::PointerMoved(from + vec2(12.0, 6.0)));
+    h.step();
+    h.event(egui::Event::PointerMoved(to));
+    h.step();
+    h.step();
+    press(&h, false, to);
+    h.step();
+    h.step();
+    for _ in 0..3 {
+        h.step();
+    }
+    pump_for_label(&mut h, "What should happen?");
+    no_errors(&h);
+}
+
+#[test]
+fn batch_selection_stages_only_what_was_picked() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("p1.txt", "1\n");
+    f.write("p2.txt", "1\n");
+    f.write("p3.txt", "1\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "p1.txt");
+    h.get_by_label("p1.txt").click_modifiers(egui::Modifiers::COMMAND);
+    h.step();
+    h.step();
+    h.get_by_label("p3.txt").click_modifiers(egui::Modifiers::COMMAND);
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "2 selected");
+    click(&mut h, "Stage");
+    wait_for(&mut h, "staged", || f.git(&["diff", "--cached", "--name-only"]).lines().count() == 2);
+    let staged = f.git(&["diff", "--cached", "--name-only"]);
+    assert!(staged.contains("p1.txt") && staged.contains("p3.txt") && !staged.contains("p2.txt"), "{staged}");
+}
+
+#[test]
+fn health_view_enables_and_undoes_an_option() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Health(Box::default()));
+    pump_for_label(&mut h, "Healthy");
+    let t = Instant::now();
+    while h.query_all_by_label("Enable").count() < 6 {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(15));
+    }
+    // The second item is the untracked cache.
+    h.query_all_by_label("Enable").nth(1).unwrap().click();
+    h.step();
+    wait_for(&mut h, "option on", || f.git.run_raw(Some(&f.root), &["config", "core.untrackedCache"]).unwrap().text().trim() == "true");
+    pump_for_label(&mut h, "Undo");
+    click(&mut h, "Undo");
+    wait_for(&mut h, "option off", || !f.git.run_raw(Some(&f.root), &["config", "core.untrackedCache"]).unwrap().ok());
+    no_errors(&h);
+}
+
+#[test]
+fn new_views_render() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let head = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    for tab in [Tab::visual(""), Tab::visual("a.txt"), Tab::Treemap(Box::default()), Tab::tree(&head)] {
+        h.state_mut().repos[0].open_tab(tab);
+        for _ in 0..12 {
+            h.step();
+            std::thread::sleep(Duration::from_millis(12));
+        }
+        no_errors(&h);
+    }
+    // Focus from the action reaches the graph.
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::GraphFocus("main".into()));
+    h.state_mut().apply_action(&ctx, Action::GraphHide("main".into()));
+    for _ in 0..5 {
+        h.step();
+    }
+    no_errors(&h);
+}
+
+#[test]
+fn folding_a_lane_and_moving_columns_keep_the_graph_working() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["switch", "-q", "-c", "side", "HEAD~1"]);
+    f.write("s", "1\n");
+    f.commit("on side");
+    f.git(&["switch", "-q", "main"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "on side");
+    h.get_by_label("on side").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Fold this lane");
+    for _ in 0..4 {
+        h.step();
+    }
+    pump_for_label(&mut h, "on side");
+    h.get_by_label("on side").click_secondary();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Unfold this lane");
+    click(&mut h, "Unfold this lane");
+    no_errors(&h);
+}
+
+#[test]
+fn session_tabs_round_trip() {
+    for spec in ["home", "graph", "changes", "launchpad", "agents", "review", "health", "file:src/a b.rs"] {
+        let t = Tab::from_spec(spec).unwrap();
+        assert_eq!(t.spec().as_deref(), Some(spec));
+    }
+    assert!(Tab::from_spec("nonsense").is_none());
+    assert_eq!(Tab::diff(DiffSource::Staged, None).spec(), None, "one-off tabs aren't restored");
+}
+
+#[test]
+fn review_notes_persist_inside_the_git_folder() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "base", "HEAD~1"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Review(Box::default()));
+    pump_for_label(&mut h, "New review");
+    let store = f.root.join(".git/gitem-review.json");
+    click(&mut h, "New review");
+    wait_for(&mut h, "the review file", || store.exists());
+    assert!(f.git(&["status", "--short"]).is_empty(), "nothing shows as a change in the repository");
+    no_errors(&h);
+}
+
+#[test]
+fn deep_links_open_the_commit_and_file() {
+    let f = Fx::new();
+    sample_history(&f);
+    let sha = f.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let root = f.root.to_string_lossy().replace('\\', "/");
+    let link = gitem_core::forge::DeepLink::parse(&gitem_core::forge::DeepLink { repo: root, commit: Some(sha), file: Some("a.txt".into()), line: Some(2) }.to_url()).unwrap();
+    h.state_mut().apply_action(&ctx, Action::DeepLink(link));
+    h.step();
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(_))));
+    assert_eq!(h.state().repos.len(), 1, "an already open repository isn't opened twice");
+}
+
+#[test]
+fn language_switch_changes_labels() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().settings.language = "es".into();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Actualizar");
+    h.state_mut().settings.language = "en".into();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Refresh");
+}
+
+#[test]
+fn saved_layouts_keep_splits_and_drop_one_off_tabs() {
+    use egui_dock::DockState;
+    let mut dock = DockState::new(vec![Tab::graph(), Tab::diff(DiffSource::Staged, None)]);
+    dock.main_surface_mut().split_right(egui_dock::NodeIndex::root(), 0.6, vec![Tab::changes(), Tab::home()]);
+    let json = gitem::app::layout_to_json(&dock).unwrap();
+    let back = gitem::app::layout_from_json(&json).unwrap();
+    let keys: Vec<String> = back.iter_all_tabs().map(|(_, t)| t.key()).collect();
+    assert_eq!(keys.len(), 3, "the diff tab isn't kept: {keys:?}");
+    assert_eq!(back.iter_leaves().count(), 2, "the split survives");
+    assert!(gitem::app::layout_from_json("not json").is_none());
+}
