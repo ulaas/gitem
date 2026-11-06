@@ -873,7 +873,7 @@ impl GitemApp {
     }
 
     fn op_banner(ui: &mut Ui, tab_status: &RepoStatus, out: &mut Vec<Action>, p: &Palette) {
-        egui::Frame::new().fill(p.warn.gamma_multiply(0.15)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let mut text = tab_status.op.label().to_string();
                 if let Some(t) = &tab_status.op_target {
@@ -885,7 +885,8 @@ impl GitemApp {
                 ui.label(RichText::new(text).strong());
                 let conflicts: Vec<String> = tab_status.conflicts().map(|e| e.path.clone()).collect();
                 if !conflicts.is_empty() {
-                    chip(ui, &format!("{} conflict(s)", conflicts.len()), p.warn);
+                    // Not a chip: its warning-coloured text fails contrast on this fill in light themes.
+                    ui.label(RichText::new(format!("{} conflict(s)", conflicts.len())).strong().color(p.text));
                     if ui.button("Resolve").clicked() {
                         out.push(Action::OpenTab(Tab::merge(&conflicts[0])));
                     }
@@ -1258,7 +1259,7 @@ impl GitemApp {
             let RepoTab { repo, data, dock, inspect, show_inspect, sidebar, show_sidebar, .. } = tab;
             if let Some(s) = data.status.get()
                 && s.op != RepoOp::None {
-                    let frame = egui::Frame::new();
+                    let frame = egui::Frame::new().fill(pal.banner_fill());
                     let s = s.clone();
                     egui::Panel::top("op-banner").frame(frame).show(ui, |ui| Self::op_banner(ui, &s, &mut out, &pal));
                 }

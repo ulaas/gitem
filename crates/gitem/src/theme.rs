@@ -72,6 +72,13 @@ pub fn accent_color(setting: &str, dark: bool) -> Option<Color32> {
     ACCENTS.iter().find(|a| a.0 == setting).map(|a| hex(if dark { a.1 } else { a.2 }))
 }
 
+/// `top` painted over the opaque `bottom`, as the screen would show it.
+pub fn over(top: Color32, bottom: Color32) -> Color32 {
+    let keep = 255 - top.a() as u32;
+    let mix = |t: u8, b: u8| (t as u32 + (b as u32 * keep + 127) / 255).min(255) as u8;
+    Color32::from_rgb(mix(top.r(), bottom.r()), mix(top.g(), bottom.g()), mix(top.b(), bottom.b()))
+}
+
 /// WCAG contrast ratio between two opaque colours, from 1 to 21.
 pub fn contrast(a: Color32, b: Color32) -> f32 {
     let lum = |c: Color32| {
@@ -91,6 +98,11 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 impl Palette {
+    /// Behind the merge and rebase banner. Opaque, as the window behind it is near black.
+    pub fn banner_fill(&self) -> Color32 {
+        over(self.warn.gamma_multiply(0.15), self.panel)
+    }
+
     pub fn get(t: ThemeChoice) -> Self {
         match t {
             ThemeChoice::Dark => Self::dark(),
@@ -365,6 +377,33 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_operation_banner_is_opaque_and_readable_in_every_theme() {
+        let mut report = Vec::new();
+        let mut failures = Vec::new();
+        for t in ThemeChoice::ALL {
+            let p = Palette::get(t);
+            let fill = p.banner_fill();
+            assert_eq!(fill.a(), 255, "{}: a see-through fill shows the window's black clear colour", t.name());
+            // WCAG AA for its text, and for the text of the buttons on it.
+            let (text, button) = (contrast(p.text, fill), contrast(p.text, p.button));
+            report.push(format!("{}: text {text:.2}, button {button:.2}", t.name()));
+            if text < 4.5 || button < 4.5 {
+                failures.push(report.last().unwrap().clone());
+            }
+        }
+        println!("{}", report.join("\n"));
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn over_blends_like_the_screen() {
+        assert_eq!(over(Color32::from_rgb(9, 8, 7), Color32::WHITE), Color32::from_rgb(9, 8, 7));
+        assert_eq!(over(Color32::TRANSPARENT, Color32::from_rgb(9, 8, 7)), Color32::from_rgb(9, 8, 7));
+        let half_white = Color32::WHITE.gamma_multiply(0.5);
+        assert_eq!(over(half_white, Color32::BLACK).r(), half_white.r());
+    }
 
     fn check(name: &str, p: &Palette, failures: &mut Vec<String>) {
         let mut need = |what: &str, a: Color32, b: Color32, min: f32| {
