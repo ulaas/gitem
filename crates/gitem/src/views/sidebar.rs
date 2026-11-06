@@ -41,6 +41,7 @@ struct Tracking {
 }
 
 const ROW: f32 = 22.0;
+const SECTION_ROW: f32 = 28.0;
 /// How many incoming or outgoing commits a branch lists.
 const TRACKING_LIMIT: usize = 50;
 
@@ -54,7 +55,7 @@ impl Sidebar {
             t.outgoing.poll();
         }
         ui.add_space(2.0);
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter branches, tags, files…").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter branches, tags, files…").desired_width(f32::INFINITY));
         ui.add_space(2.0);
         egui::ScrollArea::vertical().id_salt("sidebar").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -77,7 +78,7 @@ impl Sidebar {
     fn current_commits(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let branch = cx.current_branch().unwrap_or_else(|| "HEAD".into());
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::GIT_COMMIT, p.series[0], &format!("COMMITS ({branch})"), &p)).id_salt("sb-commits").default_open(false).show(ui, |ui| {
+        section(ui, "sb-commits", crate::chrome::icon::GIT_COMMIT, p.series[0], "Commits", &branch, false, &[], &p, |ui| {
             if self.commits_gen != Some(cx.data.refs_gen) {
                 self.commits_gen = Some(cx.data.refs_gen);
                 let r = cx.repo.clone();
@@ -105,14 +106,14 @@ impl Sidebar {
     fn branches(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let list: Vec<Branch> = cx.data.local_branches().filter(|b| self.matches(&b.name)).cloned().collect();
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::GIT_BRANCH, p.series[0], &format!("BRANCHES ({})", list.len()), &p)).id_salt("sb-branches").default_open(true).show(ui, |ui| {
-            if ui.small_button("+ New branch").clicked() {
-                cx.form(forms::new_branch(None));
-            }
+        let action = section(ui, "sb-branches", crate::chrome::icon::GIT_BRANCH, p.series[0], "Branches", &list.len().to_string(), true, &[(crate::chrome::icon::PLUS, "New branch")], &p, |ui| {
             for b in &list {
                 self.branch_row(ui, cx, b, &b.name);
             }
         });
+        if action.is_some() {
+            cx.form(forms::new_branch(None));
+        }
     }
 
     fn branch_row(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch, label: &str) {
@@ -211,10 +212,7 @@ impl Sidebar {
     fn remotes(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let remotes = cx.data.remotes().to_vec();
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::CLOUD, p.series[6], &format!("REMOTES ({})", remotes.len()), &p)).id_salt("sb-remotes").default_open(false).show(ui, |ui| {
-            if ui.small_button("+ Add remote").clicked() {
-                cx.form(forms::add_remote());
-            }
+        let action = section(ui, "sb-remotes", crate::chrome::icon::CLOUD, p.series[6], "Remotes", &remotes.len().to_string(), false, &[(crate::chrome::icon::PLUS, "Add remote")], &p, |ui| {
             for r in &remotes {
                 let header = egui::CollapsingHeader::new(RichText::new(&r.name).size(12.5)).id_salt(("remote", &r.name)).show(ui, |ui| {
                     let prefix = format!("{}/", r.name);
@@ -252,15 +250,15 @@ impl Sidebar {
                 });
             }
         });
+        if action.is_some() {
+            cx.form(forms::add_remote());
+        }
     }
 
     fn tags(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let list: Vec<Tag> = cx.data.tags().iter().filter(|t| self.matches(&t.name)).cloned().collect();
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::TAG, p.series[3], &format!("TAGS ({})", list.len()), &p)).id_salt("sb-tags").default_open(false).show(ui, |ui| {
-            if ui.small_button("+ New tag").clicked() {
-                cx.form(forms::new_tag(None));
-            }
+        let action = section(ui, "sb-tags", crate::chrome::icon::TAG, p.series[3], "Tags", &list.len().to_string(), false, &[(crate::chrome::icon::PLUS, "New tag")], &p, |ui| {
             for t in &list {
                 let (rect, resp) = row(ui, ROW, false, &p);
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &format!("◆ {}", t.name), prop(12.5), p.dim);
@@ -271,20 +269,19 @@ impl Sidebar {
                 resp.context_menu(|ui| menus::tag_menu(ui, cx, t));
             }
         });
+        if action.is_some() {
+            cx.form(forms::new_tag(None));
+        }
     }
 
     fn stashes(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let list = cx.data.stashes().to_vec();
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::ARCHIVE, p.series[4], &format!("STASHES ({})", list.len()), &p)).id_salt("sb-stashes").default_open(false).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.small_button("+ Stash").clicked() {
-                    cx.form(forms::stash_form(Vec::new()));
-                }
-                if !list.is_empty() && ui.small_button("Clear all…").clicked() {
-                    cx.confirm("Clear stashes", &format!("Permanently delete all {} stashes?", list.len()), "Clear all", ops::stash_clear());
-                }
-            });
+        let mut actions = vec![(crate::chrome::icon::PLUS, "New stash")];
+        if !list.is_empty() {
+            actions.push((crate::chrome::icon::TRASH, "Clear all stashes"));
+        }
+        let action = section(ui, "sb-stashes", crate::chrome::icon::ARCHIVE, p.series[4], "Stashes", &list.len().to_string(), false, &actions, &p, |ui| {
             for s in &list {
                 let (rect, resp) = row(ui, ROW, false, &p);
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &s.message, prop(12.5), p.dim);
@@ -295,15 +292,17 @@ impl Sidebar {
                 resp.context_menu(|ui| menus::stash_menu(ui, cx, s));
             }
         });
+        match action {
+            Some(0) => cx.form(forms::stash_form(Vec::new())),
+            Some(_) => cx.confirm("Clear stashes", &format!("Permanently delete all {} stashes?", list.len()), "Clear all", ops::stash_clear()),
+            None => {}
+        }
     }
 
     fn worktrees(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let list = cx.data.worktrees().to_vec();
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::TREE_STRUCTURE, p.series[2], &format!("WORKTREES ({})", list.len()), &p)).id_salt("sb-worktrees").default_open(false).show(ui, |ui| {
-            if ui.small_button("+ Add worktree").clicked() {
-                cx.form(forms::add_worktree(cx.repo, cx.data.ref_names(), None));
-            }
+        let action = section(ui, "sb-worktrees", crate::chrome::icon::TREE_STRUCTURE, p.series[2], "Worktrees", &list.len().to_string(), false, &[(crate::chrome::icon::PLUS, "Add worktree")], &p, |ui| {
             for w in &list {
                 let (rect, resp) = row(ui, ROW, w.is_current, &p);
                 let name = w.branch.clone().unwrap_or_else(|| "detached".to_string());
@@ -315,11 +314,14 @@ impl Sidebar {
                 resp.context_menu(|ui| menus::worktree_menu(ui, cx, w));
             }
         });
+        if action.is_some() {
+            cx.form(forms::add_worktree(cx.repo, cx.data.ref_names(), None));
+        }
     }
 
     fn contributor_list(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::USERS_THREE, p.series[2], &"CONTRIBUTORS".to_string(), &p)).id_salt("sb-contrib").default_open(false).show(ui, |ui| {
+        section(ui, "sb-contrib", crate::chrome::icon::USERS_THREE, p.series[2], "Contributors", "", false, &[], &p, |ui| {
             if self.contributors_gen != Some(cx.data.refs_gen) {
                 self.contributors_gen = Some(cx.data.refs_gen);
                 let r = cx.repo.clone();
@@ -349,7 +351,7 @@ impl Sidebar {
         if list.is_empty() {
             return;
         }
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::PACKAGE, p.series[1], &format!("SUBMODULES ({})", list.len()), &p)).id_salt("sb-subs").default_open(false).show(ui, |ui| {
+        section(ui, "sb-subs", crate::chrome::icon::PACKAGE, p.series[1], "Submodules", &list.len().to_string(), false, &[], &p, |ui| {
             for s in &list {
                 let (rect, resp) = row(ui, ROW, false, &p);
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &s.path, prop(12.5), p.dim);
@@ -362,7 +364,7 @@ impl Sidebar {
 
     fn file_tree(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        egui::CollapsingHeader::new(section_title(crate::chrome::icon::FOLDER, p.series[3], &"FILES".to_string(), &p)).id_salt("sb-files").default_open(false).show(ui, |ui| {
+        section(ui, "sb-files", crate::chrome::icon::FOLDER, p.series[3], "Files", "", false, &[], &p, |ui| {
             if self.files_gen != Some(cx.data.status_gen) {
                 self.files_gen = Some(cx.data.status_gen);
                 let r = cx.repo.clone();
@@ -481,4 +483,55 @@ fn tracking_commits(ui: &mut Ui, cx: &mut Cx, commits: Option<&Vec<Commit>>, tot
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
         paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), rect.max), &format!("and {more} more"), prop(12.0), p.faint);
     }
+}
+
+/// A collapsible section: a tall header that lights up on hover, with icon buttons on
+/// its right, which work with the section open or closed. `detail` follows the title
+/// in a fainter colour. Returns which action was clicked.
+#[allow(clippy::too_many_arguments)]
+fn section(ui: &mut Ui, salt: &str, glyph: &str, tint: egui::Color32, title: &str, detail: &str, default_open: bool, actions: &[(&str, &str)], p: &crate::theme::Palette, body: impl FnOnce(&mut Ui)) -> Option<usize> {
+    let id = ui.id().with(salt);
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), SECTION_ROW), Sense::click());
+    let name = format!("{title} section");
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+    let lit = ui.rect_contains_pointer(rect);
+    if lit {
+        ui.painter().rect_filled(rect.shrink2(vec2(0.0, 1.0)), 4.0, p.hover);
+    }
+    let y = rect.center().y;
+    let caret = if state.is_open() { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
+    ui.painter().text(pos2(rect.left() + 9.0, y), egui::Align2::CENTER_CENTER, caret, prop(11.0), if lit { p.text } else { p.faint });
+    ui.painter().text(pos2(rect.left() + 25.0, y), egui::Align2::CENTER_CENTER, glyph, prop(15.0), tint);
+
+    const ACTION: f32 = 24.0;
+    let mut clicked = None;
+    let mut right = rect.right() - 2.0;
+    for (i, (icon, label)) in actions.iter().enumerate().rev() {
+        let r = egui::Rect::from_min_size(pos2(right - ACTION, y - 11.0), vec2(ACTION, 22.0));
+        let a = ui.interact(r, id.with(("action", i)), Sense::click());
+        a.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, *label));
+        if a.hovered() {
+            ui.painter().rect_filled(r, 4.0, p.button_hover);
+        }
+        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, *icon, prop(15.0), if a.hovered() { p.text } else if lit { p.dim } else { p.faint });
+        if a.on_hover_text(*label).clicked() {
+            clicked = Some(i);
+        }
+        right = r.left();
+    }
+
+    let text = egui::Rect::from_min_max(pos2(rect.left() + 38.0, rect.top()), pos2(right - 2.0, rect.bottom()));
+    let painter = ui.painter().with_clip_rect(text.intersect(ui.clip_rect()));
+    let shown = painter.text(pos2(text.left(), y), egui::Align2::LEFT_CENTER, title, prop(12.5), if lit { p.text } else { p.dim });
+    if !detail.is_empty() {
+        painter.text(pos2(shown.right() + 7.0, y), egui::Align2::LEFT_CENTER, detail, prop(11.5), p.faint);
+    }
+    if resp.clicked() {
+        state.toggle(ui);
+    }
+    state.show_body_unindented(ui, |ui| {
+        egui::Frame::new().inner_margin(egui::Margin { left: 6, right: 0, top: 0, bottom: 2 }).show(ui, body);
+    });
+    clicked
 }

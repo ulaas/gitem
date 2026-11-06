@@ -169,7 +169,7 @@ impl ToolsView {
         let p = cx.pal.clone();
         let path = cx.repo.ignore_path();
         let text = self.ignore_text.get_or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
-        ui.add(egui::TextEdit::multiline(text).code_editor().desired_rows(16).desired_width(f32::INFINITY));
+        ui.add(crate::widgets::text_area(text).code_editor().desired_rows(16).desired_width(f32::INFINITY));
         let mut reload = false;
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
@@ -186,7 +186,7 @@ impl ToolsView {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label("Test a path");
-            if ui.add(egui::TextEdit::singleline(&mut self.ignore_test).hint_text("build/output.log").desired_width(280.0)).changed() {
+            if ui.add(crate::widgets::input(&mut self.ignore_test).hint_text("build/output.log").desired_width(280.0)).changed() {
                 let t = self.ignore_test.trim();
                 self.ignore_result = (!t.is_empty()).then(|| cx.repo.check_ignore(t));
             }
@@ -279,7 +279,7 @@ impl ToolsView {
             cx.repo.sparse_patterns().join("\n")
         });
         ui.label(RichText::new("Check out only these folders, one per line. Everything else stays out of the working tree.").color(p.dim));
-        ui.add(egui::TextEdit::multiline(text).code_editor().desired_rows(10).desired_width(f32::INFINITY));
+        ui.add(crate::widgets::text_area(text).code_editor().desired_rows(10).desired_width(f32::INFINITY));
         ui.checkbox(&mut self.sparse_cone, "Cone mode (folders; faster)");
         let mut disabled = false;
         ui.horizontal(|ui| {
@@ -355,7 +355,7 @@ impl ConfigView {
             self.entries.spawn(ui.ctx(), move || r.config_list());
         }
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter keys and values").desired_width(280.0));
+            ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter keys and values").desired_width(280.0));
             ui.checkbox(&mut self.show_system, "Include system");
             if ui.button("Set local…").clicked() {
                 cx.form(forms::raw_config_form("local"));
@@ -388,7 +388,7 @@ impl ConfigView {
                     let is_editing = self.editing.as_ref().is_some_and(|(s, k, _)| *s == e.scope && *k == e.key);
                     if is_editing {
                         if let Some((_, _, v)) = &mut self.editing {
-                            ui.text_edit_singleline(v);
+                            ui.add(crate::widgets::input(v));
                         }
                         ui.horizontal(|ui| {
                             if ui.small_button("Save").clicked()

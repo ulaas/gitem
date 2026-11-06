@@ -88,7 +88,7 @@ impl SettingsView {
         ui.label(RichText::new(version.as_str()).small().color(p.dim));
         ui.horizontal(|ui| {
             ui.label("Custom git path");
-            ui.add(egui::TextEdit::singleline(&mut s.git_path).hint_text("Leave blank to discover").desired_width(360.0));
+            ui.add(crate::widgets::input(&mut s.git_path).hint_text("Leave blank to discover").desired_width(360.0));
             if ui.small_button("Browse…").clicked()
                 && let Some(f) = rfd::FileDialog::new().pick_file() {
                     s.git_path = f.to_string_lossy().into_owned();
@@ -97,7 +97,7 @@ impl SettingsView {
         ui.label(RichText::new("Search order: this setting, a git/ folder beside gitem (portable), PATH, standard install folders. Restart to apply.").small().color(p.faint));
 
         section(ui, "External editor", &p);
-        ui.add(egui::TextEdit::singleline(&mut s.default_external_editor).hint_text("Path to your editor. Leave blank to reveal files in the file manager instead.").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut s.default_external_editor).hint_text("Path to your editor. Leave blank to reveal files in the file manager instead.").desired_width(f32::INFINITY));
 
         section(ui, "Behaviour", &p);
         ui.checkbox(&mut s.confirm_destructive, "Ask before destructive commands");
@@ -115,13 +115,13 @@ impl SettingsView {
         ui.checkbox(&mut s.auto_maintenance, "Run git's safe maintenance when opening a repository");
         ui.horizontal(|ui| {
             ui.label("Start Work branch name");
-            ui.add(egui::TextEdit::singleline(&mut s.start_work_format).hint_text("${id}-${title}").desired_width(240.0));
+            ui.add(crate::widgets::input(&mut s.start_work_format).hint_text("${id}-${title}").desired_width(240.0));
         });
         ui.horizontal(|ui| {
             ui.label("Agent command");
-            ui.add(egui::TextEdit::singleline(&mut s.agent_command).desired_width(180.0)).on_hover_text("Run in a new terminal by \"Start agent session\" on a worktree");
+            ui.add(crate::widgets::input(&mut s.agent_command).desired_width(180.0)).on_hover_text("Run in a new terminal by \"Start agent session\" on a worktree");
             ui.label("Worktree task");
-            ui.add(egui::TextEdit::singleline(&mut s.worktree_task).hint_text("npm test").desired_width(180.0));
+            ui.add(crate::widgets::input(&mut s.worktree_task).hint_text("npm test").desired_width(180.0));
         });
         ui.horizontal(|ui| {
             ui.label("Fetch automatically every");
@@ -140,7 +140,7 @@ impl SettingsView {
         section(ui, "Blame", &p);
         ui.checkbox(&mut s.inline_blame, "Show blame at the end of the current line");
         ui.label("Inline and status-bar format");
-        ui.add(egui::TextEdit::singleline(&mut s.inline_blame_format).desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut s.inline_blame_format).desired_width(f32::INFINITY));
         ui.label(RichText::new("Tokens: {author} {ago} {date} {subject} {sha}").small().color(p.faint));
         ui.checkbox(&mut s.code_lens, "Show recent-change lens above symbols");
     }
@@ -152,23 +152,23 @@ impl SettingsView {
         let mut remove = None;
         for (i, h) in s.custom_hosts.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut h.host).hint_text("git.example.com").desired_width(180.0));
+                ui.add(crate::widgets::input(&mut h.host).hint_text("git.example.com").desired_width(180.0));
                 egui::ComboBox::from_id_salt(("kind", i)).selected_text(h.kind.label()).show_ui(ui, |ui| {
                     for k in ForgeKind::ALL {
                         ui.selectable_value(&mut h.kind, k, k.label());
                     }
                 });
-                ui.add(egui::TextEdit::singleline(&mut h.api_base).hint_text("API URL (optional)").desired_width(220.0));
+                ui.add(crate::widgets::input(&mut h.api_base).hint_text("API URL (optional)").desired_width(220.0));
                 if ui.small_button("✖").clicked() {
                     remove = Some(i);
                 }
             });
             ui.collapsing(format!("Custom links for {}", if h.host.is_empty() { "this server" } else { &h.host }), |ui| {
                 ui.label(RichText::new("Optional. Tokens: ${repo} ${sha} ${file} ${line} ${branch} ${base} ${head}").small().color(p.faint));
-                ui.add(egui::TextEdit::singleline(&mut h.templates.commit).hint_text("Commit link").desired_width(f32::INFINITY));
-                ui.add(egui::TextEdit::singleline(&mut h.templates.file).hint_text("File link").desired_width(f32::INFINITY));
-                ui.add(egui::TextEdit::singleline(&mut h.templates.branch).hint_text("Branch link").desired_width(f32::INFINITY));
-                ui.add(egui::TextEdit::singleline(&mut h.templates.compare).hint_text("Compare link").desired_width(f32::INFINITY));
+                ui.add(crate::widgets::input(&mut h.templates.commit).hint_text("Commit link").desired_width(f32::INFINITY));
+                ui.add(crate::widgets::input(&mut h.templates.file).hint_text("File link").desired_width(f32::INFINITY));
+                ui.add(crate::widgets::input(&mut h.templates.branch).hint_text("Branch link").desired_width(f32::INFINITY));
+                ui.add(crate::widgets::input(&mut h.templates.compare).hint_text("Compare link").desired_width(f32::INFINITY));
             });
         }
         if let Some(i) = remove {
@@ -202,8 +202,8 @@ impl SettingsView {
         let mut remove = None;
         for (i, a) in s.autolinks.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut a.prefix).hint_text("JIRA-").desired_width(90.0));
-                ui.add(egui::TextEdit::singleline(&mut a.url).hint_text("https://example.com/browse/JIRA-<num>").desired_width(340.0));
+                ui.add(crate::widgets::input(&mut a.prefix).hint_text("JIRA-").desired_width(90.0));
+                ui.add(crate::widgets::input(&mut a.url).hint_text("https://example.com/browse/JIRA-<num>").desired_width(340.0));
                 ui.checkbox(&mut a.alphanumeric, "Letters too");
                 if ui.small_button("✖").clicked() {
                     remove = Some(i);
@@ -218,9 +218,9 @@ impl SettingsView {
         }
 
         section(ui, "Jira", &p);
-        ui.add(egui::TextEdit::singleline(&mut s.issue_trackers.jira_base_url).hint_text("https://you.atlassian.net").desired_width(360.0));
-        ui.add(egui::TextEdit::singleline(&mut s.issue_trackers.jira_email).hint_text("Account email").desired_width(360.0));
-        ui.add(egui::TextEdit::singleline(&mut s.issue_trackers.jira_jql).hint_text("JQL (default: unresolved, assigned to you)").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut s.issue_trackers.jira_base_url).hint_text("https://you.atlassian.net").desired_width(360.0));
+        ui.add(crate::widgets::input(&mut s.issue_trackers.jira_email).hint_text("Account email").desired_width(360.0));
+        ui.add(crate::widgets::input(&mut s.issue_trackers.jira_jql).hint_text("JQL (default: unresolved, assigned to you)").desired_width(f32::INFINITY));
         if ui.small_button("Set Jira API token…").clicked() {
             cx.form(secret_form("Jira API token", "jira"));
         }
@@ -248,11 +248,11 @@ impl SettingsView {
         });
         ui.horizontal(|ui| {
             ui.label("Model");
-            ui.add(egui::TextEdit::singleline(&mut s.ai.model).hint_text(s.ai.provider.default_model()).desired_width(260.0));
+            ui.add(crate::widgets::input(&mut s.ai.model).hint_text(s.ai.provider.default_model()).desired_width(260.0));
         });
         ui.horizontal(|ui| {
             ui.label("API URL");
-            ui.add(egui::TextEdit::singleline(&mut s.ai.base_url).hint_text("Leave blank for the provider default").desired_width(360.0));
+            ui.add(crate::widgets::input(&mut s.ai.base_url).hint_text("Leave blank for the provider default").desired_width(360.0));
         });
         let provider = s.ai.provider;
         let has = cred::ai_key(provider.key_name()).is_some();
@@ -288,9 +288,9 @@ impl SettingsView {
         ui.label(RichText::new("AI features send the relevant diff to this provider, only when you ask.").small().color(p.faint));
         ui.label(RichText::new("Files matched by .aiignore, .cursorignore, or .aiexclude are left out of every request.").small().color(p.faint));
         section(ui, "Instructions for reviews and conflict resolution", &p);
-        ui.add(egui::TextEdit::multiline(&mut s.ai.custom_instructions).desired_rows(2).desired_width(f32::INFINITY));
+        ui.add(crate::widgets::text_area(&mut s.ai.custom_instructions).desired_rows(2).desired_width(f32::INFINITY));
         section(ui, "Commit message conventions", &p);
-        ui.add(egui::TextEdit::multiline(&mut s.ai.commit_style).hint_text("e.g. Conventional Commits: feat:, fix:, chore:").desired_rows(3).desired_width(f32::INFINITY));
+        ui.add(crate::widgets::text_area(&mut s.ai.commit_style).hint_text("e.g. Conventional Commits: feat:, fix:, chore:").desired_rows(3).desired_width(f32::INFINITY));
     }
 }
 

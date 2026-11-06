@@ -189,7 +189,7 @@ impl DiffView {
 
     fn file_list(&mut self, ui: &mut Ui, cx: &mut Cx, files: &[(FileDiff, Prepared)]) {
         let p = cx.pal.clone();
-        ui.add(egui::TextEdit::singleline(&mut self.file_filter).hint_text("Filter files").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut self.file_filter).hint_text("Filter files").desired_width(f32::INFINITY));
         egui::ScrollArea::vertical().id_salt("diff-file-list").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let q = self.file_filter.to_lowercase();

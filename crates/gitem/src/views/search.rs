@@ -123,7 +123,7 @@ impl SearchView {
             }
         }
         ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("fix login  @:ann  file:src/auth  after:2024-01-01").desired_width(ui.available_width() - 110.0));
+            let r = ui.add(crate::widgets::input(&mut self.query).hint_text("fix login  @:ann  file:src/auth  after:2024-01-01").desired_width(ui.available_width() - 110.0));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Search").clicked() || enter {
                 self.run_search(&ctx, cx);
@@ -257,7 +257,7 @@ fn short(s: &str) -> &str {
 
 /// Text input with a dropdown of matching refs.
 pub fn ref_picker(ui: &mut Ui, id: &str, value: &mut String, refs: &[String]) {
-    ui.add(egui::TextEdit::singleline(value).id_salt(id).hint_text("branch, tag or SHA").desired_width(180.0));
+    ui.add(crate::widgets::input(value).id_salt(id).hint_text("branch, tag or SHA").desired_width(180.0));
     ui.menu_button("▾", |ui| {
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             for r in refs {

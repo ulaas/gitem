@@ -126,7 +126,7 @@ impl ComposerView {
                             }
                         });
                     });
-                    ui.add(egui::TextEdit::multiline(&mut self.groups[i].message).hint_text("Commit message").desired_rows(2).desired_width(f32::INFINITY));
+                    ui.add(crate::widgets::text_area(&mut self.groups[i].message).hint_text("Commit message").desired_rows(2).desired_width(f32::INFINITY));
                     for f in self.groups[i].files.clone() {
                         ui.horizontal(|ui| {
                             ui.add(egui::Label::new(RichText::new(&f).monospace().small()).truncate());

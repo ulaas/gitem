@@ -239,7 +239,7 @@ impl CredentialsView {
         }
         section(ui, "Test a connection", &p);
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.test_host).hint_text("github.com").desired_width(220.0));
+            ui.add(crate::widgets::input(&mut self.test_host).hint_text("github.com").desired_width(220.0));
             let host = self.test_host.trim().to_string();
             if ui.add_enabled(!host.is_empty(), egui::Button::new("Test")).clicked() {
                 self.test.spawn(ui.ctx(), move || -> Result<String, String> { Ok(cred::ssh_test(&host)) });
@@ -347,7 +347,7 @@ impl CredentialsView {
         let configured = cx.repo.config_get("gpg.ssh.allowedSignersFile");
         let path = configured.clone().map(std::path::PathBuf::from).unwrap_or_else(|| cred::ssh_dir().join("allowed_signers"));
         let text = self.signers.get_or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
-        ui.add(egui::TextEdit::multiline(text).code_editor().desired_rows(5).desired_width(f32::INFINITY));
+        ui.add(crate::widgets::text_area(text).code_editor().desired_rows(5).desired_width(f32::INFINITY));
         if ui.button("Save allowed signers").clicked() {
             match std::fs::write(&path, text.as_bytes()) {
                 Ok(()) => {

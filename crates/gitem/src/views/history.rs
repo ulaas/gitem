@@ -71,7 +71,7 @@ impl HistoryView {
             if self.lines.is_none() && ui.checkbox(&mut self.follow, "Follow renames").changed() {
                 self.load(&ui.ctx().clone(), cx);
             }
-            let r = ui.add(egui::TextEdit::singleline(&mut self.author).hint_text("Filter by author").desired_width(160.0));
+            let r = ui.add(crate::widgets::input(&mut self.author).hint_text("Filter by author").desired_width(160.0));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.load(&ui.ctx().clone(), cx);
             }

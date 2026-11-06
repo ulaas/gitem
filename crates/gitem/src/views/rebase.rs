@@ -117,7 +117,7 @@ impl RebaseView {
         if self.todo_file.is_none() {
             ui.horizontal(|ui| {
                 ui.label("Rebase onto");
-                let r = ui.add(egui::TextEdit::singleline(&mut self.base_edit).hint_text("branch, tag or SHA").desired_width(180.0));
+                let r = ui.add(crate::widgets::input(&mut self.base_edit).hint_text("branch, tag or SHA").desired_width(180.0));
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.base = Some(self.base_edit.trim().to_string()).filter(|s| !s.is_empty());
                     self.root = false;
@@ -270,7 +270,7 @@ impl RebaseView {
                         match item.action {
                             RebaseAction::Exec => {
                                 ui.label(RichText::new("exec").color(action_color(item.action, p)));
-                                ui.add(egui::TextEdit::singleline(&mut item.text).hint_text("shell command").desired_width(f32::INFINITY));
+                                ui.add(crate::widgets::input(&mut item.text).hint_text("shell command").desired_width(f32::INFINITY));
                             }
                             RebaseAction::Break | RebaseAction::Other => {
                                 ui.label(RichText::new(if item.action == RebaseAction::Break { "break" } else { item.text.as_str() }).color(p.dim).monospace());

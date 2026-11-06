@@ -1355,3 +1355,66 @@ fn active_tab_markers_can_find_their_tabs() {
     assert!(response.is_some(), "egui_dock's tab ids have changed, so the markers aren't drawn");
     assert!(response.unwrap().rect.width() > 10.0);
 }
+
+#[test]
+fn sidebar_sections_are_tall_toggle_and_keep_their_actions_on_the_header() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "listed-branch"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert!(h.get_by_label("Branches section").rect().height() >= 27.0);
+    assert!(h.query_by_label("+ New branch").is_none());
+    pump_for_label(&mut h, "listed-branch");
+
+    // An action leaves the section as it is.
+    click(&mut h, "New branch");
+    pump_for_label(&mut h, "Create");
+    assert!(h.query_by_label("listed-branch").is_some());
+    click(&mut h, "Cancel");
+
+    // The header folds it, and sections stay usable closed.
+    click(&mut h, "Branches section");
+    let t = Instant::now();
+    while h.query_by_label("listed-branch").is_some() {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(5), "the section didn't close");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    click(&mut h, "New branch");
+    pump_for_label(&mut h, "Create");
+    click(&mut h, "Cancel");
+    click(&mut h, "Branches section");
+    pump_for_label(&mut h, "listed-branch");
+
+    // Clearing stashes appears only when there's something to clear.
+    assert!(h.query_by_label("New stash").is_some());
+    assert!(h.query_by_label("Clear all stashes").is_none());
+    no_errors(&h);
+}
+
+#[test]
+fn text_boxes_have_room_and_stay_inside_the_window() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    for tab in all_tabs() {
+        h.state_mut().repos[0].open_tab(tab);
+        for _ in 0..3 {
+            h.step();
+        }
+        let window = ctx.content_rect();
+        for input in h.query_all_by_role(egui::accesskit::Role::TextInput).chain(h.query_all_by_role(egui::accesskit::Role::MultilineTextInput)) {
+            let r = input.rect();
+            assert!(r.height() >= 24.0, "too short: {r:?}");
+            assert!(r.left() >= window.left() && r.right() <= window.right() + 1.0, "past the window's edge: {r:?}");
+        }
+    }
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_branch(None)));
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(h.query_all_by_role(egui::accesskit::Role::TextInput).any(|i| i.rect().height() >= 24.0), "form fields too");
+}

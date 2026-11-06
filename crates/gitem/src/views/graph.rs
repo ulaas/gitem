@@ -240,7 +240,7 @@ impl GraphView {
         let mut changed = false;
         // Wraps, or a narrow panel would be stretched and clip the rightmost columns.
         ui.horizontal_wrapped(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search: message, @me, @:author, committer:, file:, change:, #:sha").desired_width(280.0));
+            let r = ui.add(crate::widgets::input(&mut self.query).hint_text("Search: message, @me, @:author, committer:, file:, change:, #:sha").desired_width(280.0));
             if std::mem::take(&mut self.focus_search) {
                 r.request_focus();
             }
@@ -488,7 +488,7 @@ impl GraphView {
         let mut close = false;
         let mut pick = None;
         egui::Frame::new().fill(cx.pal.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut q).hint_text("Jump to a branch, tag, or worktree").desired_width(f32::INFINITY));
+            let r = ui.add(crate::widgets::input(&mut q).hint_text("Jump to a branch, tag, or worktree").desired_width(f32::INFINITY));
             r.request_focus();
             let mut names = cx.data.ref_names();
             names.extend(cx.data.worktrees().iter().filter_map(|w| w.branch.clone()));

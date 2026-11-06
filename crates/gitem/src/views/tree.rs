@@ -35,7 +35,7 @@ impl TreeView {
             let (r, rev) = (cx.repo.clone(), self.rev.clone());
             self.files.spawn(ui.ctx(), move || r.tracked_files(Some(&rev)));
         }
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter files").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter files").desired_width(f32::INFINITY));
         if let Some(e) = &self.files.error {
             error_box(ui, e, &p);
         }

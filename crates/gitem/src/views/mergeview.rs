@@ -175,7 +175,7 @@ impl MergeView {
         ui.separator();
         if self.raw_mode {
             egui::ScrollArea::both().id_salt("merge-raw").auto_shrink([false, false]).show(ui, |ui| {
-                ui.add(egui::TextEdit::multiline(&mut self.raw_text).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).code_editor());
+                ui.add(crate::widgets::text_area(&mut self.raw_text).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).code_editor());
             });
         } else {
             self.panes(ui, cx, &mut loaded.doc);
@@ -565,7 +565,7 @@ impl MergeView {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rp.shrink(2.0)).layout(egui::Layout::top_down(egui::Align::Min)));
                     let mut done = false;
                     if let Some((_, text)) = &mut self.editing {
-                        let te = egui::TextEdit::multiline(text).font(mono(font)).desired_width(rp.width() - 8.0).desired_rows(1).frame(egui::Frame::NONE);
+                        let te = crate::widgets::text_area(text).font(mono(font)).desired_width(rp.width() - 8.0).desired_rows(1).frame(egui::Frame::NONE);
                         child.add(te);
                         child.horizontal(|ui| {
                             done = ui.small_button("Apply").clicked();

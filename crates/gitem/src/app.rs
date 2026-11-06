@@ -807,7 +807,7 @@ impl GitemApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label("Path to git");
-                    ui.text_edit_singleline(&mut self.settings.git_path);
+                    ui.add(crate::widgets::input(&mut self.settings.git_path));
                     if ui.button("Use").clicked() {
                         self.git = GitExe::discover(Some(Path::new(&self.settings.git_path))).map_err(|e| e.to_string());
                         self.settings_dirty = true;
@@ -831,7 +831,7 @@ impl GitemApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 500.0).max(0.0) / 2.0);
-                let r = ui.add(egui::TextEdit::singleline(&mut self.open_path).hint_text("Or type a path and press Enter").desired_width(500.0));
+                let r = ui.add(crate::widgets::input(&mut self.open_path).hint_text("Or type a path and press Enter").desired_width(500.0));
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.open_path.trim().is_empty() {
                     out.push(Action::OpenRepo(self.open_path.trim().into()));
                 }

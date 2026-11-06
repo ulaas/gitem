@@ -57,7 +57,7 @@ impl TreemapView {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.mode, Mode::Size, "Files by size");
             ui.selectable_value(&mut self.mode, Mode::Activity, "Files by recent commits");
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter by path").desired_width(220.0));
+            ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter by path").desired_width(220.0));
             if self.files.busy() {
                 ui.add(egui::Spinner::new().size(14.0));
             }

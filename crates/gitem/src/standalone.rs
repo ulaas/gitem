@@ -108,7 +108,7 @@ impl HelperApp {
             });
             return;
         }
-        let r = ui.add(egui::TextEdit::singleline(value).password(secret).desired_width(f32::INFINITY));
+        let r = ui.add(crate::widgets::input(value).password(secret).desired_width(f32::INFINITY));
         r.request_focus();
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(6.0);
@@ -203,7 +203,7 @@ impl HelperApp {
                         error_box(ui, e, &p);
                     }
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        ui.add(egui::TextEdit::multiline(text).code_editor().desired_width(f32::INFINITY).desired_rows(20));
+                        ui.add(crate::widgets::text_area(text).code_editor().desired_width(f32::INFINITY).desired_rows(20));
                     });
                 }
                 mode => {

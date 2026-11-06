@@ -79,8 +79,8 @@ impl PatchesView {
             egui::Frame::new().fill(p.panel2).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new("New patch").strong());
-                ui.add(egui::TextEdit::singleline(&mut self.title).hint_text("Title").desired_width(f32::INFINITY));
-                ui.add(egui::TextEdit::multiline(&mut self.description).hint_text("Description").desired_rows(2).desired_width(f32::INFINITY));
+                ui.add(crate::widgets::input(&mut self.title).hint_text("Title").desired_width(f32::INFINITY));
+                ui.add(crate::widgets::text_area(&mut self.description).hint_text("Description").desired_rows(2).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!self.title.trim().is_empty(), egui::Button::new("Save")).clicked() {
                         match cx.repo.diff_text(&src) {

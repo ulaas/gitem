@@ -58,14 +58,14 @@ impl ContributorsView {
         }
         ui.horizontal(|ui| {
             ui.label("Revision");
-            let r = ui.add(egui::TextEdit::singleline(&mut self.rev).desired_width(140.0));
+            let r = ui.add(crate::widgets::input(&mut self.rev).desired_width(140.0));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.load(&ctx, cx);
             }
             if ui.checkbox(&mut self.with_stats, "Lines added and removed").on_hover_text("Slower on large histories").changed() {
                 self.load(&ctx, cx);
             }
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(180.0));
+            ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(180.0));
             if self.people.busy() {
                 ui.add(egui::Spinner::new().size(14.0));
             }

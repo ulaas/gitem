@@ -318,7 +318,7 @@ impl FileView {
         });
         if self.find_open {
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut self.find).hint_text("Find in file").desired_width(240.0));
+                let r = ui.add(crate::widgets::input(&mut self.find).hint_text("Find in file").desired_width(240.0));
                 if r.changed() {
                     self.update_find();
                 }

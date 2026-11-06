@@ -99,7 +99,7 @@ impl ChangesView {
         egui::Panel::bottom("commit-box").resizable(true).default_size(190.0).show(ui, |ui| self.commit_box(ui, cx, &st));
 
         egui::ScrollArea::vertical().id_salt("changes-list").auto_shrink([false, false]).show(ui, |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter files").desired_width(f32::INFINITY));
+            ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter files").desired_width(f32::INFINITY));
             self.batch_bar(ui, cx, &st);
             let matches = |e: &StatusEntry, f: &str| f.is_empty() || e.path.to_lowercase().contains(&f.to_lowercase());
             let f = self.filter.clone();
@@ -201,7 +201,7 @@ impl ChangesView {
             });
         });
         egui::ScrollArea::vertical().id_salt("msg").max_height(ui.available_height() - 62.0).show(ui, |ui| {
-            ui.add(egui::TextEdit::multiline(&mut self.message).hint_text("Message (Ctrl+Enter to commit)").desired_rows(3).desired_width(f32::INFINITY));
+            ui.add(crate::widgets::text_area(&mut self.message).hint_text("Message (Ctrl+Enter to commit)").desired_rows(3).desired_width(f32::INFINITY));
         });
         let len = self.message.lines().next().unwrap_or("").chars().count();
         ui.horizontal(|ui| {
@@ -214,7 +214,7 @@ impl ChangesView {
             ui.checkbox(&mut self.no_verify, "Skip hooks");
             ui.menu_button("Author ▾", |ui| {
                 ui.label("Override author (Name <email>)");
-                ui.text_edit_singleline(&mut self.author);
+                ui.add(crate::widgets::input(&mut self.author));
             });
             ui.menu_button("Co-authors ▾", |ui| {
                 ui.set_max_height(280.0);

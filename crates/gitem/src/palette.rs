@@ -188,7 +188,7 @@ impl PaletteState {
             self.files.spawn(ui.ctx(), move || r.tracked_files(None));
         }
         ui.set_width(620.0);
-        let r = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Run a command, switch branch, or open a file").desired_width(f32::INFINITY));
+        let r = ui.add(crate::widgets::input(&mut self.query).hint_text("Run a command, switch branch, or open a file").desired_width(f32::INFINITY));
         if self.just_opened {
             r.request_focus();
             self.just_opened = false;

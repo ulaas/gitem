@@ -45,11 +45,11 @@ impl ReflogView {
         }
         ui.horizontal(|ui| {
             ui.label("Ref");
-            let r = ui.add(egui::TextEdit::singleline(&mut self.rev).desired_width(160.0));
+            let r = ui.add(crate::widgets::input(&mut self.rev).desired_width(160.0));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.load(&ui.ctx().clone(), cx);
             }
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(200.0));
+            ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(200.0));
             ui.label(RichText::new("Every position HEAD has been at. Use it to recover lost commits.").small().color(p.faint));
         });
         ui.separator();
@@ -186,7 +186,7 @@ impl BisectView {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label("Automate with a test command");
-            ui.add(egui::TextEdit::singleline(&mut self.run_cmd).hint_text("cargo test failing_case").desired_width(280.0));
+            ui.add(crate::widgets::input(&mut self.run_cmd).hint_text("cargo test failing_case").desired_width(280.0));
             if ui.add_enabled(!self.run_cmd.trim().is_empty(), egui::Button::new("Run")).clicked() {
                 cx.run(ops::bisect_run(self.run_cmd.trim()));
             }

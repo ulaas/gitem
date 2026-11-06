@@ -160,12 +160,16 @@ pub fn row(ui: &mut Ui, h: f32, selected: bool, p: &Palette) -> (Rect, Response)
     (rect, resp)
 }
 
-/// A sidebar section's title, with a coloured icon that tells sections apart.
-pub fn section_title(glyph: &str, color: Color32, title: &str, p: &Palette) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    job.append(glyph, 0.0, TextFormat { font_id: prop(13.0), color, valign: egui::Align::Center, ..Default::default() });
-    job.append(title, 6.0, TextFormat { font_id: prop(11.0), color: p.dim, valign: egui::Align::Center, ..Default::default() });
-    job
+/// Space between a text box's edge and its text. egui has no style for this, so every
+/// text box in the app is made here.
+const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(6, 5);
+
+pub fn input(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(text).margin(INPUT_MARGIN)
+}
+
+pub fn text_area(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+    egui::TextEdit::multiline(text).margin(INPUT_MARGIN)
 }
 
 pub fn section(ui: &mut Ui, title: &str, p: &Palette) {

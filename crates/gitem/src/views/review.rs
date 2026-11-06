@@ -96,7 +96,7 @@ impl ReviewView {
         }
         ui.horizontal(|ui| {
             ui.label("Changes since");
-            ui.add(egui::TextEdit::singleline(&mut self.saved.base).desired_width(160.0));
+            ui.add(crate::widgets::input(&mut self.saved.base).desired_width(160.0));
             let busy = self.findings.busy();
             if ui.add_enabled(!busy, egui::Button::new("Review with AI")).on_hover_text("Adds findings as threads").clicked() {
                 let (r, src, cfg) = (cx.repo.clone(), self.source(), cx.settings.ai.clone());
@@ -161,7 +161,7 @@ impl ReviewView {
         egui::ScrollArea::vertical().id_salt("review-threads").auto_shrink([false, false]).show(ui, |ui| {
             let target = self.selected.clone().unwrap_or_default();
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.new_comment).hint_text(if target.is_empty() { "Add a general note" } else { "Add a note on this file" }).desired_width(ui.available_width() - 60.0));
+                ui.add(crate::widgets::input(&mut self.new_comment).hint_text(if target.is_empty() { "Add a general note" } else { "Add a note on this file" }).desired_width(ui.available_width() - 60.0));
                 if ui.add_enabled(!self.new_comment.trim().is_empty(), egui::Button::new("Add")).clicked() {
                     let text = std::mem::take(&mut self.new_comment);
                     self.saved.threads.push(Thread { path: target.clone(), text: text.trim().to_string(), author: "You".to_string(), ..Default::default() });
@@ -183,7 +183,7 @@ impl ReviewView {
                         ui.label(RichText::new(format!("  {r}")).color(p.dim));
                     }
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.replies[i]).hint_text("Reply").id_salt(("reply", i)).desired_width(ui.available_width() - 140.0));
+                        ui.add(crate::widgets::input(&mut self.replies[i]).hint_text("Reply").id_salt(("reply", i)).desired_width(ui.available_width() - 140.0));
                         if ui.small_button("Reply").clicked() && !self.replies[i].trim().is_empty() {
                             let r = std::mem::take(&mut self.replies[i]);
                             self.saved.threads[i].replies.push(r.trim().to_string());

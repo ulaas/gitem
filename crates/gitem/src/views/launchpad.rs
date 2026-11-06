@@ -210,7 +210,7 @@ impl LaunchpadView {
                     cx.form(token_form(&r));
                 }
         }
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
         let Some((me, prs)) = self.prs.value.take() else {
             if self.prs.busy() {
                 spinner_row(ui, "Loading pull requests…", &p);
@@ -407,7 +407,7 @@ impl LaunchpadView {
         if let Some(e) = &self.issues.error {
             error_box(ui, e, &p);
         }
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
         let Some(issues) = self.issues.value.take() else {
             if self.issues.busy() {
                 spinner_row(ui, "Loading issues…", &p);
@@ -491,15 +491,15 @@ impl LaunchpadView {
         }
         ui.horizontal(|ui| {
             ui.label("From");
-            ui.add(egui::TextEdit::singleline(&mut self.head).desired_width(200.0));
+            ui.add(crate::widgets::input(&mut self.head).desired_width(200.0));
             ui.label("into");
-            ui.add(egui::TextEdit::singleline(&mut self.base).desired_width(200.0));
+            ui.add(crate::widgets::input(&mut self.base).desired_width(200.0));
             ui.checkbox(&mut self.draft, "Draft");
         });
         ui.label(RichText::new("The source branch has to be pushed first.").small().color(p.faint));
         ui.add_space(4.0);
-        ui.add(egui::TextEdit::singleline(&mut self.title).hint_text("Title").desired_width(f32::INFINITY));
-        ui.add(egui::TextEdit::multiline(&mut self.body).hint_text("Description (Markdown)").desired_rows(12).desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut self.title).hint_text("Title").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::text_area(&mut self.body).hint_text("Description (Markdown)").desired_rows(12).desired_width(f32::INFINITY));
         ui.horizontal(|ui| {
             let ok = !self.title.trim().is_empty() && !self.head.is_empty() && !self.create.busy();
             let b = egui::Button::new(RichText::new("Create").color(if ok { p.on_accent } else { p.faint })).fill(if ok { p.accent } else { p.panel2 });

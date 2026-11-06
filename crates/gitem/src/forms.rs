@@ -125,7 +125,7 @@ impl FormDialog {
             match f {
                 Field::Text { label, value, hint, password, .. } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
-                    let r = ui.add(egui::TextEdit::singleline(value).hint_text(hint.as_str()).password(*password).desired_width(f32::INFINITY));
+                    let r = ui.add(crate::widgets::input(value).hint_text(hint.as_str()).password(*password).desired_width(f32::INFINITY));
                     if first_text && !ui.ctx().memory(|m| m.focused().is_some()) {
                         r.request_focus();
                         first_text = false;
@@ -133,7 +133,7 @@ impl FormDialog {
                 }
                 Field::Multiline { label, value, .. } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
-                    ui.add(egui::TextEdit::multiline(value).desired_rows(4).desired_width(f32::INFINITY));
+                    ui.add(crate::widgets::text_area(value).desired_rows(4).desired_width(f32::INFINITY));
                 }
                 Field::Check { label, value, .. } => {
                     ui.checkbox(value, label.as_str());
@@ -149,7 +149,7 @@ impl FormDialog {
                 }
                 Field::Pick { key, label, options, value } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
-                    ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY));
+                    ui.add(crate::widgets::input(value).desired_width(f32::INFINITY));
                     let q = value.clone();
                     let mut scored: Vec<(i32, &String)> = options.iter().filter_map(|o| gitem_core::util::fuzzy_score(&q, o).map(|s| (s, o))).collect();
                     scored.sort_by_key(|x| std::cmp::Reverse(x.0));
@@ -168,7 +168,7 @@ impl FormDialog {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
                     ui.horizontal(|ui| {
                         let browse = ui.button("Browse…").clicked();
-                        ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY));
+                        ui.add(crate::widgets::input(value).desired_width(f32::INFINITY));
                         if browse {
                             let d = rfd::FileDialog::new();
                             let picked = if *folder { d.pick_folder() } else { d.pick_file() };

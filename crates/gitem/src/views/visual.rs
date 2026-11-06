@@ -59,9 +59,9 @@ impl VisualView {
         }
         ui.horizontal(|ui| {
             ui.label("Path");
-            let a = ui.add(egui::TextEdit::singleline(&mut self.path).hint_text("whole repository").desired_width(200.0));
+            let a = ui.add(crate::widgets::input(&mut self.path).hint_text("whole repository").desired_width(200.0));
             ui.label("Branch");
-            let b = ui.add(egui::TextEdit::singleline(&mut self.rev).desired_width(120.0));
+            let b = ui.add(crate::widgets::input(&mut self.rev).desired_width(120.0));
             if (a.lost_focus() || b.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.started = false;
                 self.window = None;

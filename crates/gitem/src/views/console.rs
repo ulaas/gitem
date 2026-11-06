@@ -32,7 +32,7 @@ impl ConsoleView {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.show_reads, "Show background reads");
             ui.checkbox(&mut self.stick, "Follow");
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(200.0));
+            ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(200.0));
             if ui.small_button("Clear").clicked()
                 && let Ok(mut l) = cx.repo.git.log.lock() {
                     l.clear();
@@ -43,7 +43,7 @@ impl ConsoleView {
             ui.add_space(3.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("git").monospace().color(p.accent));
-                let r = ui.add(egui::TextEdit::singleline(&mut self.input).font(egui::TextStyle::Monospace).hint_text("log --oneline -5").desired_width(ui.available_width() - 60.0));
+                let r = ui.add(crate::widgets::input(&mut self.input).font(egui::TextStyle::Monospace).hint_text("log --oneline -5").desired_width(ui.available_width() - 60.0));
                 let go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (ui.button("Run").clicked() || go) && !self.input.trim().is_empty() {
                     let line = self.input.trim().strip_prefix("git ").unwrap_or(self.input.trim()).to_string();
