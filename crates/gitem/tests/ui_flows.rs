@@ -2024,3 +2024,17 @@ fn local_and_remote_branches_open_to_their_latest_commits() {
     pump_for_label(&mut h, "Load 20 more");
     no_errors(&h);
 }
+#[test]
+fn a_40_byte_branch_name_with_a_multibyte_character_does_not_panic() {
+    let f = Fx::new();
+    sample_history(&f);
+    let name = format!("fix-ab\u{f6}{}", "x".repeat(32));
+    assert_eq!(name.len(), 40);
+    f.git(&["branch", &name]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::compare(&name, "HEAD"));
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Range(name.clone(), "HEAD".into()), None));
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}

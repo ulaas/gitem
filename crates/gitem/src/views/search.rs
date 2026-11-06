@@ -287,7 +287,7 @@ impl SearchView {
 }
 
 fn short(s: &str) -> &str {
-    if s.len() == 40 { &s[..7] } else { s }
+    gitem_core::util::short_rev(s)
 }
 
 /// Text input with a dropdown of matching refs.

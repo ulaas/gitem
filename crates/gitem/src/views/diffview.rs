@@ -606,7 +606,7 @@ impl DiffView {
 }
 
 fn short(s: &str) -> &str {
-    if s.len() == 40 { &s[..7] } else { s }
+    gitem_core::util::short_rev(s)
 }
 
 fn leaf(p: &str) -> &str {

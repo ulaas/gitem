@@ -64,6 +64,12 @@ pub fn prefix(s: &str, n: usize) -> &str {
     &s[..end]
 }
 
+/// A full object name shortened for a title. Anything else is a ref name, which can be
+/// 40 bytes long and non-ASCII too, and stays whole.
+pub fn short_rev(s: &str) -> &str {
+    if s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) { &s[..7] } else { s }
+}
+
 /// Subsequence fuzzy scoring; `None` when `needle` does not match.
 pub fn fuzzy_score(needle: &str, hay: &str) -> Option<i32> {
     fuzzy_match(needle, hay).map(|m| m.0)
@@ -108,6 +114,20 @@ pub fn fuzzy_match(needle: &str, hay: &str) -> Option<(i32, Vec<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_rev_only_shortens_a_full_sha() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(short_rev(sha), "0123456");
+        assert_eq!(short_rev("main"), "main");
+        // Git allows a branch name of any shape, including 40 bytes with a multibyte
+        // character across byte 7.
+        for name in [format!("fix-ab\u{f6}{}", "x".repeat(32)), format!("abcde\u{20ac}{}", "x".repeat(32)), "x".repeat(40)] {
+            assert_eq!(name.len(), 40);
+            assert_eq!(short_rev(&name), name);
+        }
+    }
+
     #[test]
     fn relative() {
         assert_eq!(relative_time(0, 30), "just now");
