@@ -12,6 +12,11 @@ pub struct Palette {
     pub hover: Color32,
     pub selection: Color32,
     pub border: Color32,
+    /// Buttons sit clearly above every panel colour.
+    pub button: Color32,
+    pub button_hover: Color32,
+    pub button_border: Color32,
+    pub status_bg: Color32,
     pub text: Color32,
     pub dim: Color32,
     pub faint: Color32,
@@ -51,8 +56,12 @@ impl Palette {
             panel: hex(0x1d2025),
             panel2: hex(0x25292f),
             hover: hex(0x2b3037),
-            selection: hex(0x23395a),
+            selection: hex(0x274b80),
             border: hex(0x32363d),
+            button: hex(0x343b46),
+            button_hover: hex(0x424b59),
+            button_border: hex(0x4b5462),
+            status_bg: hex(0x1b3454),
             text: hex(0xe6e6e3),
             dim: hex(0xa8a9a3),
             faint: hex(0x7d7e79),
@@ -74,7 +83,7 @@ impl Palette {
     }
 
     pub fn midnight() -> Self {
-        Self { bg: hex(0x0c0e14), panel: hex(0x11141c), panel2: hex(0x181c27), hover: hex(0x1f2431), border: hex(0x262b38), selection: hex(0x1b3158), ..Self::dark() }
+        Self { bg: hex(0x0c0e14), panel: hex(0x11141c), panel2: hex(0x181c27), hover: hex(0x1f2431), border: hex(0x262b38), selection: hex(0x1f4176), button: hex(0x252c3b), button_hover: hex(0x323b4e), button_border: hex(0x3b4559), status_bg: hex(0x142a4a), ..Self::dark() }
     }
 
     pub fn light() -> Self {
@@ -86,6 +95,10 @@ impl Palette {
             hover: hex(0xe4e4df),
             selection: hex(0xcde2fb),
             border: hex(0xd6d5ce),
+            button: hex(0xffffff),
+            button_hover: hex(0xe6effb),
+            button_border: hex(0xb6b5ad),
+            status_bg: hex(0xd3e4f9),
             text: hex(0x1a1a18),
             dim: hex(0x52514e),
             faint: hex(0x7b7a75),
@@ -162,6 +175,26 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Dock tabs in the app's colours, with an accent line under the tab row.
+pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
+    let mut s = egui_dock::Style::from_egui(style);
+    s.tab_bar.bg_fill = p.bg;
+    s.tab_bar.hline_color = p.accent;
+    s.tab.active.bg_fill = p.panel;
+    s.tab.active.text_color = p.text;
+    s.tab.active.outline_color = p.border;
+    s.tab.focused.bg_fill = p.panel;
+    s.tab.focused.text_color = p.text;
+    s.tab.focused.outline_color = p.accent;
+    s.tab.inactive.bg_fill = p.bg;
+    s.tab.inactive.text_color = p.dim;
+    s.tab.inactive.outline_color = Color32::TRANSPARENT;
+    s.tab.hovered.bg_fill = p.hover;
+    s.tab.hovered.text_color = p.text;
+    s.tab.hovered.outline_color = Color32::TRANSPARENT;
+    s
+}
+
 pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
     let mut v = if p.dark { Visuals::dark() } else { Visuals::light() };
     v.panel_fill = p.panel;
@@ -183,23 +216,24 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
     w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
     w.noninteractive.corner_radius = radius;
-    w.inactive.bg_fill = p.panel2;
-    w.inactive.weak_bg_fill = p.panel2;
+    w.inactive.bg_fill = p.button;
+    w.inactive.weak_bg_fill = p.button;
     w.inactive.fg_stroke = Stroke::new(1.0, p.text);
-    w.inactive.bg_stroke = Stroke::NONE;
+    w.inactive.bg_stroke = Stroke::new(1.0, p.button_border);
     w.inactive.corner_radius = radius;
-    w.hovered.bg_fill = p.hover;
-    w.hovered.weak_bg_fill = p.hover;
+    w.hovered.bg_fill = p.button_hover;
+    w.hovered.weak_bg_fill = p.button_hover;
     w.hovered.fg_stroke = Stroke::new(1.0, p.text);
-    w.hovered.bg_stroke = Stroke::new(1.0, p.border);
+    w.hovered.bg_stroke = Stroke::new(1.0, p.accent);
     w.hovered.corner_radius = radius;
     w.active.bg_fill = p.selection;
     w.active.weak_bg_fill = p.selection;
     w.active.fg_stroke = Stroke::new(1.0, p.text);
     w.active.bg_stroke = Stroke::new(1.0, p.accent);
     w.active.corner_radius = radius;
-    w.open.bg_fill = p.hover;
-    w.open.weak_bg_fill = p.hover;
+    w.open.bg_fill = p.button_hover;
+    w.open.weak_bg_fill = p.button_hover;
+    w.open.bg_stroke = Stroke::new(1.0, p.accent);
     w.open.fg_stroke = Stroke::new(1.0, p.text);
     w.open.corner_radius = radius;
 

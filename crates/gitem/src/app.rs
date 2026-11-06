@@ -582,6 +582,7 @@ impl GitemApp {
             ui.add_space(2.0);
             ui.scope(|ui| {
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
                 ui.menu_button(chrome::icon::PLUS, |ui| self.open_menu(ui, out)).response.on_hover_text("Open a repository");
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -684,7 +685,7 @@ impl GitemApp {
             };
             let label = branch.clone().unwrap_or_else(|| if has_status { "detached HEAD".into() } else { "…".into() });
             let names: Vec<Branch> = tab.data.local_branches().cloned().collect();
-            ui.menu_button(format!("{}  {label}  {}", chrome::icon::GIT_BRANCH, chrome::icon::CARET_DOWN), |ui| {
+            ui.menu_button((RichText::new(chrome::icon::GIT_BRANCH).color(p.accent), RichText::new(format!("{label}  {}", chrome::icon::CARET_DOWN)).strong()), |ui| {
                 if ui.button("+ New branch…").clicked() {
                     out.push(Action::Form(forms::new_branch(None)));
                     ui.close();
@@ -704,11 +705,11 @@ impl GitemApp {
             ui.separator();
             let prune = self.settings.prune_on_fetch;
             let remotes: Vec<String> = tab.data.remotes().iter().map(|r| r.name.clone()).collect();
-            if chrome::icon_text_button(ui, chrome::icon::CLOUD_ARROW_DOWN, "Fetch", "Fetch all remotes", &p).clicked() {
+            if chrome::icon_text_button(ui, chrome::icon::CLOUD_ARROW_DOWN, p.accent, "Fetch", "Fetch all remotes", false, &p).clicked() {
                 out.push(Action::Run(ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() })));
             }
             let pull_label = if behind > 0 { format!("Pull {behind}") } else { "Pull".to_string() };
-            if chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_DOWN, &pull_label, "", &p).clicked() {
+            if chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_DOWN, p.incoming(), &pull_label, "", behind > 0, &p).clicked() {
                 let mode = match self.settings.pull_mode.as_str() {
                     "ff-only" => ops::PullMode::FfOnly,
                     "rebase" => ops::PullMode::Rebase,
@@ -721,7 +722,7 @@ impl GitemApp {
                 out.push(Action::Form(forms::pull_form()));
             }
             let push_label = if upstream.is_none() && branch.is_some() { "Publish".to_string() } else if ahead > 0 { format!("Push {ahead}") } else { "Push".to_string() };
-            if chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_UP, &push_label, "", &p).clicked() {
+            if chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_UP, p.outgoing(), &push_label, "", ahead > 0, &p).clicked() {
                 if upstream.is_some() {
                     out.push(Action::Run(ops::push(&ops::PushOpts::default())));
                 } else {
@@ -732,15 +733,15 @@ impl GitemApp {
                 out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), upstream.is_some())));
             }
             ui.separator();
-            if chrome::icon_button(ui, chrome::icon::ARCHIVE, crate::i18n::t("Stash"), "Stash changes", false, &p).clicked() {
+            if chrome::tool_button(ui, chrome::icon::ARCHIVE, p.series[6], crate::i18n::t("Stash"), "Stash changes", false, &p).clicked() {
                 out.push(Action::Form(forms::stash_form(Vec::new())));
             }
-            if chrome::icon_button(ui, chrome::icon::ARROWS_CLOCKWISE, crate::i18n::t("Refresh"), "Reload this repository (F5)", false, &p).clicked() {
+            if chrome::tool_button(ui, chrome::icon::ARROWS_CLOCKWISE, p.dim, crate::i18n::t("Refresh"), "Reload this repository (F5)", false, &p).clicked() {
                 out.push(Action::Refresh);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                chrome::icon_button(ui, chrome::icon::ARTICLE, crate::i18n::t("Details"), "Show the selected commit's details", tab.show_inspect, &p).clicked().then(|| tab.show_inspect = !tab.show_inspect);
-                chrome::icon_button(ui, chrome::icon::SIDEBAR_SIMPLE, crate::i18n::t("Sidebar"), "Show branches, tags, and files (Ctrl+B)", tab.show_sidebar, &p).clicked().then(|| tab.show_sidebar = !tab.show_sidebar);
+                chrome::tool_button(ui, chrome::icon::ARTICLE, p.dim, crate::i18n::t("Details"), "Show the selected commit's details", tab.show_inspect, &p).clicked().then(|| tab.show_inspect = !tab.show_inspect);
+                chrome::tool_button(ui, chrome::icon::SIDEBAR_SIMPLE, p.dim, crate::i18n::t("Sidebar"), "Show branches, tags, and files (Ctrl+B)", tab.show_sidebar, &p).clicked().then(|| tab.show_sidebar = !tab.show_sidebar);
             });
         });
     }
@@ -1148,7 +1149,7 @@ impl GitemApp {
 
         let bar_frame = egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::symmetric(8, 4));
         egui::Panel::top("title-bar").frame(egui::Frame::new().fill(self.pal.bg)).resizable(false).exact_size(chrome::TITLE_BAR_HEIGHT).show_separator_line(false).show(ui, |ui| self.title_bar(ui, &mut out));
-        egui::Panel::bottom("status-bar").frame(bar_frame).show(ui, |ui| self.status_bar(ui, &mut out));
+        egui::Panel::bottom("status-bar").frame(egui::Frame::new().fill(self.pal.status_bg).inner_margin(egui::Margin::symmetric(8, 3))).show_separator_line(false).show(ui, |ui| self.status_bar(ui, &mut out));
         let pal = self.pal.clone();
         if let Some(tab) = self.repos.get_mut(self.active)
             && tab.show_rail
@@ -1189,7 +1190,7 @@ impl GitemApp {
                     inspect.ui(ui, &mut cx);
                 });
             }
-            let style = egui_dock::Style::from_egui(ui.style());
+            let style = theme::dock_style(ui.style(), &pal);
             let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out } };
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 DockArea::new(dock).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_inside(ui, &mut viewer);

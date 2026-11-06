@@ -77,7 +77,7 @@ impl Sidebar {
     fn current_commits(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let branch = cx.current_branch().unwrap_or_else(|| "HEAD".into());
-        egui::CollapsingHeader::new(RichText::new(format!("COMMITS ({branch})")).small().strong().color(p.dim)).id_salt("sb-commits").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::GIT_COMMIT, p.series[0], &format!("COMMITS ({branch})"), &p)).id_salt("sb-commits").default_open(false).show(ui, |ui| {
             if self.commits_gen != Some(cx.data.refs_gen) {
                 self.commits_gen = Some(cx.data.refs_gen);
                 let r = cx.repo.clone();
@@ -105,7 +105,7 @@ impl Sidebar {
     fn branches(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let list: Vec<Branch> = cx.data.local_branches().filter(|b| self.matches(&b.name)).cloned().collect();
-        egui::CollapsingHeader::new(RichText::new(format!("BRANCHES ({})", list.len())).small().strong().color(p.dim)).id_salt("sb-branches").default_open(true).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::GIT_BRANCH, p.series[0], &format!("BRANCHES ({})", list.len()), &p)).id_salt("sb-branches").default_open(true).show(ui, |ui| {
             if ui.small_button("+ New branch").clicked() {
                 cx.form(forms::new_branch(None));
             }
@@ -211,7 +211,7 @@ impl Sidebar {
     fn remotes(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let remotes = cx.data.remotes().to_vec();
-        egui::CollapsingHeader::new(RichText::new(format!("REMOTES ({})", remotes.len())).small().strong().color(p.dim)).id_salt("sb-remotes").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::CLOUD, p.series[6], &format!("REMOTES ({})", remotes.len()), &p)).id_salt("sb-remotes").default_open(false).show(ui, |ui| {
             if ui.small_button("+ Add remote").clicked() {
                 cx.form(forms::add_remote());
             }
@@ -257,7 +257,7 @@ impl Sidebar {
     fn tags(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let list: Vec<Tag> = cx.data.tags().iter().filter(|t| self.matches(&t.name)).cloned().collect();
-        egui::CollapsingHeader::new(RichText::new(format!("TAGS ({})", list.len())).small().strong().color(p.dim)).id_salt("sb-tags").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::TAG, p.series[3], &format!("TAGS ({})", list.len()), &p)).id_salt("sb-tags").default_open(false).show(ui, |ui| {
             if ui.small_button("+ New tag").clicked() {
                 cx.form(forms::new_tag(None));
             }
@@ -276,7 +276,7 @@ impl Sidebar {
     fn stashes(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let list = cx.data.stashes().to_vec();
-        egui::CollapsingHeader::new(RichText::new(format!("STASHES ({})", list.len())).small().strong().color(p.dim)).id_salt("sb-stashes").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::ARCHIVE, p.series[4], &format!("STASHES ({})", list.len()), &p)).id_salt("sb-stashes").default_open(false).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.small_button("+ Stash").clicked() {
                     cx.form(forms::stash_form(Vec::new()));
@@ -300,7 +300,7 @@ impl Sidebar {
     fn worktrees(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let list = cx.data.worktrees().to_vec();
-        egui::CollapsingHeader::new(RichText::new(format!("WORKTREES ({})", list.len())).small().strong().color(p.dim)).id_salt("sb-worktrees").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::TREE_STRUCTURE, p.series[2], &format!("WORKTREES ({})", list.len()), &p)).id_salt("sb-worktrees").default_open(false).show(ui, |ui| {
             if ui.small_button("+ Add worktree").clicked() {
                 cx.form(forms::add_worktree(cx.repo, cx.data.ref_names(), None));
             }
@@ -319,7 +319,7 @@ impl Sidebar {
 
     fn contributor_list(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        egui::CollapsingHeader::new(RichText::new("CONTRIBUTORS").small().strong().color(p.dim)).id_salt("sb-contrib").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::USERS_THREE, p.series[2], &"CONTRIBUTORS".to_string(), &p)).id_salt("sb-contrib").default_open(false).show(ui, |ui| {
             if self.contributors_gen != Some(cx.data.refs_gen) {
                 self.contributors_gen = Some(cx.data.refs_gen);
                 let r = cx.repo.clone();
@@ -349,7 +349,7 @@ impl Sidebar {
         if list.is_empty() {
             return;
         }
-        egui::CollapsingHeader::new(RichText::new(format!("SUBMODULES ({})", list.len())).small().strong().color(p.dim)).id_salt("sb-subs").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::PACKAGE, p.series[1], &format!("SUBMODULES ({})", list.len()), &p)).id_salt("sb-subs").default_open(false).show(ui, |ui| {
             for s in &list {
                 let (rect, resp) = row(ui, ROW, false, &p);
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &s.path, prop(12.5), p.dim);
@@ -362,7 +362,7 @@ impl Sidebar {
 
     fn file_tree(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        egui::CollapsingHeader::new(RichText::new("FILES").small().strong().color(p.dim)).id_salt("sb-files").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(section_title(crate::chrome::icon::FOLDER, p.series[3], &"FILES".to_string(), &p)).id_salt("sb-files").default_open(false).show(ui, |ui| {
             if self.files_gen != Some(cx.data.status_gen) {
                 self.files_gen = Some(cx.data.status_gen);
                 let r = cx.repo.clone();
@@ -431,11 +431,11 @@ impl Dir {
 
 /// A small coloured count, right-aligned at `right`. Returns the space left of it.
 fn count_pill(ui: &Ui, right: f32, y: f32, text: &str, color: egui::Color32, p: &crate::theme::Palette) -> f32 {
-    let g = ui.painter().layout_no_wrap(text.to_string(), mono(10.5), if p.dark { color } else { p.on_accent });
+    let g = ui.painter().layout_no_wrap(text.to_string(), mono(10.5), p.on_accent);
     let size = vec2(g.size().x + 8.0, 15.0);
     let r = egui::Rect::from_min_size(pos2(right - size.x, y - size.y / 2.0), size);
-    ui.painter().rect_filled(r, 7.0, if p.dark { color.gamma_multiply(0.22) } else { color });
-    ui.painter().galley(pos2(r.left() + 4.0, y - g.size().y / 2.0), g, color);
+    ui.painter().rect_filled(r, 7.0, color);
+    ui.painter().galley(pos2(r.left() + 4.0, y - g.size().y / 2.0), g, p.on_accent);
     r.left() - 3.0
 }
 

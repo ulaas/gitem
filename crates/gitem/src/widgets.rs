@@ -160,6 +160,14 @@ pub fn row(ui: &mut Ui, h: f32, selected: bool, p: &Palette) -> (Rect, Response)
     (rect, resp)
 }
 
+/// A sidebar section's title, with a coloured icon that tells sections apart.
+pub fn section_title(glyph: &str, color: Color32, title: &str, p: &Palette) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    job.append(glyph, 0.0, TextFormat { font_id: prop(13.0), color, valign: egui::Align::Center, ..Default::default() });
+    job.append(title, 6.0, TextFormat { font_id: prop(11.0), color: p.dim, valign: egui::Align::Center, ..Default::default() });
+    job
+}
+
 pub fn section(ui: &mut Ui, title: &str, p: &Palette) {
     ui.add_space(6.0);
     ui.label(RichText::new(title.to_uppercase()).size(11.0).color(p.faint).strong());

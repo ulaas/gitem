@@ -75,9 +75,36 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, name: &str, tip: &str, on: bool, p:
     tooltip(resp, name, tip, p)
 }
 
-/// A button with an icon and text, named by the text alone.
-pub fn icon_text_button(ui: &mut Ui, glyph: &str, text: &str, tip: &str, p: &Palette) -> Response {
-    let resp = ui.button(format!("{glyph}  {text}"));
+/// A toolbar button showing only an icon, on the same raised fill as text buttons.
+pub fn tool_button(ui: &mut Ui, glyph: &str, tint: Color32, name: &str, tip: &str, on: bool, p: &Palette) -> Response {
+    let side = ui.spacing().interact_size.y + 4.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+    if ui.is_rect_visible(rect) {
+        let (fill, border) = match (on, resp.hovered()) {
+            (true, _) => (p.selection, p.accent),
+            (false, true) => (p.button_hover, p.accent),
+            (false, false) => (p.button, p.button_border),
+        };
+        ui.painter().rect(rect, 4.0, fill, Stroke::new(1.0, border), egui::StrokeKind::Inside);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, prop(16.0), if on { p.text } else { tint });
+    }
+    tooltip(resp, name, tip, p)
+}
+
+/// A button with a coloured icon and text, named by the text alone. `primary` fills
+/// it with the accent, for when there's work waiting behind it.
+pub fn icon_text_button(ui: &mut Ui, glyph: &str, tint: Color32, text: &str, tip: &str, primary: bool, p: &Palette) -> Response {
+    let (icon, label) = if primary {
+        (RichText::new(glyph).color(p.on_accent), RichText::new(text).color(p.on_accent).strong())
+    } else {
+        (RichText::new(glyph).color(tint), RichText::new(text))
+    };
+    let mut button = egui::Button::new((icon, label));
+    if primary {
+        button = button.fill(p.accent).stroke(Stroke::new(1.0, p.accent));
+    }
+    let resp = ui.add(button);
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, text));
     if tip.is_empty() { resp } else { tooltip(resp, text, tip, p) }
 }
@@ -113,6 +140,8 @@ pub fn repo_tab(ui: &mut Ui, name: &str, dirty: bool, selected: bool, path: &str
     let corners = CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
     if selected {
         ui.painter().rect_filled(rect, corners, p.panel);
+        let line = Rect::from_min_size(rect.left_top() + vec2(6.0, 0.0), vec2(rect.width() - 12.0, 2.0));
+        ui.painter().rect_filled(line, 1.0, p.accent);
     } else if hovered {
         ui.painter().rect_filled(rect, corners, p.hover);
     }
@@ -347,19 +376,25 @@ pub fn rail_bottom() -> &'static [RailItem] {
     &BOTTOM
 }
 
-fn rail_button(ui: &mut Ui, item: &RailItem, active: bool, p: &Palette) -> Response {
+/// One hue per rail group, drawn from the palette's fixed order.
+fn group_tint(group: usize, p: &Palette) -> Color32 {
+    p.series[[0, 2, 3, 6][group % 4]]
+}
+
+fn rail_button(ui: &mut Ui, item: &RailItem, tint: Color32, active: bool, p: &Palette) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(RAIL_WIDTH, RAIL_ITEM), Sense::click());
     let name = crate::i18n::t(item.name);
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     if ui.is_rect_visible(rect) {
-        if resp.hovered() {
-            ui.painter().rect_filled(rect.shrink2(vec2(5.0, 1.0)), 5.0, p.hover);
-        }
+        let tile = rect.shrink2(vec2(5.0, 1.0));
         if active {
+            ui.painter().rect_filled(tile, 5.0, tint.gamma_multiply(0.22));
             let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 7.0), vec2(2.5, RAIL_ITEM - 14.0));
-            ui.painter().rect_filled(bar, 1.0, p.accent);
+            ui.painter().rect_filled(bar, 1.0, tint);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(tile, 5.0, p.hover);
         }
-        let color = if active || resp.hovered() { p.text } else { p.faint };
+        let color = if active { tint } else if resp.hovered() { p.text } else { tint.gamma_multiply(0.8) };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, item.glyph, prop(20.0), color);
     }
     tooltip(resp, name, item.tip, p)
@@ -381,7 +416,7 @@ pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, p: &Palette) ->
                     separator(ui, p);
                 }
                 for item in group {
-                    if rail_button(ui, item, is_focused(item), p).clicked() {
+                    if rail_button(ui, item, group_tint(i, p), is_focused(item), p).clicked() {
                         clicked = Some(item);
                     }
                 }
@@ -391,7 +426,7 @@ pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, p: &Palette) ->
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.add_space(4.0);
         for item in bottom.iter().rev() {
-            if rail_button(ui, item, is_focused(item), p).clicked() {
+            if rail_button(ui, item, p.dim, is_focused(item), p).clicked() {
                 clicked = Some(item);
             }
         }
