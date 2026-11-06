@@ -245,7 +245,7 @@ pub fn branch_delete(name: &str, force: bool) -> GitOp {
 
 pub fn branch_delete_remote(remote_branch: &str) -> GitOp {
     let (remote, b) = remote_branch.split_once('/').unwrap_or(("origin", remote_branch));
-    GitOp::new(format!("Delete remote branch {remote_branch}")).step(&["push", remote, "--delete", b]).net()
+    GitOp::new(format!("Delete remote branch {remote_branch}")).step(&["push", "--delete", "--", remote, b]).net()
 }
 
 pub fn branch_set_upstream(branch: &str, upstream: &str) -> GitOp {
@@ -446,11 +446,11 @@ pub fn tag_delete(name: &str) -> GitOp {
 }
 
 pub fn tag_delete_remote(remote: &str, name: &str) -> GitOp {
-    GitOp::new(format!("Delete tag {name} on {remote}")).step(&["push", remote, "--delete", &format!("refs/tags/{name}")]).net()
+    GitOp::new(format!("Delete tag {name} on {remote}")).step(&["push", "--delete", "--", remote, &format!("refs/tags/{name}")]).net()
 }
 
 pub fn tag_push(remote: &str, name: &str) -> GitOp {
-    GitOp::new(format!("Push tag {name}")).step(&["push", remote, &format!("refs/tags/{name}")]).net()
+    GitOp::new(format!("Push tag {name}")).step(&["push", "--", remote, &format!("refs/tags/{name}")]).net()
 }
 
 // ---- stash -------------------------------------------------------------------
@@ -593,6 +593,7 @@ pub fn fetch(o: &FetchOpts) -> GitOp {
         a.push("--tags".into());
     }
     if let Some(r) = &o.remote {
+        a.push("--".into());
         a.push(r.clone());
     }
     GitOp::new(match &o.remote {
@@ -655,6 +656,7 @@ pub fn push(o: &PushOpts) -> GitOp {
         a.push("--no-verify".into());
     }
     if let Some(r) = &o.remote {
+        a.push("--".into());
         a.push(r.clone());
         if let Some(s) = &o.refspec {
             a.push(s.clone());
@@ -664,7 +666,7 @@ pub fn push(o: &PushOpts) -> GitOp {
 }
 
 pub fn remote_add(name: &str, url: &str) -> GitOp {
-    GitOp::new(format!("Add remote {name}")).step(&["remote", "add", name, url])
+    GitOp::new(format!("Add remote {name}")).step(&["remote", "add", "--", name, url])
 }
 
 pub fn remote_remove(name: &str) -> GitOp {
@@ -676,7 +678,7 @@ pub fn remote_rename(old: &str, new: &str) -> GitOp {
 }
 
 pub fn remote_set_url(name: &str, url: &str) -> GitOp {
-    GitOp::new(format!("Set URL of {name}")).step(&["remote", "set-url", name, url])
+    GitOp::new(format!("Set URL of {name}")).step(&["remote", "set-url", "--", name, url])
 }
 
 pub fn remote_prune(name: &str) -> GitOp {
@@ -685,7 +687,7 @@ pub fn remote_prune(name: &str) -> GitOp {
 
 /// Fetch a pull/merge request head into a local branch.
 pub fn fetch_pr(remote: &str, ref_spec: &str, local: &str) -> GitOp {
-    GitOp::new(format!("Fetch into {local}")).step(&["fetch", remote, &format!("{ref_spec}:{local}")]).net()
+    GitOp::new(format!("Fetch into {local}")).step(&["fetch", "--", remote, &format!("{ref_spec}:{local}")]).net()
 }
 
 pub fn clone_repo(url: &str, dest: &str, depth: Option<u32>, recursive: bool, branch: Option<&str>) -> GitOp {
@@ -700,6 +702,7 @@ pub fn clone_repo(url: &str, dest: &str, depth: Option<u32>, recursive: bool, br
         a.push("--branch".into());
         a.push(b.to_string());
     }
+    a.push("--".into());
     a.push(url.to_string());
     a.push(dest.to_string());
     GitOp::new(format!("Clone {url}")).step_v(a).net()
@@ -717,7 +720,7 @@ pub fn init_repo(path: &str, initial_branch: Option<&str>) -> GitOp {
 // ---- submodules --------------------------------------------------------------
 
 pub fn submodule_add(url: &str, path: &str) -> GitOp {
-    GitOp::new(format!("Add submodule {path}")).step(&["submodule", "add", url, path]).net()
+    GitOp::new(format!("Add submodule {path}")).step(&["submodule", "add", "--", url, path]).net()
 }
 
 pub fn submodule_update(path: Option<&str>, init: bool, recursive: bool, remote: bool) -> GitOp {
@@ -908,7 +911,7 @@ pub fn undo_commit() -> GitOp {
 
 /// Push a branch only up to a given commit.
 pub fn push_to_commit(remote: &str, sha: &str, branch: &str) -> GitOp {
-    GitOp::new(format!("Push {branch} up to {}", crate::util::prefix(sha, 8))).step(&["push", "--progress", remote, &format!("{sha}:refs/heads/{branch}")]).net()
+    GitOp::new(format!("Push {branch} up to {}", crate::util::prefix(sha, 8))).step(&["push", "--progress", "--", remote, &format!("{sha}:refs/heads/{branch}")]).net()
 }
 
 /// Fold existing `fixup!` and `squash!` commits into their targets.
@@ -947,14 +950,14 @@ pub fn recompose_reset(base: &str) -> GitOp {
 
 /// Add a remote, optionally confirming the URL answers first.
 pub fn remote_add_checked(name: &str, url: &str) -> GitOp {
-    let mut op = GitOp::new(format!("Add remote {name}")).step(&["ls-remote", "--heads", url]);
+    let mut op = GitOp::new(format!("Add remote {name}")).step(&["ls-remote", "--heads", "--", url]);
     op.network = true;
-    op.step(&["remote", "add", name, url])
+    op.step(&["remote", "add", "--", name, url])
 }
 
 /// Add a remote and push the current branch to it.
 pub fn publish_repository(name: &str, url: &str, branch: &str) -> GitOp {
-    GitOp::new(format!("Publish to {name}")).step(&["remote", "add", name, url]).step(&["push", "--progress", "--set-upstream", name, branch]).net()
+    GitOp::new(format!("Publish to {name}")).step(&["remote", "add", "--", name, url]).step(&["push", "--progress", "--set-upstream", "--", name, branch]).net()
 }
 
 /// Folder comparison in the configured difftool.
@@ -973,7 +976,7 @@ mod tests {
     #[test]
     fn network_ops_build_expected_args_and_are_flagged() {
         let p = push(&PushOpts { remote: Some("origin".into()), refspec: Some("main".into()), set_upstream: true, force_with_lease: true, ..Default::default() });
-        assert_eq!(args(&p), "push --progress --set-upstream --force-with-lease origin main");
+        assert_eq!(args(&p), "push --progress --set-upstream --force-with-lease -- origin main");
         assert!(p.network);
         let f = fetch(&FetchOpts { all: true, prune: true, ..Default::default() });
         assert_eq!(args(&f), "fetch --progress --all --prune");
@@ -981,8 +984,8 @@ mod tests {
         let l = pull(PullMode::Rebase, true);
         assert_eq!(args(&l), "pull --progress --rebase --autostash");
         assert!(l.network);
-        assert_eq!(args(&branch_delete_remote("origin/feature/x")), "push origin --delete feature/x");
-        assert_eq!(args(&fetch_pr("origin", "pull/7/head", "pr/7")), "fetch origin pull/7/head:pr/7");
+        assert_eq!(args(&branch_delete_remote("origin/feature/x")), "push --delete -- origin feature/x");
+        assert_eq!(args(&fetch_pr("origin", "pull/7/head", "pr/7")), "fetch -- origin pull/7/head:pr/7");
     }
 
     #[test]

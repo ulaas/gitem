@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::{Error, Result};
 
@@ -23,6 +23,9 @@ pub struct LogEntry {
 pub type CommandLog = Arc<Mutex<VecDeque<LogEntry>>>;
 const LOG_CAP: usize = 2000;
 const LOG_OUTPUT_CAP: usize = 8192;
+/// How long to keep reading once git has exited. A process it left running, such
+/// as an ssh control master or a hook's background job, can hold the pipes open.
+const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct GitOutput {
@@ -42,10 +45,40 @@ impl GitOutput {
         if self.ok() {
             Ok(self)
         } else {
-            let msg = if self.stderr.trim().is_empty() { self.text() } else { self.stderr.clone() };
-            Err(Error::Git(msg.trim().to_string()))
+            Err(Error::Git(failure_text(&self.stderr, &self.text())))
         }
     }
+}
+
+/// What to show for a failed command: stderr without progress noise, then stdout,
+/// because git prints things like `CONFLICT (content): ...` there.
+fn failure_text(stderr: &str, stdout: &str) -> String {
+    const STDOUT_LINES: usize = 40;
+    let mut out: Vec<&str> = Vec::new();
+    for line in stderr.lines() {
+        let last = line.rsplit('\r').map(str::trim_end).find(|l| !l.is_empty()).unwrap_or("");
+        if !last.is_empty() && !is_progress(last) {
+            out.push(last);
+        }
+    }
+    let lines: Vec<&str> = stdout.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+    out.extend_from_slice(&lines[lines.len().saturating_sub(STDOUT_LINES)..]);
+    out.join("\n")
+}
+
+fn is_progress(line: &str) -> bool {
+    let l = line.strip_prefix("remote: ").unwrap_or(line);
+    ["Enumerating objects", "Counting objects", "Compressing objects", "Writing objects", "Receiving objects", "Resolving deltas", "Unpacking objects", "Delta compression", "Total "].iter().any(|p| l.starts_with(p))
+}
+
+/// Ends a process and whatever it started, such as ssh or a hook.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).status();
+    }
+    let _ = child.kill();
 }
 
 /// Where the git binary came from, for display in Settings.
@@ -190,10 +223,20 @@ impl GitExe {
                 });
             }
         let mut so = child.stdout.take().expect("stdout is piped");
+        let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::default();
+        let out_shared = stdout_buf.clone();
         let out_t = std::thread::spawn(move || {
-            let mut v = Vec::new();
-            let _ = so.read_to_end(&mut v);
-            v
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match so.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut v) = out_shared.lock() {
+                            v.extend_from_slice(&buf[..n]);
+                        }
+                    }
+                }
+            }
         });
         let mut se = child.stderr.take().expect("stderr is piped");
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -214,6 +257,7 @@ impl GitExe {
         let mut stderr_all = Vec::new();
         let mut line = Vec::new();
         let mut cancelled = false;
+        let mut stop_reading_at: Option<Instant> = None;
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(chunk) => {
@@ -234,15 +278,26 @@ impl GitExe {
             }
             if !cancelled && opts.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
                 cancelled = true;
-                let _ = child.kill();
+                kill_tree(&mut child);
+            }
+            if stop_reading_at.is_none() && matches!(child.try_wait(), Ok(Some(_))) {
+                stop_reading_at = Some(Instant::now() + DRAIN_AFTER_EXIT);
+            }
+            if stop_reading_at.is_some_and(|t| Instant::now() >= t) {
+                break;
             }
         }
         if !line.is_empty() {
             on_line(&String::from_utf8_lossy(&line));
         }
-        let _ = err_t.join();
-        let stdout = out_t.join().unwrap_or_default();
+        drop(err_t);
         let status = child.wait()?;
+        // Stdout may be held open the same way. Whatever arrived is kept.
+        let wait_until = Instant::now() + Duration::from_millis(200);
+        while !out_t.is_finished() && Instant::now() < wait_until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let stdout = stdout_buf.lock().map(|v| v.clone()).unwrap_or_default();
         let code = status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&stderr_all).into_owned();
 
