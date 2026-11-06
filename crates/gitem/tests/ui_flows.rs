@@ -2237,6 +2237,77 @@ fn one_long_line_leaves_the_new_side_of_a_side_by_side_diff_on_screen() {
     assert_eq!(long2.1, long.1, "each side stays in its own half");
 }
 
+/// The Changes tab with a message typed in the box, which keeps the focus.
+fn changes_with_message(h: &mut Harness<GitemApp>, msg: &str) {
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(h, "Commit to main");
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
+    h.step();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text(msg);
+    h.step();
+    h.step();
+}
+
+fn staged_and_unstaged(f: &Fx) {
+    sample_history(f);
+    f.write("staged.txt", "s\n");
+    f.git(&["add", "staged.txt"]);
+    f.write("a.txt", "unstaged\n");
+}
+
+#[test]
+fn ctrl_enter_in_a_form_submits_only_the_form() {
+    let f = Fx::new();
+    staged_and_unstaged(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    changes_with_message(&mut h, "half written");
+    // The real route: a pointer click moves focus off the commit box, and the form's
+    // first field takes it.
+    click(&mut h, "Stash…");
+    h.step();
+    assert!(!h.get_by_role(egui::accesskit::Role::MultilineTextInput).is_focused(), "this test is about focus being in the form");
+    h.event(egui::Event::Text("hello".into()));
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    wait_for(&mut h, "the stash", || f.git(&["stash", "list"]).contains("hello"));
+    wait_until_quiet(&mut h);
+    assert_eq!(f.subjects(), ["second", "first"], "the commit box must not fire too");
+    no_errors(&h);
+}
+
+#[test]
+fn ctrl_enter_in_the_commit_box_commits_once_and_leaves_an_open_form_alone() {
+    let f = Fx::new();
+    staged_and_unstaged(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    changes_with_message(&mut h, "from the box");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Form(forms::stash_form(Vec::new())));
+    h.step();
+    h.step();
+    assert!(h.get_by_role(egui::accesskit::Role::MultilineTextInput).is_focused(), "this test is about focus staying in the box");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    wait_for(&mut h, "the commit", || f.subjects()[0] == "from the box");
+    wait_until_quiet(&mut h);
+    assert_eq!(f.git(&["stash", "list"]), "", "the form must not fire too");
+    assert!(h.query_by_label("Stash all changes").is_some(), "the form stays open");
+}
+
+#[test]
+fn ctrl_enter_still_commits_with_no_dialog_open() {
+    let f = Fx::new();
+    staged_and_unstaged(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    changes_with_message(&mut h, "plain commit");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    wait_for(&mut h, "the commit", || f.subjects()[0] == "plain commit");
+    wait_until_quiet(&mut h);
+    assert_eq!(f.subjects().len(), 3, "exactly one commit");
+}
+
 fn merge_with_staged_files(f: &Fx) {
     f.write("auto.txt", "base\n");
     f.write("c.txt", "top\nmiddle\nbottom\n");

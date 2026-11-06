@@ -249,7 +249,7 @@ impl HelperApp {
                     };
                     self.data.poll(&ctx, repo);
                     let mut out: Vec<Action> = Vec::new();
-                    let mut cx = Cx { repo, data: &self.data, settings: &self.settings, pal: &p, out: &mut out };
+                    let mut cx = Cx { repo, data: &self.data, settings: &self.settings, pal: &p, out: &mut out, dialog_open: false };
                     match mode {
                         Mode::Rebase(v) => {
                             v.ui(ui, &mut cx);

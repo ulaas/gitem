@@ -970,6 +970,10 @@ impl GitemApp {
         });
     }
 
+    fn dialog_open(&self) -> bool {
+        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty()
+    }
+
     /// Offers the report from a crash. It stays on disk until the user has seen this.
     fn crash_dialog(&mut self, ctx: &egui::Context) {
         let Some(newest) = self.crash_reports.first().cloned() else { return };
@@ -1230,6 +1234,7 @@ impl GitemApp {
         egui::Panel::top("title-bar").frame(egui::Frame::new().fill(self.pal.bg)).resizable(false).exact_size(chrome::TITLE_BAR_HEIGHT).show_separator_line(false).show(ui, |ui| self.title_bar(ui, &mut out));
         egui::Panel::bottom("status-bar").frame(egui::Frame::new().fill(self.pal.status_bg).inner_margin(egui::Margin::symmetric(8, 3))).show_separator_line(false).show(ui, |ui| self.status_bar(ui, &mut out));
         let pal = self.pal.clone();
+        let dialog_open = self.dialog_open();
         if let Some(tab) = self.repos.get_mut(self.active)
             && tab.show_rail
         {
@@ -1259,18 +1264,18 @@ impl GitemApp {
                 }
             if *show_sidebar {
                 egui::Panel::left("sidebar").resizable(true).default_size(270.0).size_range(180.0..=600.0).show(ui, |ui| {
-                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out };
+                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
                     sidebar.ui(ui, &mut cx);
                 });
             }
             if *show_inspect {
                 egui::Panel::right("inspect").resizable(true).default_size(340.0).size_range(220.0..=800.0).show(ui, |ui| {
-                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out };
+                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
                     inspect.ui(ui, &mut cx);
                 });
             }
             let style = theme::dock_style(ui.style(), &pal);
-            let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out } };
+            let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open } };
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 DockArea::new(dock).id(egui::Id::new(DOCK_ID)).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_inside(ui, &mut viewer);
                 paint_active_tab_markers(ui, dock, &pal);
@@ -1282,7 +1287,7 @@ impl GitemApp {
             });
 
             if let Some(pl) = &mut self.palette {
-                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out };
+                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
                 if pl.show(&ctx, &mut cx) {
                     self.palette = None;
                 }
@@ -1293,7 +1298,7 @@ impl GitemApp {
                 let settings = &self.settings;
                 egui::CentralPanel::default().show(ui, |ui| {
                     let NoRepoSettings { repo, data, view } = &mut **s;
-                    let mut cx = Cx { repo, data, settings, pal: &pal, out: &mut out };
+                    let mut cx = Cx { repo, data, settings, pal: &pal, out: &mut out, dialog_open };
                     view.ui(ui, &mut cx);
                 });
             } else {

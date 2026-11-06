@@ -70,6 +70,8 @@ pub struct Cx<'a> {
     pub settings: &'a Settings,
     pub pal: &'a Palette,
     pub out: &'a mut Vec<Action>,
+    /// A dialog is showing, drawn after the views and with its own keyboard shortcuts.
+    pub dialog_open: bool,
 }
 
 impl Cx<'_> {

@@ -326,8 +326,9 @@ impl ChangesView {
                 }
             });
         });
+        let mut box_focused = false;
         egui::ScrollArea::vertical().id_salt("msg").max_height(ui.available_height() - 62.0).show(ui, |ui| {
-            ui.add(crate::widgets::text_area(&mut self.message).hint_text("Message (Ctrl+Enter to commit)").desired_rows(3).desired_width(f32::INFINITY));
+            box_focused = ui.add(crate::widgets::text_area(&mut self.message).hint_text("Message (Ctrl+Enter to commit)").desired_rows(3).desired_width(f32::INFINITY)).has_focus();
         });
         let len = self.message.lines().next().unwrap_or("").chars().count();
         ui.horizontal(|ui| {
@@ -378,8 +379,10 @@ impl ChangesView {
             };
             let fill = if can { p.accent } else { p.panel2 };
             let b = egui::Button::new(RichText::new(label).color(if can { p.on_accent } else { p.faint })).fill(fill);
-            let shortcut = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl);
-            if (ui.add_enabled(can, b).clicked() || (shortcut && can)) && can {
+            // Dialogs draw after this and have the same shortcut. It belongs to them,
+            // unless the commit box is where the typing is.
+            let shortcut = can && (box_focused || !cx.dialog_open) && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
+            if ui.add_enabled(can, b).clicked() || shortcut {
                 self.commit(cx, staged_n == 0 && !self.amend && st.op != RepoOp::Merge);
             }
         });

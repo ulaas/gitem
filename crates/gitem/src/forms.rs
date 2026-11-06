@@ -196,7 +196,7 @@ impl FormDialog {
                 *closed = true;
             }
         });
-        if ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl) {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter)) {
             submit = true;
         }
         if submit {
