@@ -307,7 +307,7 @@ fn checkout_detached_leaves_every_branch_where_it_was() {
     let second = f.commit("a.txt", "2\n", "second");
     f.run(ops::checkout_detached(&first));
     assert_eq!(f.q(&["rev-parse", "HEAD"]), first);
-    assert_eq!(f.git.run_raw(Some(&f.root), &["symbolic-ref", "-q", "HEAD"]).unwrap().ok(), false, "HEAD is detached");
+    assert!(!f.git.run_raw(Some(&f.root), &["symbolic-ref", "-q", "HEAD"]).unwrap().ok(), "HEAD is detached");
     assert_eq!(f.q(&["rev-parse", "main"]), second);
     assert_eq!(f.read("a.txt"), "1\n");
 }
