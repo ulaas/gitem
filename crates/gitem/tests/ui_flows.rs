@@ -1698,6 +1698,32 @@ fn a_pull_conflict_opens_into_the_merge_workflow() {
     pump_for_label(&mut h, "Take theirs");
 }
 
+/// The tab used to keep a copy of the settings from when it first rendered, and one edit
+/// there overwrote everything changed elsewhere since.
+#[test]
+fn an_edit_in_a_settings_tab_keeps_what_changed_elsewhere() {
+    use gitem_core::settings::{ThemeChoice, Workspace};
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Settings(Box::new(gitem::views::settings::SettingsView::on_page("Workflow"))));
+    pump_for_label(&mut h, "Safety and speed");
+    h.state_mut().settings.workspaces.push(Workspace { name: "kept".into(), repos: Vec::new() });
+    h.state_mut().settings.theme = ThemeChoice::Light;
+    h.state_mut().settings.favorite_branches.push("main".into());
+    h.step();
+    let before = h.state().settings.prune_on_fetch;
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Prune when fetching").click();
+    h.step();
+    h.step();
+    let s = &h.state().settings;
+    assert_eq!(s.prune_on_fetch, !before, "the edit took");
+    assert_eq!(s.workspaces.len(), 1);
+    assert_eq!(s.theme, ThemeChoice::Light);
+    assert_eq!(s.favorite_branches, vec!["main"]);
+}
+
 #[test]
 fn clone_opens_the_new_repository() {
     let r = with_remote();

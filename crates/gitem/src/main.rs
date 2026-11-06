@@ -185,7 +185,7 @@ fn run_app(args: &[String]) -> i32 {
         Box::new(move |cc| {
             let mut a = app::GitemApp::new(&cc.egui_ctx, &paths);
             // A screenshot must leave the saved session as it found it.
-            a.persist = !is_shot;
+            a.persist = a.persist && !is_shot;
             a.shot_tabs = tabs;
             a.shot_inspect = inspect;
             if is_shot {

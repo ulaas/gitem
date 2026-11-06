@@ -80,7 +80,6 @@ impl Page {
 #[derive(Default)]
 pub struct SettingsView {
     page: Page,
-    draft: Option<Settings>,
     ai_test: Task<String>,
     git_version: Option<String>,
     editors: Task<Vec<Editor>>,
@@ -344,7 +343,9 @@ impl SettingsView {
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        let mut s = self.draft.take().unwrap_or_else(|| cx.settings.clone());
+        // A fresh copy each frame: one kept for the tab's lifetime would overwrite everything
+        // changed elsewhere since it was taken, as soon as anything here was edited.
+        let mut s = cx.settings.clone();
         let before = serde_json::to_string(&s).unwrap_or_default();
 
         egui::Panel::left("settings-nav").resizable(false).exact_size(NAV_WIDTH).frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(8, 10))).show(ui, |ui| self.nav(ui, &p));
@@ -374,7 +375,6 @@ impl SettingsView {
             let c = s.clone();
             cx.out.push(Action::Settings(Box::new(move |t| *t = c)));
         }
-        self.draft = Some(s);
     }
 
     fn nav(&mut self, ui: &mut Ui, p: &Palette) {

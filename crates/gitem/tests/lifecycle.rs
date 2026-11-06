@@ -1,8 +1,7 @@
 //! The app as it starts and stops for real: `GitemApp::new`, the settings file, the
 //! saved session and `on_exit`. Everything else builds the app without saving.
 //!
-//! The settings path is process-wide, so these tests take turns. Tests marked with a
-//! bug's ID fail until that bug is fixed: run them with `--ignored`.
+//! The settings path is process-wide, so these tests take turns.
 gitem_testenv::isolate!();
 
 use std::path::{Path, PathBuf};
@@ -155,13 +154,40 @@ fn a_repository_gone_from_disk_does_not_stop_the_session() {
     let mut h = run_app(&[]);
     settled(&mut h);
     assert_eq!(open_repos(&h), vec![name(&a)]);
-    assert!(!error_dialog_showing(&h), "a restored session stays quiet about it");
+    assert!(!error_dialog_showing(&h));
 }
 
-/// `open_repos` `[B, C]` becomes `[A]` the moment `gitem A` runs, so B and C are gone
+/// It may only be an unplugged drive, so a failed reopen doesn't end its place in the session.
+#[test]
+fn a_repository_that_cannot_be_reopened_stays_in_the_session_until_forgotten() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let a = repo(d.path(), "a");
+    let away = name(&d.path().join("on-an-unplugged-drive"));
+    Settings { open_repos: vec![away.clone(), name(&a)], ..Default::default() }.save().unwrap();
+    {
+        let mut h = run_app(&[]);
+        settled(&mut h);
+        assert!(h.query_by_label("Some repositories couldn't be reopened").is_some());
+        h.get_by_label("Keep for next time").click();
+        steps(&mut h, 3);
+        assert!(h.query_by_label("Some repositories couldn't be reopened").is_none());
+        h.state_mut().on_exit();
+    }
+    assert_eq!(saved().open_repos, vec![away.clone(), name(&a)]);
+    {
+        let mut h = run_app(&[]);
+        settled(&mut h);
+        h.get_by_label("Forget them").click();
+        steps(&mut h, 3);
+        h.state_mut().on_exit();
+    }
+    assert_eq!(saved().open_repos, vec![name(&a)]);
+}
+
+/// `open_repos` `[B, C]` became `[A]` the moment `gitem A` ran, so B and C were gone
 /// at the next launch.
 #[test]
-#[ignore = "AS-9, Phase 3"]
 fn opening_by_argument_keeps_the_saved_session() {
     let _turn = clean_slate();
     let d = tempfile::tempdir().unwrap();
@@ -174,6 +200,25 @@ fn opening_by_argument_keeps_the_saved_session() {
     }
     let kept = saved().open_repos;
     assert!(kept.contains(&name(&b)) && kept.contains(&name(&c)), "{kept:?}");
+    let h = run_app(&[]);
+    assert_eq!(open_repos(&h).len(), 3, "the next plain start brings them all back");
+    assert!(h.query_by_label("Some repositories couldn't be reopened").is_none());
+}
+
+#[test]
+fn opening_a_kept_repository_and_closing_it_takes_it_out_of_the_session() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let (a, b) = (repo(d.path(), "a"), repo(d.path(), "b"));
+    Settings { open_repos: vec![name(&b)], ..Default::default() }.save().unwrap();
+    let mut h = run_app(std::slice::from_ref(&a));
+    settled(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().open_repo(&ctx, &b, false);
+    settled(&mut h);
+    h.state_mut().repos.remove(1);
+    h.state_mut().on_exit();
+    assert_eq!(saved().open_repos, vec![name(&a)]);
 }
 
 // ---- saving ------------------------------------------------------------------------------
@@ -187,8 +232,9 @@ fn a_changed_setting_reaches_the_file_without_waiting_for_exit() {
     h.state_mut().apply_action(&ctx, Action::Settings(Box::new(|s| s.theme = ThemeChoice::Light)));
     steps(&mut h, 3);
     assert_eq!(saved().theme, ThemeChoice::Light);
-    let tmp = Settings::path().with_extension("json.tmp");
-    assert!(!tmp.exists(), "a save leaves no temp file behind");
+    let dir = Settings::path().parent().unwrap().to_path_buf();
+    let temp_files = std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "tmp")).count();
+    assert_eq!(temp_files, 0, "a save leaves no temp file behind");
 }
 
 #[test]
@@ -248,35 +294,85 @@ fn a_corrupt_settings_file_still_lets_the_app_start() {
     }
 }
 
-/// A truncated file is read as defaults, and the next save destroys the original.
+fn backups() -> Vec<String> {
+    let dir = Settings::path().parent().unwrap().to_path_buf();
+    std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".bad-")).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect()
+}
+
+fn remove_backups() {
+    let dir = Settings::path().parent().unwrap().to_path_buf();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        if e.file_name().to_string_lossy().contains(".bad-") {
+            std::fs::remove_file(e.path()).unwrap();
+        }
+    }
+}
+
+/// A truncated file used to read as defaults, and the next save destroyed the original.
 #[test]
-#[ignore = "AS-2, Phase 3"]
-fn a_corrupt_settings_file_is_not_overwritten() {
+fn a_corrupt_settings_file_is_kept_and_the_user_is_told() {
     let _turn = clean_slate();
+    remove_backups();
     let broken = r#"{"theme":"Light","workspaces":[{"name":"w","repos":[]}],"#;
     std::fs::write(Settings::path(), broken).unwrap();
     let mut h = run_app(&[]);
     steps(&mut h, 3);
+    assert!(error_dialog_showing(&h), "the user hears about it");
     h.state_mut().on_exit();
-    let dir = Settings::path().parent().unwrap().to_path_buf();
-    let kept = std::fs::read_dir(dir).unwrap().flatten().any(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t == broken));
-    assert!(kept, "the original text is gone");
+    assert_eq!(backups(), vec![broken]);
+    assert_eq!(saved().theme, Settings::default().theme);
+    remove_backups();
 }
 
-/// One enum value this build doesn't know throws away every other setting.
+/// One enum value this build doesn't know used to throw away every other setting.
 #[test]
-#[ignore = "AS-2, Phase 3"]
 fn an_unknown_theme_from_a_newer_version_keeps_every_other_setting() {
     let _turn = clean_slate();
-    std::fs::write(Settings::path(), r#"{"theme":"Neon","language":"tr","recent_repos":["/a"]}"#).unwrap();
-    let h = run_app(&[]);
+    remove_backups();
+    let text = r#"{"theme":"Neon","language":"tr","recent_repos":["/a"]}"#;
+    std::fs::write(Settings::path(), text).unwrap();
+    let mut h = run_app(&[]);
     assert_eq!(h.state().settings.language, "tr");
     assert_eq!(h.state().settings.recent_repos, vec!["/a"]);
+    steps(&mut h, 3);
+    assert!(error_dialog_showing(&h));
+    assert_eq!(backups(), vec![text]);
+    // Going back to the version that knows it still finds it.
+    h.state_mut().on_exit();
+    assert!(std::fs::read_to_string(Settings::path()).unwrap().contains("Neon"));
+    remove_backups();
 }
 
-/// Saving rewrites the file from what this app knows, so a downgrade loses the rest.
 #[test]
-#[ignore = "AS-2, Phase 3"]
+fn a_byte_order_mark_from_an_editor_changes_nothing() {
+    let _turn = clean_slate();
+    remove_backups();
+    std::fs::write(Settings::path(), "\u{feff}{\"theme\":\"Light\"}").unwrap();
+    let mut h = run_app(&[]);
+    steps(&mut h, 3);
+    assert_eq!(h.state().settings.theme, ThemeChoice::Light);
+    assert!(!error_dialog_showing(&h));
+    assert!(backups().is_empty());
+}
+
+/// Some editor or crash can break the file while the app runs. That copy still isn't lost.
+#[test]
+fn a_file_broken_while_running_is_kept_before_saving_over_it() {
+    let _turn = clean_slate();
+    remove_backups();
+    let mut h = run_app(&[]);
+    steps(&mut h, 2);
+    std::fs::write(Settings::path(), "{ half written").unwrap();
+    h.state_mut().on_exit();
+    steps(&mut h, 3);
+    assert_eq!(backups(), vec!["{ half written"]);
+    assert!(error_dialog_showing(&h));
+    assert!(serde_json::from_str::<Settings>(&std::fs::read_to_string(Settings::path()).unwrap()).is_ok());
+    remove_backups();
+}
+
+/// Saving used to rewrite the file from what this app knows, so a downgrade lost the rest.
+#[test]
 fn a_field_from_a_newer_version_survives_a_save() {
     let _turn = clean_slate();
     std::fs::write(Settings::path(), r#"{"theme":"Light","a_setting_from_the_future":{"x":1}}"#).unwrap();
@@ -296,15 +392,29 @@ fn two_copies_saving_leave_a_valid_file() {
     steps(&mut first, 2);
     steps(&mut second, 2);
     first.state_mut().settings.theme = ThemeChoice::Light;
-    second.state_mut().settings.theme = ThemeChoice::Dark;
+    second.state_mut().settings.theme = ThemeChoice::Forest;
     first.state_mut().on_exit();
     second.state_mut().on_exit();
-    assert_eq!(saved().theme, ThemeChoice::Dark, "the last to save wins, as a whole file");
+    assert_eq!(saved().theme, ThemeChoice::Forest, "both changed it, so the last to save wins, for that setting only");
 }
 
-/// A running copy saves its older view over what another copy just changed.
 #[test]
-#[ignore = "AS-8, Phase 3"]
+fn each_copys_session_tabs_survive_the_others_save() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let (a, b) = (repo(d.path(), "a"), repo(d.path(), "b"));
+    let mut first = run_app(std::slice::from_ref(&a));
+    let mut second = run_app(std::slice::from_ref(&b));
+    settled(&mut first);
+    settled(&mut second);
+    first.state_mut().on_exit();
+    second.state_mut().on_exit();
+    let on_disk = saved();
+    assert!(on_disk.session_tabs.contains_key(&name(&a)) && on_disk.session_tabs.contains_key(&name(&b)), "{:?}", on_disk.session_tabs.keys());
+}
+
+/// A running copy used to save its older view over what another copy just changed.
+#[test]
 fn a_copy_exiting_keeps_a_setting_another_copy_changed() {
     let _turn = clean_slate();
     let mut first = run_app(&[]);
@@ -317,4 +427,5 @@ fn a_copy_exiting_keeps_a_setting_another_copy_changed() {
     assert_eq!(saved().language, "tr");
     first.state_mut().on_exit();
     assert_eq!(saved().language, "tr", "the other copy's change is gone");
+    assert_eq!(first.state().settings.language, "tr", "and this copy now has it too");
 }

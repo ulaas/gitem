@@ -55,6 +55,37 @@ pub fn split_lines(s: &str) -> Vec<String> {
     v
 }
 
+/// Replace a file in one step, so a crash or a full disk leaves the old one whole. The
+/// temp name is unique: two copies of the app saving at once mustn't share it.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("{}.{}-{n}.tmp", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id());
+    let tmp = path.with_file_name(name);
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        // On Windows a rename fails while anything has the target open for a moment.
+        let mut tries = 0;
+        loop {
+            match std::fs::rename(&tmp, path) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && tries < 5 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+                other => return other,
+            }
+        }
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
 /// At most `n` bytes of `s`, cut on a character boundary (names can be non-ASCII).
 pub fn prefix(s: &str, n: usize) -> &str {
     let mut end = s.len().min(n);

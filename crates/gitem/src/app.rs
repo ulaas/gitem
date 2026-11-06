@@ -310,6 +310,13 @@ pub struct GitemApp {
     styled_window: bool,
     /// Settings shown with no repository open.
     no_repo_settings: Option<Box<NoRepoSettings>>,
+    /// The settings as last read or written, to merge with what another copy changed.
+    settings_baseline: Option<serde_json::Value>,
+    /// Session repositories not open in this copy, kept for next time. It was started for
+    /// a different repository, or they couldn't be reached.
+    session_kept: Vec<String>,
+    /// Which of those couldn't be reopened and haven't been asked about yet.
+    reopen_failed: Vec<String>,
 }
 
 struct NoRepoSettings {
@@ -328,18 +335,33 @@ pub fn version_line() -> String {
 
 impl GitemApp {
     pub fn new(ctx: &egui::Context, paths: &[PathBuf]) -> Self {
-        let settings = Settings::load();
-        let mut app = Self::with_settings(ctx, settings);
+        let loaded = Settings::load_checked();
+        let mut app = Self::with_settings(ctx, loaded.settings);
+        app.settings_baseline = Some(loaded.baseline);
+        app.errors.extend(loaded.problem);
         if let Ok(git) = &app.git {
             crate::crash::watch_git_log(git.log.clone());
         }
         app.crash_reports = crate::crash::pending(&gitem_core::settings::config_dir());
-        let restore: Vec<PathBuf> = if paths.is_empty() { app.settings.open_repos.iter().map(PathBuf::from).collect() } else { paths.to_vec() };
-        for p in restore {
-            app.open_repo(ctx, &p, paths.is_empty());
+        let session = app.settings.open_repos.clone();
+        if paths.is_empty() {
+            for p in &session {
+                if !app.open_repo(ctx, Path::new(p), true) {
+                    app.session_kept.push(p.clone());
+                    if app.git.is_ok() {
+                        app.reopen_failed.push(p.clone());
+                    }
+                }
+            }
+        } else {
+            // `gitem some-repo` shows that repository, and the session stays for next time.
+            app.session_kept = session;
+            for p in paths {
+                app.open_repo(ctx, p, false);
+            }
         }
         app.active = 0;
-        app.persist = true;
+        app.persist = !loaded.save_blocked;
         app
     }
 
@@ -377,18 +399,23 @@ impl GitemApp {
             #[cfg(windows)]
             styled_window: false,
             no_repo_settings: None,
+            settings_baseline: None,
+            session_kept: Vec::new(),
+            reopen_failed: Vec::new(),
         }
     }
 
-    pub fn open_repo(&mut self, ctx: &egui::Context, path: &Path, quiet: bool) {
-        let Ok(git) = self.git.clone() else { return };
+    /// Whether the repository is open now.
+    pub fn open_repo(&mut self, ctx: &egui::Context, path: &Path, quiet: bool) -> bool {
+        let Ok(git) = self.git.clone() else { return false };
         match Repo::open(git, path) {
             Ok(repo) => {
                 if let Some(i) = self.repos.iter().position(|r| r.repo.root == repo.root) {
                     self.active = i;
-                    return;
+                    return true;
                 }
                 let root = repo.root.to_string_lossy().replace('\\', "/");
+                self.session_kept.retain(|k| *k != root);
                 self.settings.touch_recent(&root);
                 let mut tab = RepoTab::new(ctx, repo, &self.settings);
                 if self.settings.auto_maintenance {
@@ -397,9 +424,14 @@ impl GitemApp {
                 self.repos.push(tab);
                 self.active = self.repos.len() - 1;
                 self.settings_dirty = true;
+                true
             }
-            Err(e) if !quiet => self.errors.push(format!("{} isn't a git repository:\n{e}", path.display())),
-            Err(_) => {}
+            Err(e) => {
+                if !quiet {
+                    self.errors.push(format!("{} isn't a git repository:\n{e}", path.display()));
+                }
+                false
+            }
         }
     }
 
@@ -407,7 +439,7 @@ impl GitemApp {
         if !self.persist {
             return;
         }
-        self.settings.open_repos = self.repos.iter().map(|r| r.repo.root.to_string_lossy().replace('\\', "/")).collect();
+        self.settings.open_repos = self.session_kept.iter().cloned().chain(self.repos.iter().map(|r| r.repo.root.to_string_lossy().replace('\\', "/"))).collect();
         for r in &self.repos {
             let tabs: Vec<String> = r.dock.iter_all_tabs().filter_map(|(_, t)| t.spec()).collect();
             let root = r.repo.root.to_string_lossy().replace('\\', "/");
@@ -416,8 +448,40 @@ impl GitemApp {
                 self.settings.session_layouts.insert(root, j);
             }
         }
-        if let Err(e) = self.settings.save() {
-            self.errors.push(format!("Could not save settings: {e}"));
+        let settings = &mut self.settings;
+        let baseline = self.settings_baseline.get_or_insert_with(|| serde_json::to_value(Settings::default()).unwrap_or_default());
+        match settings.save_merged(baseline) {
+            Ok(note) => self.errors.extend(note),
+            Err(e) => self.errors.push(format!("Could not save settings: {e}")),
+        }
+    }
+
+    /// Session repositories that couldn't be opened stay in the session, in case it's
+    /// only an unplugged drive, until the user says otherwise.
+    fn reopen_dialog(&mut self, ctx: &egui::Context) {
+        if self.reopen_failed.is_empty() {
+            return;
+        }
+        let (mut forget, mut keep) = (false, false);
+        egui::Window::new("Some repositories couldn't be reopened").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            for p in &self.reopen_failed {
+                ui.add(egui::Label::new(RichText::new(p).monospace().small()).selectable(true));
+            }
+            ui.add_space(4.0);
+            ui.label("They may be on a drive that isn't connected. They'll be tried again next time.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                keep = ui.button("Keep for next time").clicked();
+                forget = ui.button("Forget them").clicked();
+            });
+        });
+        if forget {
+            let gone = std::mem::take(&mut self.reopen_failed);
+            self.session_kept.retain(|k| !gone.contains(k));
+            self.settings_dirty = true;
+        } else if keep {
+            self.reopen_failed.clear();
         }
     }
 
@@ -526,7 +590,9 @@ impl GitemApp {
             }
             Action::Toast(s) => self.toasts.push((s, Instant::now())),
             Action::Error(e) => self.errors.push(e),
-            Action::OpenRepo(p) => self.open_repo(ctx, &p, false),
+            Action::OpenRepo(p) => {
+                self.open_repo(ctx, &p, false);
+            }
             Action::DeepLink(d) => {
                 self.open_repo(ctx, std::path::Path::new(&d.repo), false);
                 if let Some(c) = &d.commit {
@@ -981,7 +1047,7 @@ impl GitemApp {
     }
 
     fn dialog_open(&self) -> bool {
-        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some()
+        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty()
     }
 
     /// Old git still does most things, so this warns and lets the user carry on.
@@ -1334,6 +1400,7 @@ impl GitemApp {
         self.dialogs(&ctx, &mut out);
         self.crash_dialog(&ctx);
         self.git_warning_dialog(&ctx);
+        self.reopen_dialog(&ctx);
         self.about(&ctx, &mut out);
         chrome::window_edges(&ctx, &pal);
         for a in out {
