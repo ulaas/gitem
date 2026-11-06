@@ -2,6 +2,7 @@
 pub mod action;
 pub mod app;
 pub mod chrome;
+pub mod logo;
 pub mod data;
 pub mod forms;
 pub mod i18n;

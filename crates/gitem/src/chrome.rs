@@ -4,6 +4,7 @@ use egui::viewport::ResizeDirection;
 use egui::{Align2, Color32, CornerRadius, CursorIcon, IconData, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, Ui, ViewportCommand, WidgetInfo, WidgetType, pos2, vec2};
 pub use egui_phosphor::regular as icon;
 
+use crate::logo;
 use crate::theme::Palette;
 use crate::views::Tab;
 use crate::widgets::prop;
@@ -18,95 +19,30 @@ const CLOSE_HOVER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
 
 // ---- logo --------------------------------------------------------------------
 
-const fn rgb(c: u32) -> Color32 {
-    Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
-}
-
-/// A cut gem, in a unit square, drawn back to front. Fixed colours: it's the same
-/// mark in every theme.
-const FACETS: [(&[(f32, f32)], Color32); 6] = [
-    (&[(0.22, 0.12), (0.38, 0.40), (0.02, 0.40)], rgb(0x5598e7)),
-    (&[(0.22, 0.12), (0.78, 0.12), (0.62, 0.40), (0.38, 0.40)], rgb(0x86b6ef)),
-    (&[(0.78, 0.12), (0.98, 0.40), (0.62, 0.40)], rgb(0x2a78d6)),
-    (&[(0.02, 0.40), (0.38, 0.40), (0.50, 0.94)], rgb(0x2a78d6)),
-    (&[(0.38, 0.40), (0.62, 0.40), (0.50, 0.94)], rgb(0x5598e7)),
-    (&[(0.62, 0.40), (0.98, 0.40), (0.50, 0.94)], rgb(0x1c5cab)),
-];
-/// A branch cut into the stone: two commits on a line and one forking off.
-const NODES: [(f32, f32); 3] = [(0.50, 0.27), (0.50, 0.70), (0.72, 0.33)];
-const NODE_RADIUS: f32 = 0.065;
-const EDGE_WIDTH: f32 = 0.05;
-const EDGES: [((f32, f32), (f32, f32)); 2] = [(NODES[0], NODES[1]), ((0.50, 0.55), NODES[2])];
-
 pub fn paint_logo(painter: &egui::Painter, rect: Rect) {
-    let at = |(x, y): (f32, f32)| rect.min + vec2(x * rect.width(), y * rect.height());
-    for (points, color) in FACETS {
+    let at = |(x, y): logo::Point| rect.min + vec2(x * rect.width(), y * rect.height());
+    for (points, (r, g, b)) in logo::FACETS {
+        let color = Color32::from_rgb(r, g, b);
         let pts: Vec<Pos2> = points.iter().map(|p| at(*p)).collect();
         // The hairline stroke closes the seams between facets.
         painter.add(Shape::convex_polygon(pts, color, Stroke::new(0.4, color)));
     }
     let scale = rect.width();
-    for (a, b) in EDGES {
-        painter.line_segment([at(a), at(b)], Stroke::new(EDGE_WIDTH * scale, Color32::WHITE));
+    for (a, b) in logo::EDGES {
+        painter.line_segment([at(a), at(b)], Stroke::new(logo::EDGE_WIDTH * scale, Color32::WHITE));
     }
-    for n in NODES {
-        painter.circle_filled(at(n), NODE_RADIUS * scale, Color32::WHITE);
+    for n in logo::NODES {
+        painter.circle_filled(at(n), logo::NODE_RADIUS * scale, Color32::WHITE);
     }
 }
 
-fn in_polygon(points: &[(f32, f32)], x: f32, y: f32) -> bool {
-    let mut inside = false;
-    let mut j = points.len() - 1;
-    for i in 0..points.len() {
-        let (a, b) = (points[i], points[j]);
-        if (a.1 > y) != (b.1 > y) && x < (b.0 - a.0) * (y - a.1) / (b.1 - a.1) + a.0 {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
-fn segment_distance(a: (f32, f32), b: (f32, f32), x: f32, y: f32) -> f32 {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let t = (((x - a.0) * dx + (y - a.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-    ((x - a.0 - t * dx).powi(2) + (y - a.1 - t * dy).powi(2)).sqrt()
-}
-
-fn logo_sample(x: f32, y: f32) -> Option<Color32> {
-    let on_branch = EDGES.iter().any(|(a, b)| segment_distance(*a, *b, x, y) <= EDGE_WIDTH / 2.0) || NODES.iter().any(|n| ((x - n.0).powi(2) + (y - n.1).powi(2)).sqrt() <= NODE_RADIUS);
-    if on_branch {
-        return Some(Color32::WHITE);
-    }
-    FACETS.iter().rev().find(|(p, _)| in_polygon(p, x, y)).map(|(_, c)| *c)
-}
-
-/// The logo as a window icon, antialiased by supersampling.
 pub fn logo_icon(size: u32) -> IconData {
-    const SAMPLES: u32 = 4;
-    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-    for py in 0..size {
-        for px in 0..size {
-            let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
-            for sy in 0..SAMPLES {
-                for sx in 0..SAMPLES {
-                    let x = (px as f32 + (sx as f32 + 0.5) / SAMPLES as f32) / size as f32;
-                    let y = (py as f32 + (sy as f32 + 0.5) / SAMPLES as f32) / size as f32;
-                    if let Some(c) = logo_sample(x, y) {
-                        r += c.r() as u32;
-                        g += c.g() as u32;
-                        b += c.b() as u32;
-                        a += 255;
-                    }
-                }
-            }
-            let hits = a / 255;
-            let n = SAMPLES * SAMPLES;
-            let div = hits.max(1);
-            rgba.extend_from_slice(&[(r / div) as u8, (g / div) as u8, (b / div) as u8, (a / n) as u8]);
-        }
-    }
-    IconData { rgba, width: size, height: size }
+    IconData { rgba: logo::rgba(size), width: size, height: size }
+}
+
+/// An undecorated window with the logo, as every gitem window is.
+pub fn viewport(title: &str, size: [f32; 2]) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default().with_title(title).with_inner_size(size).with_decorations(false).with_icon(std::sync::Arc::new(logo_icon(64)))
 }
 
 // ---- buttons -----------------------------------------------------------------
@@ -255,6 +191,31 @@ pub fn window_controls(ui: &mut Ui, p: &Palette) {
     if control(ui, Control::Minimize, "Minimize window", p).clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
     }
+}
+
+/// The titlebar of a helper window: logo, what it's for, and window controls.
+/// Prompts pass `compact`, which leaves only the close button.
+pub fn helper_title_bar(ui: &mut Ui, title: &str, compact: bool, p: &Palette) {
+    drag_region(ui);
+    ui.horizontal(|ui| {
+        ui.add_space(9.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(20.0, TITLE_BAR_HEIGHT), Sense::hover());
+        paint_logo(ui.painter(), Rect::from_center_size(rect.center(), vec2(18.0, 18.0)));
+        ui.add_space(4.0);
+        // Not a widget that takes clicks, so the window can be dragged by its title.
+        let (rect, _) = ui.allocate_exact_size(vec2(0.0, TITLE_BAR_HEIGHT), Sense::hover());
+        ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, title, prop(12.5), p.dim);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if compact {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                if control(ui, Control::Close, "Close window", p).clicked() {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                }
+            } else {
+                window_controls(ui, p);
+            }
+        });
+    });
 }
 
 /// The side or corner of a window `size` that `pos` is resizing from, if any.

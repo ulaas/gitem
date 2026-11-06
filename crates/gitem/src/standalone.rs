@@ -9,6 +9,7 @@ use gitem_core::settings::Settings;
 use gitem_core::{GitExe, Repo};
 
 use crate::action::{Action, Cx};
+use crate::chrome;
 use crate::data::RepoData;
 use crate::theme::{self, Palette};
 use crate::views::diffview::DiffView;
@@ -40,6 +41,8 @@ pub struct HelperApp {
     shot: Option<(PathBuf, std::time::Instant, bool)>,
     /// Testing aid: answer without a click once the window has drawn some frames.
     accept: Option<(String, u32)>,
+    #[cfg(windows)]
+    styled_window: bool,
 }
 
 /// A repository context for views. Outside any repository, git commands that
@@ -56,7 +59,7 @@ impl HelperApp {
         let settings = Settings::load();
         let pal = Palette::get(settings.theme);
         let shot = std::env::var_os("GITEM_SHOT").map(|p| (PathBuf::from(p), std::time::Instant::now(), false));
-        Self { mode, repo: repo_here(), data: RepoData::default(), settings, pal, themed: false, error: None, result: None, shot, accept: std::env::var("GITEM_TEST_ACCEPT").ok().map(|v| (v, 0)) }
+        Self { mode, repo: repo_here(), data: RepoData::default(), settings, pal, themed: false, error: None, result: None, shot, accept: std::env::var("GITEM_TEST_ACCEPT").ok().map(|v| (v, 0)), #[cfg(windows)] styled_window: false }
     }
 
     fn auto_accept(&mut self, ctx: &egui::Context) {
@@ -121,7 +124,13 @@ impl HelperApp {
 }
 
 impl eframe::App for HelperApp {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if !std::mem::replace(&mut self.styled_window, true) {
+            chrome::native_window_style(frame);
+        }
+        #[cfg(not(windows))]
+        let _ = frame;
         self.frame(ui);
         let ctx = ui.ctx().clone();
         if let Some((code, out)) = self.result.take() {
@@ -161,6 +170,14 @@ impl HelperApp {
         }
         self.auto_accept(&ctx);
         let p = self.pal.clone();
+        let (title, compact) = match &self.mode {
+            Mode::Askpass { .. } => ("Git needs your input", true),
+            Mode::Editor { .. } => ("Edit message", false),
+            Mode::Rebase(_) => ("Interactive rebase", false),
+            Mode::Merge(_) => ("Merge", false),
+            Mode::Diff(_) => ("Diff", false),
+        };
+        egui::Panel::top("helper-title").frame(egui::Frame::new().fill(p.bg)).resizable(false).exact_size(chrome::TITLE_BAR_HEIGHT).show_separator_line(false).show(ui, |ui| chrome::helper_title_bar(ui, title, compact, &p));
         egui::CentralPanel::default().show(ui, |ui| {
             match &mut self.mode {
                 Mode::Askpass { prompt, value, secret, confirm } => Self::askpass(ui, prompt, value, *secret, *confirm, &p, &mut self.result),
@@ -226,11 +243,12 @@ impl HelperApp {
                 }
             }
         });
+        chrome::window_edges(&ctx, &p);
     }
 }
 
 pub fn run(mode: Mode, title: &str, size: [f32; 2]) -> i32 {
-    let options = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_title(title).with_inner_size(size), persist_window: false, ..Default::default() };
+    let options = eframe::NativeOptions { viewport: chrome::viewport(title, size), persist_window: false, ..Default::default() };
     let result = eframe::run_native(title, options, Box::new(move |_cc| Ok(Box::new(HelperApp::new(mode)))));
     if let Err(e) = result {
         eprintln!("gitem: {e}");
@@ -245,18 +263,18 @@ pub fn askpass(prompt: String) -> i32 {
     let secret = low.contains("password") || low.contains("passphrase") || low.contains("token") || low.contains("pin");
     // Closing the window is a cancel.
     EXIT_CODE.store(1, Ordering::SeqCst);
-    run(Mode::Askpass { prompt, value: String::new(), secret, confirm }, "gitem: git needs your input", [460.0, 170.0])
+    run(Mode::Askpass { prompt, value: String::new(), secret, confirm }, "gitem: git needs your input", [460.0, 204.0])
 }
 
 pub fn edit_file(path: PathBuf) -> i32 {
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     EXIT_CODE.store(1, Ordering::SeqCst);
-    run(Mode::Editor { path, text }, "gitem: edit message", [680.0, 440.0])
+    run(Mode::Editor { path, text }, "gitem: edit message", [680.0, 474.0])
 }
 
 pub fn rebase_editor(path: PathBuf) -> i32 {
     EXIT_CODE.store(1, Ordering::SeqCst);
-    run(Mode::Rebase(Box::new(RebaseView::for_todo_file(path))), "gitem: interactive rebase", [860.0, 600.0])
+    run(Mode::Rebase(Box::new(RebaseView::for_todo_file(path))), "gitem: interactive rebase", [860.0, 634.0])
 }
 
 pub fn mergetool(base: PathBuf, local: PathBuf, remote: PathBuf, merged: PathBuf) -> i32 {

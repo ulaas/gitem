@@ -158,7 +158,7 @@ fn run_app(args: &[String]) -> i32 {
             p => paths.push(PathBuf::from(p)),
         }
     }
-    let options = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_title("gitem").with_inner_size(size).with_min_inner_size([800.0, 500.0]).with_decorations(false).with_icon(std::sync::Arc::new(gitem::chrome::logo_icon(64))), persist_window: shot.is_none(), ..Default::default() };
+    let options = eframe::NativeOptions { viewport: gitem::chrome::viewport("gitem", size).with_min_inner_size([800.0, 500.0]), persist_window: shot.is_none(), ..Default::default() };
     let result = eframe::run_native(
         "gitem",
         options,

@@ -154,3 +154,23 @@ fn standalone_merge_tool_keeps_non_utf8_bytes() {
     click(&mut h, "Keep local");
     assert_eq!(std::fs::read(&merged).unwrap(), b"caf\xe9 l\n");
 }
+
+#[test]
+fn helper_windows_have_their_own_titlebar() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("msg");
+    std::fs::write(&file, "text\n").unwrap();
+    let app = HelperApp::new(Mode::Editor { path: file, text: "text\n".into() });
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(680.0, 474.0)).with_max_steps(5).build_ui_state(|ui, a: &mut HelperApp| a.frame(ui), app);
+    h.step();
+    h.step();
+    for name in ["Minimize window", "Maximize window", "Close window"] {
+        assert!(h.query_by_label(name).is_some(), "{name}");
+    }
+    let prompt = HelperApp::new(Mode::Askpass { prompt: "Password".into(), value: String::new(), secret: true, confirm: false });
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(460.0, 204.0)).with_max_steps(5).build_ui_state(|ui, a: &mut HelperApp| a.frame(ui), prompt);
+    h.step();
+    h.step();
+    assert!(h.query_by_label("Close window").is_some());
+    assert!(h.query_by_label("Maximize window").is_none(), "a prompt only closes");
+}
