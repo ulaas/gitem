@@ -35,13 +35,22 @@ pub struct SearchView {
     compare: Task<CompareResult>,
     auto_run: bool,
     compare_tab: usize,
+    compare_limit: usize,
     changelog: Task<String>,
     natural: Task<String>,
 }
 
+const SEARCH_PAGE: usize = 500;
+const COMPARE_PAGE: usize = 2000;
+
+/// A count that may have stopped at the limit, so it doesn't read as the whole story.
+fn counted(n: usize, limit: usize) -> String {
+    if n >= limit { format!("{}+", grouped(n)) } else { grouped(n) }
+}
+
 impl Default for SearchView {
     fn default() -> Self {
-        Self { mode: Mode::Search, query: String::new(), results: Task::default(), selected: None, limit: 500, a: String::new(), b: String::new(), three_dot: true, compare: Task::default(), auto_run: false, compare_tab: 0, changelog: Task::default(), natural: Task::default() }
+        Self { mode: Mode::Search, query: String::new(), results: Task::default(), selected: None, limit: SEARCH_PAGE, compare_limit: COMPARE_PAGE, a: String::new(), b: String::new(), three_dot: true, compare: Task::default(), auto_run: false, compare_tab: 0, changelog: Task::default(), natural: Task::default() }
     }
 }
 
@@ -71,7 +80,13 @@ impl SearchView {
         }
     }
 
+    /// A new search starts from the first page again.
     fn run_search(&mut self, ctx: &egui::Context, cx: &Cx) {
+        self.limit = SEARCH_PAGE;
+        self.fetch_search(ctx, cx);
+    }
+
+    fn fetch_search(&mut self, ctx: &egui::Context, cx: &Cx) {
         let mut q = parse_search(&self.query);
         q.limit = self.limit;
         let repo = cx.repo.clone();
@@ -79,11 +94,17 @@ impl SearchView {
     }
 
     fn run_compare(&mut self, ctx: &egui::Context, cx: &Cx) {
+        self.compare_limit = COMPARE_PAGE;
+        self.fetch_compare(ctx, cx);
+    }
+
+    fn fetch_compare(&mut self, ctx: &egui::Context, cx: &Cx) {
         let (a, b, three) = (self.a.trim().to_string(), self.b.trim().to_string(), self.three_dot);
+        let limit = self.compare_limit;
         let repo = cx.repo.clone();
         self.compare.spawn(ctx, move || -> Result<CompareResult, String> {
             let e = |x: gitem_core::Error| x.to_string();
-            let log = |spec: String| repo.log(&LogQuery { revs: vec![spec], limit: 2000, ..Default::default() }).map_err(e);
+            let log = |spec: String| repo.log(&LogQuery { revs: vec![spec], limit, ..Default::default() }).map_err(e);
             Ok(CompareResult { ahead: log(format!("{a}..{b}"))?, behind: log(format!("{b}..{a}"))?, files: repo.compare_files(&a, &b, three).map_err(e)? })
         });
     }
@@ -150,7 +171,13 @@ impl SearchView {
             ui.label(RichText::new(HELP).monospace().color(p.dim));
             return;
         };
-        ui.label(RichText::new(format!("{} commit(s){}", list.len(), if list.len() >= self.limit { " (limit reached)" } else { "" })).small().color(p.dim));
+        ui.label(RichText::new(format!("{} commit(s)", grouped(list.len()))).small().color(p.dim));
+        if list.len() >= self.limit
+            && let Some(choice) = load_more_bar(ui, "search-load-more", list.len(), "matches", SEARCH_PAGE, self.results.busy(), &p)
+        {
+            self.limit = choice.apply(self.limit, SEARCH_PAGE);
+            self.fetch_search(&ui.ctx().clone(), cx);
+        }
         if list.is_empty() {
             empty_state(ui, "No commits found", "Try fewer filters, or search all branches.", &p);
         }
@@ -192,8 +219,8 @@ impl SearchView {
         let src = if self.three_dot { DiffSource::MergeBase(a.clone(), b.clone()) } else { DiffSource::Range(a.clone(), b.clone()) };
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.compare_tab, 0, format!("Files ({})", res.files.len()));
-            ui.selectable_value(&mut self.compare_tab, 1, format!("{} only ({})", short(&b), res.ahead.len()));
-            ui.selectable_value(&mut self.compare_tab, 2, format!("{} only ({})", short(&a), res.behind.len()));
+            ui.selectable_value(&mut self.compare_tab, 1, format!("{} only ({})", short(&b), counted(res.ahead.len(), self.compare_limit)));
+            ui.selectable_value(&mut self.compare_tab, 2, format!("{} only ({})", short(&a), counted(res.behind.len(), self.compare_limit)));
             if ui.small_button("Open all diffs").clicked() {
                 cx.diff(src.clone(), None);
             }
@@ -244,8 +271,16 @@ impl SearchView {
                     }
                 });
             }
-            1 => commit_list(ui, cx, &res.ahead, &mut self.selected, "cmp-ahead", menus::commit_menu),
-            _ => commit_list(ui, cx, &res.behind, &mut self.selected, "cmp-behind", menus::commit_menu),
+            tab => {
+                let list = if tab == 1 { &res.ahead } else { &res.behind };
+                if list.len() >= self.compare_limit
+                    && let Some(choice) = load_more_bar(ui, "compare-load-more", list.len(), "commits", COMPARE_PAGE, self.compare.busy(), &p)
+                {
+                    self.compare_limit = choice.apply(self.compare_limit, COMPARE_PAGE);
+                    self.fetch_compare(&ctx, cx);
+                }
+                commit_list(ui, cx, list, &mut self.selected, if tab == 1 { "cmp-ahead" } else { "cmp-behind" }, menus::commit_menu);
+            }
         }
         self.compare.value = Some(res);
     }

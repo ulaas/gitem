@@ -17,9 +17,11 @@ pub struct ReflogView {
     filter: String,
 }
 
+const REFLOG_PAGE: usize = 1000;
+
 impl Default for ReflogView {
     fn default() -> Self {
-        Self { rev: "HEAD".into(), entries: Task::default(), loaded_gen: u64::MAX, limit: 1000, filter: String::new() }
+        Self { rev: "HEAD".into(), entries: Task::default(), loaded_gen: u64::MAX, limit: REFLOG_PAGE, filter: String::new() }
     }
 }
 
@@ -60,6 +62,12 @@ impl ReflogView {
             spinner_row(ui, "Reading reflog…", &p);
             return;
         };
+        if list.len() >= self.limit
+            && let Some(choice) = load_more_bar(ui, "reflog-load-more", list.len(), "entries", REFLOG_PAGE, self.entries.busy(), &p)
+        {
+            self.limit = choice.apply(self.limit, REFLOG_PAGE);
+            self.load(&ui.ctx().clone(), cx);
+        }
         let q = self.filter.to_lowercase();
         let shown: Vec<&ReflogEntry> = list.iter().filter(|e| q.is_empty() || e.action.to_lowercase().contains(&q) || e.message.to_lowercase().contains(&q)).collect();
         if shown.is_empty() {

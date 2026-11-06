@@ -172,6 +172,82 @@ pub fn text_area(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
     egui::TextEdit::multiline(text).margin(INPUT_MARGIN)
 }
 
+/// Asks git for everything: the largest count it accepts.
+pub const LOAD_ALL: usize = i32::MAX as usize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadMore {
+    More,
+    All,
+}
+
+impl LoadMore {
+    /// The new limit, from the current one.
+    pub fn apply(self, limit: usize, step: usize) -> usize {
+        match self {
+            LoadMore::More => limit.saturating_add(step),
+            LoadMore::All => LOAD_ALL,
+        }
+    }
+}
+
+/// 2000 as "2,000".
+pub fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A pinned bar for a list that stopped at a limit. Call it before drawing the list, so
+/// the list takes the space above it.
+pub fn load_more_bar(ui: &mut Ui, id: &str, shown: usize, noun: &str, step: usize, busy: bool, p: &Palette) -> Option<LoadMore> {
+    let mut choice = None;
+    let frame = egui::Frame::new().fill(p.panel2).inner_margin(egui::Margin::symmetric(10, 5));
+    egui::Panel::bottom(egui::Id::new(id)).frame(frame).resizable(false).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Showing the latest {} {noun}", grouped(shown))).color(p.dim));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(!busy, egui::Button::new("Load all")).on_hover_text("Can take a while in a very long history").clicked() {
+                    choice = Some(LoadMore::All);
+                }
+                if ui.add_enabled(!busy, egui::Button::new(format!("Load {} more", grouped(step)))).clicked() {
+                    choice = Some(LoadMore::More);
+                }
+                if busy {
+                    ui.add(egui::Spinner::new().size(14.0));
+                }
+            });
+        });
+    });
+    choice
+}
+
+/// A row at the end of a sidebar list. `left` is how many remain, when that's known.
+pub fn load_more_row(ui: &mut Ui, step: usize, left: Option<usize>, busy: bool, p: &Palette) -> bool {
+    let count = left.map_or(step, |l| l.min(step));
+    let label = match left {
+        Some(l) if l > step => format!("Load {} more of {}", grouped(count), grouped(l)),
+        _ => format!("Load {} more", grouped(count)),
+    };
+    let mut clicked = false;
+    ui.add_space(3.0);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        clicked = ui.add_enabled(!busy, egui::Button::new(RichText::new(label).size(11.5))).clicked();
+        if busy {
+            ui.add(egui::Spinner::new().size(12.0).color(p.dim));
+        }
+    });
+    ui.add_space(4.0);
+    clicked
+}
+
 pub fn section(ui: &mut Ui, title: &str, p: &Palette) {
     ui.add_space(6.0);
     ui.label(RichText::new(title.to_uppercase()).size(11.0).color(p.faint).strong());

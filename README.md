@@ -33,7 +33,7 @@ gitem looks for git in this order:
 | Commit Graph | Lanes with folding, ref badges, search with highlights and match options, Current and Smart presets, favorites, focus and hide refs, worktree pills, minimap by commits or lines changed, Changes column, columns you can resize, reorder, and hide by dragging or right-clicking headers, remembered between sessions, dim merges, jump to HEAD or upstream, `/` ref finder, multi-select, drag a ref onto a commit to merge, rebase, or compare, work-in-progress row, stashes |
 | Commit actions | Reword, squash, drop, Undo Commit, Push to Commit, fixup and Squash Fixups, recompose, copy as patch, compare with common base, conflict prediction |
 | Inspect / Commit Details | Metadata, signatures, autolinks, notes, containing refs, files with stats |
-| Commits, Branches, Remotes, Tags, Stashes, Contributors views | Sidebar trees, plus full views where useful |
+| Commits, Branches, Remotes, Tags, Stashes, Contributors views | Sidebar trees, plus full views where useful. Local and remote branches open to their latest commits, and long lists have Load more |
 | Repositories, Workspaces | Tabs for several open repositories; named local workspaces with status overview and fetch-all |
 | Worktrees | Add, open, move, lock, remove, prune, repair; per-worktree change counts; copy changes or apply a stash into another worktree; open a terminal, run a task, or start an agent CLI there |
 | File History, Line History | Commit lists for a file or a line range |

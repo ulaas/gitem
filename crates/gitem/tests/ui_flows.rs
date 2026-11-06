@@ -1721,3 +1721,153 @@ fn hovering_a_tab_keeps_the_normal_pointer() {
     h.step();
     assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default);
 }
+
+/// `n` commits, quickly, through fast-import.
+fn many_commits(f: &Fx, n: usize) {
+    let mut script = String::new();
+    for i in 0..n {
+        let parent = if i > 0 { format!("from :{i}\n") } else { String::new() };
+        let msg = format!("commit number {i}");
+        script.push_str(&format!("commit refs/heads/main\nmark :{}\ncommitter T <t@x> {} +0000\ndata {}\n{msg}\n{parent}M 100644 inline f.txt\ndata {}\n{i}\n\n", i + 1, 1_600_000_000 + i, msg.len(), i.to_string().len() + 1));
+    }
+    let opts = gitem_core::runner::RunOpts { stdin: Some(script.into_bytes()), is_write: true, ..Default::default() };
+    let o = f.git.run_opts(Some(&f.root), &["fast-import".to_string(), "--quiet".to_string()], &opts, &mut |_| {}).unwrap();
+    assert!(o.ok(), "{}", o.stderr);
+    f.git(&["reset", "-q", "--hard", "main"]);
+}
+
+fn graph_loaded(h: &Harness<GitemApp>) -> usize {
+    h.query_all_by_label("Load all").count()
+}
+
+#[test]
+fn the_commit_graph_loads_more_from_a_bar_and_then_says_nothing() {
+    let f = Fx::new();
+    many_commits(&f, 130);
+    let ctx = egui::Context::default();
+    let mut settings = gitem_core::settings::Settings::default();
+    settings.graph_page_size = 100;
+    let mut app = GitemApp::with_settings(&ctx, settings);
+    app.git = Ok(f.git.clone());
+    let root = f.root.clone();
+    let mut opened = false;
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5);
+    let mut h = builder.build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    );
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    pump_for_label(&mut h, "Showing the latest 100 commits");
+    assert_eq!(graph_loaded(&h), 1);
+    click(&mut h, "Load 100 more");
+    // All 130 fit in the next page, so the bar goes away.
+    let t = Instant::now();
+    while graph_loaded(&h) > 0 {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(20), "the bar stayed");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    no_errors(&h);
+}
+
+#[test]
+fn the_sidebar_commits_section_loads_more() {
+    let f = Fx::new();
+    many_commits(&f, 130);
+    let mut h = harness(&f);
+    // Tall enough to reach the end of a hundred rows without scrolling.
+    h.set_size(vec2(1500.0, 3200.0));
+    settle(&mut h);
+    click(&mut h, "Commits section");
+    pump_for_label(&mut h, "Load 100 more");
+    // The section animates open, so wait for the button to stop moving.
+    settle(&mut h);
+    // 130 fit in the next page, so the button goes away.
+    click(&mut h, "Load 100 more");
+    let t = Instant::now();
+    while h.query_by_label("Load 100 more").is_some() {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(20), "the button stayed");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    no_errors(&h);
+}
+
+#[test]
+fn search_offers_more_when_it_stops_at_a_limit() {
+    let f = Fx::new();
+    many_commits(&f, 520);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::search("commit number"));
+    pump_for_label(&mut h, "Showing the latest 500 matches");
+    click(&mut h, "Load all");
+    pump_for_label(&mut h, "520 commit(s)");
+    assert!(h.query_by_label("Showing the latest 500 matches").is_none());
+    no_errors(&h);
+}
+
+#[test]
+fn load_more_counts() {
+    use gitem::widgets::{LOAD_ALL, LoadMore, grouped};
+    assert_eq!(LoadMore::More.apply(100, 50), 150);
+    assert_eq!(LoadMore::All.apply(100, 50), LOAD_ALL);
+    assert_eq!((grouped(7), grouped(2000), grouped(1234567)), ("7".to_string(), "2,000".to_string(), "1,234,567".to_string()));
+}
+
+#[test]
+fn local_and_remote_branches_open_to_their_latest_commits() {
+    let f = Fx::new();
+    many_commits(&f, 30);
+    let bare = tempfile::tempdir().unwrap();
+    let bare_path = bare.path().join("r.git");
+    f.git.run(None, &["init", "-q", "--bare", "-b", "main", &bare_path.to_string_lossy()]).unwrap();
+    f.git(&["remote", "add", "origin", &bare_path.to_string_lossy()]);
+    f.git(&["push", "-q", "origin", "main"]);
+    f.git(&["branch", "side", "HEAD~25"]);
+
+    let mut h = harness(&f);
+    settle(&mut h);
+    let count = |h: &Harness<GitemApp>, n: usize| h.query_all_by_label(&format!("commit number {n}")).count();
+
+    // A local branch with nothing tracking it: the latest twenty of its 5 are all there.
+    let before = count(&h, 4);
+    click(&mut h, "Expand side");
+    settle(&mut h);
+    assert_eq!(count(&h, 4), before + 1, "its tip is listed");
+    assert!(h.query_by_label("Load 20 more").is_none(), "it has fewer than a page");
+    click(&mut h, "Collapse side");
+    settle(&mut h);
+
+    // A longer one stops at twenty, and loading more reaches the oldest.
+    let oldest = count(&h, 0);
+    click(&mut h, "Expand main");
+    settle(&mut h);
+    assert_eq!(count(&h, 0), oldest, "commit 0 is past the first twenty");
+    click(&mut h, "Load 20 more");
+    settle(&mut h);
+    assert_eq!(count(&h, 0), oldest + 1, "now it's listed");
+    assert!(h.query_by_label("Load 20 more").is_none(), "that was all of them");
+    click(&mut h, "Collapse main");
+    settle(&mut h);
+
+    // Remote branches open the same way.
+    click(&mut h, "Remotes section");
+    settle(&mut h);
+    click(&mut h, "origin");
+    settle(&mut h);
+    let tip = count(&h, 29);
+    click(&mut h, "Expand origin/main");
+    settle(&mut h);
+    assert_eq!(count(&h, 29), tip + 1);
+    pump_for_label(&mut h, "Load 20 more");
+    no_errors(&h);
+}

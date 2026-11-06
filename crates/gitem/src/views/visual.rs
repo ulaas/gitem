@@ -14,8 +14,10 @@ use crate::widgets::*;
 
 /// Authors beyond this many fold into "Other" rather than inventing hues.
 const MAX_AUTHORS: usize = 8;
+const VISUAL_PAGE: usize = 5000;
 
 pub struct VisualView {
+    limit: usize,
     /// A file or folder; empty means the whole branch.
     path: String,
     rev: String,
@@ -28,7 +30,7 @@ pub struct VisualView {
 
 impl VisualView {
     pub fn new(path: &str) -> Self {
-        Self { path: path.to_string(), rev: "HEAD".to_string(), points: Task::default(), started: false, selected: None, window: None }
+        Self { path: path.to_string(), rev: "HEAD".to_string(), points: Task::default(), started: false, selected: None, window: None, limit: VISUAL_PAGE }
     }
 
     pub fn key(&self) -> String {
@@ -46,16 +48,22 @@ impl VisualView {
             self.started = true;
             self.selected = None;
             let repo = cx.repo.clone();
-            let (path, rev) = (self.path.clone(), self.rev.clone());
+            let (path, rev, limit) = (self.path.clone(), self.rev.clone(), self.limit);
             // Renames can only be followed for a single file on the current history.
             let is_file = !path.is_empty() && repo.root.join(&path).is_file() && rev == "HEAD";
             self.points.spawn(ui.ctx(), move || {
                 if is_file {
-                    repo.file_history_points(&path, 5000)
+                    repo.file_history_points(&path, limit)
                 } else {
-                    repo.history_points((!path.is_empty()).then_some(path.as_str()), &rev, 5000)
+                    repo.history_points((!path.is_empty()).then_some(path.as_str()), &rev, limit)
                 }
             });
+        }
+        if let Some(n) = self.points.get().map(Vec::len).filter(|n| *n >= self.limit)
+            && let Some(choice) = crate::widgets::load_more_bar(ui, "visual-load-more", n, "commits", VISUAL_PAGE, self.points.busy(), &p)
+        {
+            self.limit = choice.apply(self.limit, VISUAL_PAGE);
+            self.started = false;
         }
         ui.horizontal(|ui| {
             ui.label("Path");
@@ -65,6 +73,7 @@ impl VisualView {
             if (a.lost_focus() || b.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.started = false;
                 self.window = None;
+                self.limit = VISUAL_PAGE;
             }
             for (label, days) in [("1 month", 30), ("1 year", 365), ("All", 0)] {
                 if ui.small_button(label).clicked() {

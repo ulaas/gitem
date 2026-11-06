@@ -13,7 +13,6 @@ use crate::task::Task;
 use crate::views::Tab;
 use crate::widgets::*;
 
-#[derive(Default)]
 pub struct Sidebar {
     filter: String,
     commits: Task<Vec<Commit>>,
@@ -21,23 +20,44 @@ pub struct Sidebar {
     files: crate::views::filetree::FilesView,
     contributors: Task<Vec<Contributor>>,
     contributors_gen: Option<u64>,
+    commits_limit: usize,
+    contributors_shown: usize,
     /// Commits a branch is missing from its upstream, and the reverse, by branch.
     tracking: HashMap<String, Tracking>,
     /// Branches opened or closed by hand. Otherwise, ones with incoming commits start open.
     expanded: HashMap<String, bool>,
 }
 
-#[derive(Default)]
+impl Default for Sidebar {
+    fn default() -> Self {
+        Self { filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new() }
+    }
+}
+
 struct Tracking {
     refs_gen: Option<u64>,
     incoming: Task<Vec<Commit>>,
     outgoing: Task<Vec<Commit>>,
+    commits: Task<Vec<Commit>>,
+    incoming_limit: usize,
+    outgoing_limit: usize,
+    commits_limit: usize,
+}
+
+impl Default for Tracking {
+    fn default() -> Self {
+        Self { refs_gen: None, incoming: Task::default(), outgoing: Task::default(), commits: Task::default(), incoming_limit: TRACKING_PAGE, outgoing_limit: TRACKING_PAGE, commits_limit: BRANCH_PAGE }
+    }
 }
 
 const ROW: f32 = 22.0;
 const SECTION_ROW: f32 = 28.0;
-/// How many incoming or outgoing commits a branch lists.
-const TRACKING_LIMIT: usize = 50;
+const COMMITS_PAGE: usize = 100;
+const CONTRIBUTORS_PAGE: usize = 100;
+/// How many incoming or outgoing commits a branch lists at a time.
+const TRACKING_PAGE: usize = 50;
+/// How many of its own commits an open branch lists at a time.
+const BRANCH_PAGE: usize = 20;
 
 impl Sidebar {
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -54,6 +74,7 @@ impl Sidebar {
         for t in self.tracking.values_mut() {
             t.incoming.poll();
             t.outgoing.poll();
+            t.commits.poll();
         }
         ui.add_space(2.0);
         ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter branches, tags, and more…").desired_width(f32::INFINITY));
@@ -82,7 +103,8 @@ impl Sidebar {
             if self.commits_gen != Some(cx.data.refs_gen) {
                 self.commits_gen = Some(cx.data.refs_gen);
                 let r = cx.repo.clone();
-                self.commits.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec!["HEAD".into()], limit: 100, ..Default::default() }));
+                let limit = self.commits_limit;
+                self.commits.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec!["HEAD".into()], limit, ..Default::default() }));
             }
             if let Some(list) = self.commits.value.take() {
                 for c in &list {
@@ -97,6 +119,10 @@ impl Sidebar {
                         cx.inspect(&c.sha);
                     }
                     resp.context_menu(|ui| menus::commit_menu(ui, cx, c));
+                }
+                if list.len() >= self.commits_limit && load_more_row(ui, COMMITS_PAGE, None, self.commits.busy(), &p) {
+                    self.commits_limit += COMMITS_PAGE;
+                    self.commits_gen = None;
                 }
                 self.commits.value = Some(list);
             }
@@ -121,12 +147,12 @@ impl Sidebar {
         let (rect, resp) = row(ui, ROW, b.is_current, &p);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
         let text_color = if b.is_current { p.text } else { p.dim };
-        let can_expand = !b.is_remote && !b.upstream_gone && b.upstream.is_some() && (b.ahead > 0 || b.behind > 0);
-        let open = can_expand && self.expanded.get(&b.name).copied().unwrap_or(b.behind > 0);
-        if can_expand {
+        // Any branch opens to its commits. Ones with something incoming start open.
+        let open = self.expanded.get(&b.name).copied().unwrap_or(!b.is_remote && !b.upstream_gone && b.upstream.is_some() && b.behind > 0);
+        {
             let hit = egui::Rect::from_min_size(rect.min, vec2(16.0, ROW));
             let caret = ui.interact(hit, resp.id.with("expand"), Sense::click());
-            let name = format!("{} {label}", if open { "Collapse" } else { "Expand" });
+            let name = format!("{} {}", if open { "Collapse" } else { "Expand" }, b.name);
             caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
             let glyph = if open { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
             ui.painter().text(hit.center(), egui::Align2::CENTER_CENTER, glyph, prop(11.0), if caret.hovered() { p.text } else { p.faint });
@@ -169,43 +195,70 @@ impl Sidebar {
         }
         resp.context_menu(|ui| menus::branch_menu(ui, cx, b));
         if open {
-            self.tracking_lists(ui, cx, b);
+            self.branch_details(ui, cx, b);
         }
     }
 
-    /// What's on the upstream but not here, then what's here but not on the upstream.
-    fn tracking_lists(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch) {
+    /// What's on the upstream but not here, what's here but not on the upstream, and
+    /// the branch's latest commits.
+    fn branch_details(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         let p = cx.pal.clone();
-        let Some(upstream) = b.upstream.clone() else { return };
+        let upstream = b.upstream.clone().filter(|_| !b.is_remote && !b.upstream_gone);
         let t = self.tracking.entry(b.name.clone()).or_default();
         if t.refs_gen != Some(cx.data.refs_gen) {
             t.refs_gen = Some(cx.data.refs_gen);
-            for (task, count, range) in [(&mut t.incoming, b.behind, format!("{}..{upstream}", b.name)), (&mut t.outgoing, b.ahead, format!("{upstream}..{}", b.name))] {
-                if count > 0 {
-                    let r = cx.repo.clone();
-                    task.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec![range], limit: TRACKING_LIMIT, ..Default::default() }));
-                } else {
-                    task.value = None;
+            let r = cx.repo.clone();
+            let (rev, limit) = (b.name.clone(), t.commits_limit);
+            t.commits.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec![rev], limit, ..Default::default() }));
+            if let Some(up) = &upstream {
+                for (task, count, limit, range) in [(&mut t.incoming, b.behind, t.incoming_limit, format!("{}..{up}", b.name)), (&mut t.outgoing, b.ahead, t.outgoing_limit, format!("{up}..{}", b.name))] {
+                    if count > 0 {
+                        let r = cx.repo.clone();
+                        task.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec![range], limit, ..Default::default() }));
+                    } else {
+                        task.value = None;
+                    }
                 }
             }
         }
-        if b.behind > 0 {
-            if tracking_heading(ui, crate::chrome::icon::ARROW_DOWN, &format!("Incoming from {upstream}"), b.behind, p.incoming(), b.is_current.then_some("Pull")) {
-                let mode = match cx.settings.pull_mode.as_str() {
-                    "ff-only" => ops::PullMode::FfOnly,
-                    "rebase" => ops::PullMode::Rebase,
-                    "merge" => ops::PullMode::Merge,
-                    _ => ops::PullMode::Default,
-                };
-                cx.run(ops::pull(mode, false));
+        let mut headed = false;
+        if let Some(up) = &upstream {
+            if b.behind > 0 {
+                headed = true;
+                if tracking_heading(ui, crate::chrome::icon::ARROW_DOWN, &format!("Incoming from {up}"), b.behind, p.incoming(), b.is_current.then_some("Pull")) {
+                    let mode = match cx.settings.pull_mode.as_str() {
+                        "ff-only" => ops::PullMode::FfOnly,
+                        "rebase" => ops::PullMode::Rebase,
+                        "merge" => ops::PullMode::Merge,
+                        _ => ops::PullMode::Default,
+                    };
+                    cx.run(ops::pull(mode, false));
+                }
+                if listed_commits(ui, cx, t.incoming.get(), Some(b.behind as usize), t.incoming_limit, TRACKING_PAGE, t.incoming.busy()) {
+                    t.incoming_limit += TRACKING_PAGE;
+                    t.refs_gen = None;
+                }
             }
-            tracking_commits(ui, cx, t.incoming.get(), b.behind);
+            if b.ahead > 0 {
+                headed = true;
+                if tracking_heading(ui, crate::chrome::icon::ARROW_UP, &format!("Outgoing to {up}"), b.ahead, p.outgoing(), b.is_current.then_some("Push")) {
+                    cx.run(ops::push(&ops::PushOpts::default()));
+                }
+                if listed_commits(ui, cx, t.outgoing.get(), Some(b.ahead as usize), t.outgoing_limit, TRACKING_PAGE, t.outgoing.busy()) {
+                    t.outgoing_limit += TRACKING_PAGE;
+                    t.refs_gen = None;
+                }
+            }
         }
-        if b.ahead > 0 {
-            if tracking_heading(ui, crate::chrome::icon::ARROW_UP, &format!("Outgoing to {upstream}"), b.ahead, p.outgoing(), b.is_current.then_some("Push")) {
-                cx.run(ops::push(&ops::PushOpts::default()));
-            }
-            tracking_commits(ui, cx, t.outgoing.get(), b.ahead);
+        // A heading only when there's something else to tell these apart from.
+        if headed {
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+            ui.painter().text(pos2(rect.left() + 21.0, rect.center().y), egui::Align2::CENTER_CENTER, crate::chrome::icon::GIT_COMMIT, prop(12.0), p.dim);
+            paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), rect.max), "Latest commits", prop(11.5), p.dim);
+        }
+        if listed_commits(ui, cx, t.commits.get(), None, t.commits_limit, BRANCH_PAGE, t.commits.busy()) {
+            t.commits_limit += BRANCH_PAGE;
+            t.refs_gen = None;
         }
     }
 
@@ -328,10 +381,8 @@ impl Sidebar {
                 self.contributors.spawn(ui.ctx(), move || r.contributors("HEAD", false));
             }
             if let Some(list) = self.contributors.value.take() {
-                for c in list.iter().take(100) {
-                    if !self.matches(&c.name) {
-                        continue;
-                    }
+                let matching: Vec<&Contributor> = list.iter().filter(|c| self.matches(&c.name)).collect();
+                for c in matching.iter().take(self.contributors_shown) {
                     let (rect, resp) = row(ui, ROW, false, &p);
                     paint_avatar(ui, pos2(rect.left() + 12.0, rect.center().y), 7.0, &c.name, &c.email, &p, cx.settings.gravatar);
                     paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(24.0, 0.0), egui::pos2(rect.right() - 40.0, rect.bottom())), &c.name, prop(12.5), p.dim);
@@ -339,6 +390,10 @@ impl Sidebar {
                     if resp.on_hover_text(&c.email).clicked() {
                         cx.open(Tab::search(&format!("@:{}", c.email)));
                     }
+                }
+                let left = matching.len().saturating_sub(self.contributors_shown);
+                if left > 0 && load_more_row(ui, CONTRIBUTORS_PAGE, Some(left), false, &p) {
+                    self.contributors_shown += CONTRIBUTORS_PAGE;
                 }
                 self.contributors.value = Some(list);
             }
@@ -392,12 +447,14 @@ fn tracking_heading(ui: &mut Ui, glyph: &str, title: &str, count: u32, color: eg
     clicked
 }
 
-fn tracking_commits(ui: &mut Ui, cx: &mut Cx, commits: Option<&Vec<Commit>>, total: u32) {
+/// Commits under a branch. `total` is how many exist, when that's known; otherwise there
+/// may be more whenever the list reached `limit`. Returns whether more were asked for.
+fn listed_commits(ui: &mut Ui, cx: &mut Cx, commits: Option<&Vec<Commit>>, total: Option<usize>, limit: usize, step: usize, busy: bool) -> bool {
     let p = cx.pal.clone();
     let Some(list) = commits else {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
         paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), rect.max), "Loading…", prop(12.0), p.faint);
-        return;
+        return false;
     };
     for c in list {
         let (rect, resp) = row(ui, ROW, false, &p);
@@ -410,11 +467,9 @@ fn tracking_commits(ui: &mut Ui, cx: &mut Cx, commits: Option<&Vec<Commit>>, tot
         }
         resp.context_menu(|ui| menus::commit_menu(ui, cx, c));
     }
-    let more = total as usize - list.len().min(total as usize);
-    if more > 0 {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
-        paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), rect.max), &format!("and {more} more"), prop(12.0), p.faint);
-    }
+    let left = total.map(|t| t.saturating_sub(list.len()));
+    let more = left.map_or(list.len() >= limit, |l| l > 0);
+    more && load_more_row(ui, step, left, busy, &p)
 }
 
 /// A collapsible section: a tall header that lights up on hover, with icon buttons on

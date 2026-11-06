@@ -99,7 +99,12 @@ impl HistoryView {
             empty_state(ui, "No history", "This path has no commits on the current branch.", &p);
         }
         let path = self.path.clone();
-        let more = list.len() >= self.limit;
+        if list.len() >= self.limit
+            && let Some(choice) = load_more_bar(ui, "history-load-more", list.len(), "commits", PAGE, self.commits.busy(), &p)
+        {
+            self.limit = choice.apply(self.limit, PAGE);
+            self.load(&ui.ctx().clone(), cx);
+        }
         commit_list(ui, cx, &list, &mut self.selected, "history-list", |ui, cx, c| {
             if ui.button("Open changes to this file").clicked() {
                 cx.diff(DiffSource::Commit(c.sha.clone()), Some(&path));
@@ -117,10 +122,6 @@ impl HistoryView {
             menus::commit_menu(ui, cx, c);
         });
         self.commits.value = Some(list);
-        if more && ui.button("Load more").clicked() {
-            self.limit += PAGE;
-            self.load(&ui.ctx().clone(), cx);
-        }
     }
 }
 

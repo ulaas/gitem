@@ -26,6 +26,10 @@ struct Graph {
     rows: Vec<GraphRow>,
     index: HashMap<String, usize>,
     max_width: u16,
+    /// Git stopped at the limit, so there may be older commits.
+    more: bool,
+    /// Commits from git, before the working-changes row and stash clean-up.
+    loaded: usize,
 }
 
 #[derive(Clone, PartialEq, Default)]
@@ -200,6 +204,8 @@ impl GraphView {
                 }
                 Err(e) => return Err(e.to_string()),
             };
+            let loaded = commits.len();
+            let more = loaded >= limit;
             commits = graph::hide_stash_internals(commits, &stash_shas);
             for c in &mut commits {
                 if stash_shas.contains(&c.sha) && !c.refs.iter().any(|r| r.kind == RefKind::Stash) {
@@ -212,7 +218,7 @@ impl GraphView {
             let rows = graph::layout(&commits);
             let max_width = rows.iter().map(|r| r.width).max().unwrap_or(1);
             let index = commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect();
-            Ok(Graph { commits, rows, index, max_width })
+            Ok(Graph { commits, rows, index, max_width, more, loaded })
         });
     }
 
@@ -549,6 +555,16 @@ impl GraphView {
         ui.painter().rect_filled(hdr, 0.0, p.panel2);
         self.cols.header(ui, hdr, &cols, &p, cx);
 
+        if g.more {
+            let step = cx.settings.graph_page_size.max(100);
+            if let Some(choice) = load_more_bar(ui, "graph-load-more", g.loaded, "commits", step, self.data.busy(), &p) {
+                self.limit = choice.apply(self.limit, step);
+                // The Changes column and minimap need figures for the new commits too.
+                self.stats_gen = None;
+                self.reload(&ui.ctx().clone(), cx);
+            }
+        }
+
         // Row order: all commits, or only matches when filtering.
         let visible: Vec<usize> = if self.filter_to_matches && self.matches.get().is_some() { self.match_list.clone() } else { (0..g.commits.len()).collect() };
         let match_set: Option<&HashSet<String>> = self.matches.get();
@@ -741,12 +757,6 @@ impl GraphView {
         let map = Rect::from_min_size(pos2(hdr.right() - minimap_w, area_top), vec2(minimap_w, area_h));
         if self.show_minimap {
             self.minimap(ui, map, &visible, g, content_h, scroll_y, area_h, cx);
-        }
-
-        // Load-more affordance.
-        if g.commits.len() >= self.limit && !self.data.busy() && scroll_y + area_h + 200.0 >= content_h {
-            self.limit += cx.settings.graph_page_size.max(100);
-            self.reload(&ui.ctx().clone(), cx);
         }
     }
 
