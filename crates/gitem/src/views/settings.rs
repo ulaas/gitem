@@ -2,6 +2,7 @@
 //! `Action::Settings`, which also saves them, so there's no Save button.
 use egui::{Align, Align2, CursorIcon, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2};
 use gitem_core::ai::AiProvider;
+use gitem_core::editors::{self, Editor};
 use gitem_core::forge::ForgeKind;
 use gitem_core::runner::GitSource;
 use gitem_core::settings::{Autolink, CustomHost, Settings, ThemeChoice};
@@ -14,6 +15,8 @@ use crate::task::Task;
 use crate::theme::Palette;
 use crate::widgets::*;
 
+const REVEAL: &str = "None: reveal in file manager";
+const CUSTOM: &str = "Custom";
 const NAV_WIDTH: f32 = 176.0;
 const CONTENT_WIDTH: f32 = 720.0;
 const ZOOMS: [(f32, &str); 7] = [(0.75, "75%"), (0.9, "90%"), (1.0, "100%"), (1.1, "110%"), (1.25, "125%"), (1.5, "150%"), (2.0, "200%")];
@@ -80,6 +83,10 @@ pub struct SettingsView {
     draft: Option<Settings>,
     ai_test: Task<String>,
     git_version: Option<String>,
+    editors: Task<Vec<Editor>>,
+    editors_looked: bool,
+    /// The editor setting last checked, and whether it can be started.
+    editor_check: Option<(String, bool)>,
 }
 
 // ---- building blocks ---------------------------------------------------------
@@ -405,9 +412,53 @@ impl SettingsView {
                 });
             });
         });
+        self.editors.poll();
+        if !std::mem::replace(&mut self.editors_looked, true) {
+            self.editors.spawn(ui.ctx(), || -> Result<Vec<Editor>, String> { Ok(editors::detect()) });
+        }
+        let found: Vec<Editor> = self.editors.get().cloned().unwrap_or_default();
+        let current = s.default_external_editor.trim().to_string();
+        if self.editor_check.as_ref().is_none_or(|(c, _)| *c != current) {
+            let ok = current.is_empty() || editors::runnable(&editors::resolve(&current));
+            self.editor_check = Some((current.clone(), ok));
+        }
+        let usable = self.editor_check.as_ref().is_none_or(|c| c.1);
         group(ui, "External editor", p, |g| {
-            g.stacked("Editor path", "Leave blank to reveal files in the file manager instead.", |ui| {
-                wide_field(ui, &mut s.default_external_editor, "Path to your editor");
+            g.row("Editor", "Where \"Open in external editor\" opens files.", |ui| {
+                let selected = if current.is_empty() { REVEAL } else { editors::matching(&current, &found).map_or(CUSTOM, |e| e.name) };
+                egui::ComboBox::from_id_salt("external-editor").selected_text(selected).width(260.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(current.is_empty(), REVEAL).clicked() {
+                        s.default_external_editor.clear();
+                    }
+                    for e in &found {
+                        if ui.selectable_label(selected == e.name, e.name).clicked() {
+                            s.default_external_editor = e.path.to_string_lossy().into_owned();
+                        }
+                    }
+                    if self.editors.busy() {
+                        ui.label(RichText::new("Looking for editors…").color(p.faint));
+                    }
+                });
+            });
+            g.stacked("Path", "A program, or a command on your PATH. Choosing an editor above fills this in.", |ui| {
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Browse…").clicked() {
+                            let mut dialog = rfd::FileDialog::new().set_title("Choose an editor");
+                            if cfg!(windows) {
+                                dialog = dialog.add_filter("Programs", &["exe", "cmd", "bat"]);
+                            }
+                            if let Some(f) = dialog.pick_file() {
+                                s.default_external_editor = f.to_string_lossy().into_owned();
+                            }
+                        }
+                        ui.add(input(&mut s.default_external_editor).hint_text("Reveal files in the file manager").desired_width(f32::INFINITY));
+                    });
+                });
+                if !usable {
+                    ui.add_space(5.0);
+                    ui.label(RichText::new(format!("{} This program can't be found, so opening files will fail.", icon::WARNING)).color(p.warn));
+                }
             });
         });
         group(ui, "Files", p, |g| {

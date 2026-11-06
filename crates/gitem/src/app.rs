@@ -1305,11 +1305,19 @@ fn open_terminal(dir: &Path, command: Option<&str>, errors: &mut Vec<String>) {
 /// Open a file in the configured editor, otherwise only reveal it. Repository
 /// content is untrusted: a file is never launched through its own association,
 /// which could run an executable from the repo.
-fn open_file(path: &Path, editor: &str, errors: &mut Vec<String>) {
+/// Opens `path` in the editor, or reveals it in the file manager if none is set.
+pub fn open_file(path: &Path, editor: &str, errors: &mut Vec<String>) {
     let mut c;
     if !editor.trim().is_empty() {
-        c = std::process::Command::new(editor.trim());
+        let program = gitem_core::editors::resolve(editor);
+        c = std::process::Command::new(&program);
         c.arg(path);
+        // A launcher script would otherwise flash a console window.
+        #[cfg(windows)]
+        if program.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat")) {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000);
+        }
     } else {
         #[cfg(windows)]
         {

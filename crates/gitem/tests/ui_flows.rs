@@ -1468,3 +1468,75 @@ fn settings_pages_all_render_and_their_controls_change_settings() {
     assert!(h.state().settings.custom_hosts.is_empty());
     no_errors(&h);
 }
+
+#[test]
+fn settings_warn_about_an_editor_that_cannot_be_found() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Settings(Box::new(|s| s.default_external_editor = "C:/no/such/editor.exe".into())));
+    h.state_mut().repos[0].open_tab(Tab::Settings(Box::default()));
+    pump_for_label(&mut h, "Git");
+    click(&mut h, "Git");
+    pump_for_label(&mut h, &format!("{} This program can't be found, so opening files will fail.", gitem::chrome::icon::WARNING));
+    no_errors(&h);
+}
+
+/// Notepad is on every Windows machine, so the list always has something to show.
+/// Picking from the list was checked on the real window: this harness's clicks don't
+/// reach combo box popups.
+#[cfg(windows)]
+#[test]
+fn the_editor_list_offers_what_was_detected() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Settings(Box::default()));
+    pump_for_label(&mut h, "Git");
+    click(&mut h, "Git");
+    pump_for_label(&mut h, "Editor");
+    for _ in 0..3 {
+        h.step();
+    }
+    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Notepad");
+    no_errors(&h);
+}
+
+/// A launcher script is how many editors arrive on Windows, and paths have spaces.
+#[cfg(windows)]
+#[test]
+fn opening_a_file_runs_a_launcher_script_with_a_path_containing_spaces() {
+    let d = tempfile::tempdir().unwrap();
+    let marker = d.path().join("opened.txt");
+    let script = d.path().join("my editor.cmd");
+    std::fs::write(&script, format!("@echo %~1> \"{}\"\r\n", marker.display())).unwrap();
+    let target = d.path().join("a file with spaces.txt");
+    std::fs::write(&target, "x").unwrap();
+    let mut errors = Vec::new();
+    gitem::app::open_file(&target, &script.to_string_lossy(), &mut errors);
+    assert!(errors.is_empty(), "{errors:?}");
+    let t = Instant::now();
+    while !marker.exists() {
+        assert!(t.elapsed() < Duration::from_secs(10), "the script didn't run");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(std::fs::read_to_string(&marker).unwrap().contains("a file with spaces.txt"));
+}
+
+#[test]
+fn opening_with_a_missing_editor_reports_it() {
+    let d = tempfile::tempdir().unwrap();
+    let target = d.path().join("f.txt");
+    std::fs::write(&target, "x").unwrap();
+    let mut errors = Vec::new();
+    gitem::app::open_file(&target, &d.path().join("no-such-editor.exe").to_string_lossy(), &mut errors);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("f.txt"));
+}
