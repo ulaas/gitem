@@ -302,6 +302,8 @@ pub struct GitemApp {
     about_git: Option<String>,
     /// Reports from earlier crashes that nobody has looked at, newest first.
     pub crash_reports: Vec<PathBuf>,
+    /// Git is older than gitem needs, and the user hasn't dismissed this yet.
+    git_warning: Option<String>,
     #[cfg(windows)]
     styled_window: bool,
     /// Settings shown with no repository open.
@@ -344,7 +346,9 @@ impl GitemApp {
         theme::install_fonts(ctx);
         let git = GitExe::discover((!settings.git_path.is_empty()).then(|| Path::new(&settings.git_path))).map_err(|e| e.to_string());
         let pal = Palette::for_settings(settings.theme, &settings.accent);
+        let git_warning = git.as_ref().ok().and_then(GitExe::version_warning);
         Self {
+            git_warning,
             git,
             settings,
             pal,
@@ -836,6 +840,7 @@ impl GitemApp {
                     ui.add(crate::widgets::input(&mut self.settings.git_path));
                     if ui.button("Use").clicked() {
                         self.git = GitExe::discover(Some(Path::new(&self.settings.git_path))).map_err(|e| e.to_string());
+                        self.git_warning = self.git.as_ref().ok().and_then(GitExe::version_warning);
                         self.settings_dirty = true;
                     }
                 });
@@ -974,7 +979,22 @@ impl GitemApp {
     }
 
     fn dialog_open(&self) -> bool {
-        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty()
+        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some()
+    }
+
+    /// Old git still does most things, so this warns and lets the user carry on.
+    fn git_warning_dialog(&mut self, ctx: &egui::Context) {
+        let Some(warning) = self.git_warning.clone() else { return };
+        let mut dismiss = false;
+        egui::Window::new("Your git is older than gitem needs").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.label(warning);
+            ui.add_space(8.0);
+            dismiss = ui.button("Dismiss").clicked();
+        });
+        if dismiss {
+            self.git_warning = None;
+        }
     }
 
     /// Offers the report from a crash. It stays on disk until the user has seen this.
@@ -1311,6 +1331,7 @@ impl GitemApp {
 
         self.dialogs(&ctx, &mut out);
         self.crash_dialog(&ctx);
+        self.git_warning_dialog(&ctx);
         self.about(&ctx, &mut out);
         chrome::window_edges(&ctx, &pal);
         for a in out {

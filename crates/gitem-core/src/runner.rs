@@ -110,6 +110,16 @@ pub struct GitExe {
     pub helper: Option<PathBuf>,
 }
 
+/// The oldest git gitem works with. 2.38 brought `merge-tree --write-tree` and
+/// `rebase --update-refs`, the newest features used. The README states this too.
+pub const MIN_GIT: (u32, u32) = (2, 38);
+
+/// Major and minor from `git version 2.56.0.windows.4`.
+pub fn parse_git_version(text: &str) -> Option<(u32, u32)> {
+    let mut parts = text.trim().strip_prefix("git version ")?.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
 /// Extra per-invocation options.
 #[derive(Default, Clone)]
 pub struct RunOpts {
@@ -165,6 +175,13 @@ impl GitExe {
 
     pub fn version(&self) -> String {
         self.run(None, &["--version"]).map(|o| o.text().trim().to_string()).unwrap_or_default()
+    }
+
+    /// What to tell the user if this git is too old for gitem. `None` when it's fine,
+    /// or when its version can't be read, which isn't a reason to worry anyone.
+    pub fn version_warning(&self) -> Option<String> {
+        let (major, minor) = parse_git_version(&self.version())?;
+        ((major, minor) < MIN_GIT).then(|| format!("This is git {major}.{minor}. gitem needs {}.{} or newer. Merge checks and updating dependent branches during a rebase will fail, and other commands may too.", MIN_GIT.0, MIN_GIT.1))
     }
 
     /// Read-only helper. Returns the raw output with non-zero exit codes intact.
@@ -387,5 +404,27 @@ fn display_arg(a: &str) -> String {
         format!("\"{}\"", a.replace('"', "\\\""))
     } else {
         a
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_version_line_of_each_platform() {
+        assert_eq!(parse_git_version("git version 2.56.0.windows.4\n"), Some((2, 56)));
+        assert_eq!(parse_git_version("git version 2.39.5 (Apple Git-154)"), Some((2, 39)));
+        assert_eq!(parse_git_version("git version 2.38.0"), Some((2, 38)));
+        assert_eq!(parse_git_version("something else"), None);
+        assert_eq!(parse_git_version(""), None);
+    }
+
+    #[test]
+    fn the_boundary_is_at_the_minimum() {
+        assert!((2, 37) < MIN_GIT);
+        assert!((2, 38) >= MIN_GIT);
+        assert!((3, 0) > MIN_GIT);
+        assert!((1, 99) < MIN_GIT);
     }
 }
