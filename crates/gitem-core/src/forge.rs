@@ -89,12 +89,16 @@ pub fn parse_remote_url(url: &str) -> Option<(String, String)> {
     let u = url.trim();
     let strip = |p: &str| p.trim_matches('/').trim_end_matches(".git").to_string();
     if let Some((scheme, rest)) = u.split_once("://") {
-        if scheme == "file" {
+        // A one-letter scheme is a Windows drive, as in `C://folder`.
+        if scheme == "file" || scheme.len() <= 1 {
             return None;
         }
         let rest = rest.rsplit_once('@').map(|x| x.1).filter(|_| rest.split('/').next().is_some_and(|a| a.contains('@'))).unwrap_or(rest);
         let (host, path) = rest.split_once('/')?;
         let host = host.split(':').next().unwrap_or(host).to_lowercase();
+        if host.is_empty() {
+            return None;
+        }
         return Some((host, strip(path)));
     }
     // scp-like: [user@]host:path. A Windows drive letter has a one-letter "host".

@@ -306,7 +306,7 @@ pub fn parse_status(out: &str) -> RepoStatus {
                 }
             }
             b'?' => st.entries.push(StatusEntry {
-                path: rec[2..].to_string(),
+                path: rec.get(2..).unwrap_or("").to_string(),
                 orig_path: None,
                 index: FileStatus::Unmodified,
                 worktree: FileStatus::Untracked,
@@ -517,6 +517,12 @@ pub fn parse_ls_tree_sizes(out: &str) -> Vec<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_status_record_cut_short_is_not_a_panic() {
+        assert_eq!(parse_status("?\0").entries[0].path, "");
+        assert_eq!(parse_status("? \u{e9}\0").entries[0].path, "\u{e9}");
+    }
 
     #[test]
     fn commit_stats_and_tree_sizes() {
