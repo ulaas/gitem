@@ -1724,6 +1724,292 @@ fn an_edit_in_a_settings_tab_keeps_what_changed_elsewhere() {
     assert_eq!(s.favorite_branches, vec!["main"]);
 }
 
+const CLOSE_TITLE: &str = "Close with work not saved?";
+
+fn close_commands(h: &Harness<GitemApp>) -> Vec<egui::ViewportCommand> {
+    h.output().viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default()
+}
+
+/// What the window's close button and the system both end up as.
+fn ask_window_to_close(h: &mut Harness<GitemApp>) {
+    let root = h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default();
+    root.events.push(egui::ViewportEvent::Close);
+    h.step();
+    let root = h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default();
+    root.events.clear();
+}
+
+fn type_commit_message(h: &mut Harness<GitemApp>, text: &str) {
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    let input = egui::accesskit::Role::MultilineTextInput;
+    pump_for_role(h, input);
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text(text);
+    h.step();
+    h.step();
+}
+
+fn middle_click(h: &mut Harness<GitemApp>, pos: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(pos));
+    h.step();
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Middle, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Middle, pressed: false, modifiers: Default::default() });
+    h.step();
+    h.step();
+}
+
+fn dock_tab_rect(h: &Harness<GitemApp>, is: impl Fn(&Tab) -> bool) -> egui::Rect {
+    let r = &h.state().repos[0];
+    let path = r.dock.find_tab_from(is).expect("the tab");
+    h.ctx.read_response(gitem::app::dock_tab_id(path.node_path(), path.tab.0)).expect("the tab's title").rect
+}
+
+/// A new window spends its first frames measuring itself, and a click then can land anywhere.
+fn answer_close(h: &mut Harness<GitemApp>, answer: &str) {
+    pump_for_label(h, CLOSE_TITLE);
+    for _ in 0..3 {
+        h.step();
+    }
+    click(h, answer);
+}
+
+fn merge_tab_open(h: &Harness<GitemApp>) -> bool {
+    h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Merge(_)))
+}
+
+#[test]
+fn closing_the_window_with_nothing_at_stake_just_closes() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    ask_window_to_close(&mut h);
+    assert!(!close_commands(&h).contains(&egui::ViewportCommand::CancelClose));
+    assert!(h.query_by_label(CLOSE_TITLE).is_none());
+}
+
+#[test]
+fn closing_the_window_asks_about_a_written_commit_message() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    type_commit_message(&mut h, "half a thought");
+    ask_window_to_close(&mut h);
+    assert!(close_commands(&h).contains(&egui::ViewportCommand::CancelClose), "the close was held back");
+    pump_for_label(&mut h, CLOSE_TITLE);
+    assert!(h.query_by_label_contains("A commit message").is_some(), "it names what would go");
+    answer_close(&mut h, "Keep it open");
+    assert!(h.query_by_label(CLOSE_TITLE).is_none());
+
+    ask_window_to_close(&mut h);
+    pump_for_label(&mut h, CLOSE_TITLE);
+    answer_close(&mut h, "Close anyway");
+    // One frame on, the close is sent, and a further request isn't held back.
+    assert!(h.query_by_label(CLOSE_TITLE).is_none());
+    ask_window_to_close(&mut h);
+    assert!(!close_commands(&h).contains(&egui::ViewportCommand::CancelClose));
+}
+
+/// A message put there by git, with nothing written, is nothing to ask about.
+#[test]
+fn a_prepared_merge_message_is_not_a_draft() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    let t = Instant::now();
+    while h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Changes(c) = t { Some(c.message.is_empty()) } else { None }).unwrap() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "git's message never came");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(h.state().window_at_stake().is_empty(), "{:?}", h.state().window_at_stake());
+}
+
+#[test]
+fn closing_a_merge_tab_with_resolutions_asks_first() {
+    let f = Fx::new();
+    make_two_conflicts(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "2 of 2 conflict(s) left");
+
+    click_nth(&mut h, "Take ours", 0);
+    wait_until_quiet(&mut h);
+    let tab = dock_tab_rect(&h, |t| matches!(t, Tab::Merge(_)));
+    middle_click(&mut h, tab.center());
+    pump_for_label(&mut h, CLOSE_TITLE);
+    assert!(h.query_by_label_contains("conflict resolutions not saved").is_some());
+    assert!(merge_tab_open(&h), "held back");
+    answer_close(&mut h, "Keep it open");
+    assert!(merge_tab_open(&h));
+
+    // Saved work isn't at stake any more.
+    click(&mut h, "Save with markers");
+    pump_for_label(&mut h, "Saved");
+    let tab = dock_tab_rect(&h, |t| matches!(t, Tab::Merge(_)));
+    middle_click(&mut h, tab.center());
+    assert!(h.query_by_label(CLOSE_TITLE).is_none());
+    assert!(!merge_tab_open(&h), "closed with no question");
+}
+
+#[test]
+fn closing_a_merge_tab_anyway_closes_only_that_tab() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "1 of 1 conflict(s) left");
+    click(&mut h, "Take ours");
+    wait_until_quiet(&mut h);
+    let tab = dock_tab_rect(&h, |t| matches!(t, Tab::Merge(_)));
+    middle_click(&mut h, tab.center());
+    pump_for_label(&mut h, CLOSE_TITLE);
+    answer_close(&mut h, "Close anyway");
+    assert!(!merge_tab_open(&h));
+    assert_eq!(h.state().repos.len(), 1);
+}
+
+#[test]
+fn an_untouched_merge_tab_closes_without_a_question() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "1 of 1 conflict(s) left");
+    wait_until_quiet(&mut h);
+    let tab = dock_tab_rect(&h, |t| matches!(t, Tab::Merge(_)));
+    middle_click(&mut h, tab.center());
+    assert!(h.query_by_label(CLOSE_TITLE).is_none());
+    assert!(!merge_tab_open(&h));
+}
+
+/// A repository tab with work in it used to vanish with one click.
+#[test]
+fn closing_a_repository_asks_about_a_composer_plan() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("one.txt", "1\n");
+    let mut h = harness(&f);
+    open_composer(&mut h);
+    plan_commit(&mut h, 0, "planned");
+    let name = f.root.file_name().unwrap().to_string_lossy().to_string();
+    click(&mut h, &format!("Close {name}"));
+    pump_for_label(&mut h, CLOSE_TITLE);
+    assert!(h.query_by_label_contains("a plan of 1 commit").is_some());
+    answer_close(&mut h, "Keep it open");
+    assert_eq!(h.state().repos.len(), 1);
+    click(&mut h, &format!("Close {name}"));
+    pump_for_label(&mut h, CLOSE_TITLE);
+    answer_close(&mut h, "Close anyway");
+    assert!(h.state().repos.is_empty());
+}
+
+#[test]
+fn closing_a_repository_with_nothing_at_stake_just_closes() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let name = f.root.file_name().unwrap().to_string_lossy().to_string();
+    click(&mut h, &format!("Close {name}"));
+    assert!(h.query_by_label(CLOSE_TITLE).is_none());
+    assert!(h.state().repos.is_empty());
+}
+
+/// A slow op that ends in failure, so a test can close the tab while it runs.
+fn slow_failing_op(f: &Fx) -> gitem_core::ops::GitOp {
+    let hook = f.root.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\nsleep 2\necho refused by the slow hook >&2\nexit 1\n").unwrap();
+    ops::commit(&ops::CommitOpts { message: "slow".into(), allow_empty: true, ..Default::default() })
+}
+
+/// The queue used to vanish and the running op's failure with it, with no word to anyone.
+#[test]
+fn closing_a_repository_with_ops_running_says_so_and_still_reports_the_failure() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let op = slow_failing_op(&f);
+    h.state_mut().apply_action(&ctx, Action::Run(op));
+    h.state_mut().apply_action(&ctx, Action::Run(ops::tag_create("queued-tag", None, None, false)));
+    h.step();
+    let name = f.root.file_name().unwrap().to_string_lossy().to_string();
+    click(&mut h, &format!("Close {name}"));
+    pump_for_label(&mut h, CLOSE_TITLE);
+    assert!(h.query_by_label_contains("is running").is_some());
+    assert!(h.query_by_label_contains("queued git command").is_some());
+    answer_close(&mut h, "Close anyway");
+    assert!(h.state().repos.is_empty());
+    pump_for_label(&mut h, "Something went wrong");
+    assert!(h.query_by_label_contains("refused by the slow hook").is_some());
+    assert_eq!(f.git(&["tag", "--list", "queued-tag"]).trim(), "", "the queued op did not run");
+}
+
+#[test]
+fn a_fetch_in_progress_is_no_reason_to_ask() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let hold = ops::fetch(&ops::FetchOpts::default());
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(hold));
+    assert!(h.state().window_at_stake().is_empty());
+}
+
+/// Dialogs don't block the window, so a second could replace the first and its typing.
+#[test]
+fn a_second_form_does_not_replace_one_with_typing_in_it() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_branch(None)));
+    pump_for_label(&mut h, "Branch name");
+    for _ in 0..3 {
+        h.step();
+    }
+    // Opening another over an untouched one is fine, and the usual way to change your mind.
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_tag(None)));
+    pump_for_label(&mut h, "Tag name");
+    for _ in 0..3 {
+        h.step();
+    }
+    h.event(egui::Event::Text("v-typed".into()));
+    h.step();
+    h.step();
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_branch(None)));
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.query_by_label("Tag name").is_some(), "the form with typing stays");
+    assert!(h.query_by_label("Branch name").is_none());
+}
+
+#[test]
+fn a_second_question_does_not_replace_the_first() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let ask = |title: &str| Action::Confirm { title: title.into(), body: String::new(), label: "Go".into(), op: ops::tag_create("v1", None, None, false) };
+    h.state_mut().apply_action(&ctx, ask("First question"));
+    pump_for_label(&mut h, "First question");
+    h.state_mut().apply_action(&ctx, ask("Second question"));
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.query_by_label("First question").is_some());
+    assert!(h.query_by_label("Second question").is_none());
+}
+
 #[test]
 fn clone_opens_the_new_repository() {
     let r = with_remote();

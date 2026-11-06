@@ -79,6 +79,16 @@ tabs! {
 }
 
 impl Tab {
+    /// What closing this tab would lose, in a line for the user. `None` if nothing.
+    pub fn unsaved(&self) -> Option<String> {
+        match self {
+            Tab::Merge(v) => v.unsaved(),
+            Tab::Changes(v) => v.unsaved(),
+            Tab::Composer(v) => v.unsaved(),
+            _ => None,
+        }
+    }
+
     /// A short description of this tab for restoring the session. Tabs holding
     /// one-off state (diffs, merges, AI results) aren't restored.
     pub fn spec(&self) -> Option<String> {

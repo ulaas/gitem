@@ -25,6 +25,8 @@ pub enum Action {
     /// Ask first, then run.
     Confirm { title: String, body: String, label: String, op: GitOp },
     Form(FormDialog),
+    /// A tab asked to close with work in it. `key` names the tab, `lost` what would go.
+    AskCloseTab { key: String, lost: String },
     OpenTab(Tab),
     /// Show a commit in the Inspect panel.
     Inspect(String),

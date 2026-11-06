@@ -7,6 +7,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use egui::{Align2, RichText, Ui};
+use egui_dock::tab_viewer::OnCloseResponse;
 use egui_dock::{DockArea, DockState, NodePath, TabViewer};
 use gitem_core::model::*;
 use gitem_core::ops::{self, GitOp};
@@ -37,6 +38,13 @@ struct Running {
     last_line: String,
     network: bool,
     open_after: Option<PathBuf>,
+    /// Stopping it loses nothing, so it's no reason to ask before closing.
+    harmless: bool,
+}
+
+/// A fetch only updates remote-tracking refs, and can simply be done again.
+fn is_harmless(op: &GitOp) -> bool {
+    op.steps.iter().all(|s| s.args.first().is_some_and(|a| a == "fetch"))
 }
 
 fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, open_after: Option<PathBuf>) -> Running {
@@ -44,7 +52,7 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
     let cancel = Arc::new(AtomicBool::new(false));
     let c2 = cancel.clone();
     let ctx2 = ctx.clone();
-    let (title, network) = (op.title.clone(), op.network);
+    let (title, network, harmless) = (op.title.clone(), op.network, is_harmless(&op));
     std::thread::spawn(move || {
         let tx2 = tx.clone();
         let ctx3 = ctx2.clone();
@@ -56,7 +64,7 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
         let _ = tx.send(OpMsg::Done(res));
         ctx2.request_repaint();
     });
-    Running { title, rx, cancel, last_line: String::new(), network, open_after }
+    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless }
 }
 
 pub struct RepoTab {
@@ -106,6 +114,19 @@ impl RepoTab {
             last_auto_fetch: Instant::now(),
             background: Vec::new(),
         }
+    }
+
+    /// What closing this repository's tab would lose, in a list for the user.
+    fn at_stake(&self, running_note: &str) -> Vec<String> {
+        let mut items: Vec<String> = self.dock.iter_all_tabs().filter_map(|(_, t)| t.unsaved()).collect();
+        if let Some(r) = self.running.as_ref().filter(|r| !r.harmless) {
+            items.push(format!("{} is running. {running_note}", r.title));
+        }
+        let queued = self.queue.iter().filter(|(op, _)| !is_harmless(op)).count();
+        if queued > 0 {
+            items.push(format!("{queued} queued git command(s) won't run."));
+        }
+        items
     }
 
     pub fn open_tab(&mut self, tab: Tab) {
@@ -259,6 +280,35 @@ impl TabViewer for Viewer<'_> {
     fn on_add(&mut self, _path: NodePath) {
         self.cx.out.push(Action::OpenPalette);
     }
+
+    fn on_close(&mut self, tab: &mut Tab) -> OnCloseResponse {
+        match tab.unsaved() {
+            Some(lost) => {
+                self.cx.out.push(Action::AskCloseTab { key: tab.key(), lost });
+                OnCloseResponse::Focus
+            }
+            None => OnCloseResponse::Close,
+        }
+    }
+}
+
+/// What a yes in the close dialog goes on to close.
+enum CloseTarget {
+    Tab { root: PathBuf, key: String },
+    Repo(PathBuf),
+    Window,
+}
+
+struct CloseGuard {
+    target: CloseTarget,
+    /// Everything that would be lost, one line each.
+    items: Vec<String>,
+}
+
+/// An op from a repository tab that's been closed. Its result still gets reported.
+struct Orphan {
+    repo: String,
+    op: Running,
 }
 
 struct Confirm {
@@ -317,6 +367,10 @@ pub struct GitemApp {
     session_kept: Vec<String>,
     /// Which of those couldn't be reopened and haven't been asked about yet.
     reopen_failed: Vec<String>,
+    close_guard: Option<CloseGuard>,
+    /// The user has said yes to losing work, so the next close request goes through.
+    closing: bool,
+    orphans: Vec<Orphan>,
 }
 
 struct NoRepoSettings {
@@ -402,6 +456,9 @@ impl GitemApp {
             settings_baseline: None,
             session_kept: Vec::new(),
             reopen_failed: Vec::new(),
+            close_guard: None,
+            closing: false,
+            orphans: Vec::new(),
         }
     }
 
@@ -487,7 +544,137 @@ impl GitemApp {
 
     /// No git write is queued or running anywhere.
     pub fn ops_idle(&self) -> bool {
-        self.global_queue.is_empty() && self.global_running.is_none() && self.repos.iter().all(|r| r.queue.is_empty() && r.running.is_none())
+        self.global_queue.is_empty() && self.global_running.is_none() && self.orphans.is_empty() && self.repos.iter().all(|r| r.queue.is_empty() && r.running.is_none())
+    }
+
+    /// Everything closing the window would lose. Empty means nothing to ask about.
+    pub fn window_at_stake(&self) -> Vec<String> {
+        let several = self.repos.len() > 1;
+        let mut items = Vec::new();
+        for r in &self.repos {
+            for item in r.at_stake("It stops after its current step.") {
+                items.push(if several { format!("{}: {item}", r.repo.name()) } else { item });
+            }
+        }
+        for o in self.orphans.iter().filter(|o| !o.op.harmless) {
+            items.push(format!("{}: {} is still finishing. It stops after its current step.", o.repo, o.op.title));
+        }
+        if let Some(g) = self.global_running.as_ref().filter(|g| !g.harmless) {
+            items.push(format!("{} is running. It stops after its current step.", g.title));
+        }
+        if !self.global_queue.is_empty() {
+            items.push(format!("{} queued git command(s) won't run.", self.global_queue.len()));
+        }
+        if let Some(f) = self.form.as_ref().filter(|f| f.touched()) {
+            items.push(format!("The \"{}\" dialog, with what's been typed in it.", f.title));
+        }
+        items
+    }
+
+    /// Closes a repository's tab, or asks first if that would lose something.
+    fn request_close_repo(&mut self, i: usize) {
+        let Some(r) = self.repos.get(i) else { return };
+        let mut items = r.at_stake("It finishes in the background, and a failure is still reported.");
+        if self.form_repo.as_ref() == Some(&r.repo.root)
+            && let Some(f) = self.form.as_ref().filter(|f| f.touched())
+        {
+            items.push(format!("The \"{}\" dialog, with what's been typed in it.", f.title));
+        }
+        if items.is_empty() {
+            self.close_repo(i);
+        } else {
+            self.close_guard = Some(CloseGuard { target: CloseTarget::Repo(r.repo.root.clone()), items });
+        }
+    }
+
+    fn close_repo(&mut self, i: usize) {
+        let mut r = self.repos.remove(i);
+        // The worker can't be stopped mid-step, and nobody should miss that it failed.
+        if let Some(op) = r.running.take() {
+            self.orphans.push(Orphan { repo: r.repo.name(), op });
+        }
+        if self.form_repo.as_ref() == Some(&r.repo.root) {
+            self.form = None;
+            self.form_repo = None;
+        }
+        self.active = self.active.min(self.repos.len().saturating_sub(1));
+        self.settings_dirty = true;
+    }
+
+    /// Results of ops whose repository tab has closed.
+    fn poll_orphans(&mut self) {
+        let mut errors = Vec::new();
+        self.orphans.retain_mut(|o| {
+            loop {
+                match o.op.rx.try_recv() {
+                    Ok(OpMsg::Line(_)) => {}
+                    Ok(OpMsg::Done(res)) => {
+                        if let Err(e) = res {
+                            errors.push(format!("{} in {} failed:\n{e}", o.op.title, o.repo));
+                        }
+                        return false;
+                    }
+                    Err(TryRecvError::Empty) => return true,
+                    Err(TryRecvError::Disconnected) => return false,
+                }
+            }
+        });
+        self.errors.extend(errors);
+    }
+
+    /// The window is asked to close, by its own button or the system. Nothing at stake
+    /// means it just closes, with no dialog in the way.
+    fn check_window_close(&mut self, ctx: &egui::Context) {
+        if self.closing || self.shot.is_some() || !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        let items = self.window_at_stake();
+        if !items.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_guard = Some(CloseGuard { target: CloseTarget::Window, items });
+        }
+    }
+
+    fn close_dialog(&mut self, ctx: &egui::Context) {
+        let Some(g) = &self.close_guard else { return };
+        let (mut go, mut stay) = (false, ctx.input(|i| i.key_pressed(egui::Key::Escape)));
+        let danger = self.pal.danger;
+        let dim = self.pal.dim;
+        egui::Window::new("Close with work not saved?").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.label(RichText::new("Closing now loses:").color(dim));
+            for item in &g.items {
+                ui.label(format!("•  {item}"));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                go = ui.add(egui::Button::new(RichText::new("Close anyway").color(Color32::WHITE)).fill(danger)).clicked();
+                stay |= ui.button("Keep it open").clicked();
+            });
+        });
+        if go {
+            let Some(g) = self.close_guard.take() else { return };
+            match g.target {
+                CloseTarget::Tab { root, key } => {
+                    if let Some(r) = self.repos.iter_mut().find(|r| r.repo.root == root)
+                        && let Some(path) = r.dock.find_tab_from(|t| t.key() == key)
+                    {
+                        r.dock.remove_tab(path);
+                    }
+                }
+                CloseTarget::Repo(root) => {
+                    if let Some(i) = self.repos.iter().position(|r| r.repo.root == root) {
+                        self.close_repo(i);
+                    }
+                }
+                CloseTarget::Window => {
+                    self.closing = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        } else if stay {
+            self.close_guard = None;
+        }
     }
 
     pub fn palette_is_open(&self) -> bool {
@@ -545,13 +732,22 @@ impl GitemApp {
                 }
             }
             Action::OpenFile(path) => open_file(&path, &self.settings.default_external_editor, &mut self.errors),
+            // Dialogs don't block the window, so something behind one can ask for another.
+            // A question already showing stays, and so do values typed into a form.
+            Action::Confirm { .. } if self.confirm.is_some() => self.toasts.push(("Answer the open question first.".to_string(), Instant::now())),
             Action::Confirm { title, body, label, op } => {
                 let repo = self.repos.get(self.active).map(|r| r.repo.root.clone());
                 self.confirm = Some(Confirm { title, body, label, op, repo });
             }
+            Action::Form(_) if self.form.as_ref().is_some_and(FormDialog::touched) => self.toasts.push(("Finish or cancel the open dialog first.".to_string(), Instant::now())),
             Action::Form(f) => {
                 self.form_repo = self.repos.get(self.active).map(|r| r.repo.root.clone());
                 self.form = Some(f);
+            }
+            Action::AskCloseTab { key, lost } => {
+                if let Some(r) = self.repos.get(self.active) {
+                    self.close_guard = Some(CloseGuard { target: CloseTarget::Tab { root: r.repo.root.clone(), key }, items: vec![lost] });
+                }
             }
             Action::ForRepo(root, inner) => match self.repos.iter().position(|r| r.repo.root == root) {
                 Some(i) => {
@@ -690,9 +886,7 @@ impl GitemApp {
                 });
             }
             if let Some(i) = close {
-                self.repos.remove(i);
-                self.active = self.active.min(self.repos.len().saturating_sub(1));
-                self.settings_dirty = true;
+                self.request_close_repo(i);
             }
             ui.add_space(2.0);
             ui.scope(|ui| {
@@ -1047,7 +1241,7 @@ impl GitemApp {
     }
 
     fn dialog_open(&self) -> bool {
-        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty()
+        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some()
     }
 
     /// Old git still does most things, so this warns and lets the user carry on.
@@ -1269,6 +1463,7 @@ impl GitemApp {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.handle_shot(ui);
+        self.check_window_close(&ctx);
         let mut out: Vec<Action> = Vec::new();
 
         if let Some(sha) = self.shot_inspect.take() {
@@ -1319,6 +1514,7 @@ impl GitemApp {
             });
         }
         self.poll_global(&ctx, &mut out);
+        self.poll_orphans();
         self.shortcuts(&ctx, &mut out);
 
         let bar_frame = egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::symmetric(8, 4));
@@ -1401,6 +1597,7 @@ impl GitemApp {
         self.crash_dialog(&ctx);
         self.git_warning_dialog(&ctx);
         self.reopen_dialog(&ctx);
+        self.close_dialog(&ctx);
         self.about(&ctx, &mut out);
         chrome::window_edges(&ctx, &pal);
         for a in out {

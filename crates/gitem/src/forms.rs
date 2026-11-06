@@ -56,11 +56,25 @@ pub struct FormDialog {
     pub danger: bool,
     pub on_submit: Submit,
     pub error: Option<String>,
+    /// The values when first shown, to tell whether anything has been typed.
+    first_shown: Option<String>,
 }
 
 impl FormDialog {
     pub fn new(title: impl Into<String>, submit: impl Into<String>) -> Self {
-        Self { title: title.into(), fields: Vec::new(), submit: submit.into(), danger: false, on_submit: Box::new(|_| Ok(Vec::new())), error: None }
+        Self { title: title.into(), fields: Vec::new(), submit: submit.into(), danger: false, on_submit: Box::new(|_| Ok(Vec::new())), error: None, first_shown: None }
+    }
+
+    fn fingerprint(&self) -> String {
+        let v = self.values();
+        let mut parts: Vec<String> = v.text.iter().map(|(k, x)| format!("{k}={x}")).collect();
+        parts.sort();
+        parts.join("\n")
+    }
+
+    /// Whether anything in the form differs from how it opened.
+    pub fn touched(&self) -> bool {
+        self.first_shown.as_ref().is_some_and(|first| *first != self.fingerprint())
     }
     pub fn text(mut self, key: &'static str, label: &str, value: &str) -> Self {
         self.fields.push(Field::Text { key, label: label.into(), value: value.into(), hint: String::new(), password: false });
@@ -138,6 +152,9 @@ impl FormDialog {
     /// Draws the form. Returns actions when submitted, or `None` while open;
     /// `closed` is set when the form should go away.
     pub fn ui(&mut self, ui: &mut Ui, p: &Palette, closed: &mut bool) -> Vec<Action> {
+        if self.first_shown.is_none() {
+            self.first_shown = Some(self.fingerprint());
+        }
         let mut first_text = true;
         ui.set_min_width(440.0);
         for f in &mut self.fields {

@@ -63,6 +63,8 @@ pub struct ChangesView {
     people_gen: Option<u64>,
     /// Message and HEAD at submission, kept until we know the commit landed.
     submitted: Option<(String, String)>,
+    /// A message put in the box for the user, which is no loss if the box closes.
+    prefilled: String,
     /// Ctrl-clicked paths, for batch actions.
     selected: HashSet<String>,
     init: bool,
@@ -82,6 +84,12 @@ impl ChangesView {
     }
     pub fn title(&self) -> String {
         "Changes".into()
+    }
+
+    /// What closing this tab would lose: only what was written here.
+    pub fn unsaved(&self) -> Option<String> {
+        let message = self.message.trim();
+        (!message.is_empty() && message != self.prefilled.trim()).then(|| "A commit message you've written.".to_string())
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -126,6 +134,7 @@ impl ChangesView {
         // During a merge or similar, git prepares the commit message.
         if st.op != RepoOp::None && self.applied_prepared_for != Some(st.op) && self.message.is_empty() {
             if let Some(m) = cx.repo.prepared_message() {
+                self.prefilled = m.clone();
                 self.message = m;
             }
             self.applied_prepared_for = Some(st.op);
@@ -338,6 +347,7 @@ impl ChangesView {
             if ui.checkbox(&mut self.amend, "Amend").changed() && self.amend && self.message.trim().is_empty()
                 && let Ok(c) = cx.repo.commit("HEAD") {
                     self.message = c.message();
+                    self.prefilled = self.message.clone();
                 }
             ui.checkbox(&mut self.signoff, "Sign-off");
             ui.checkbox(&mut self.sign, "GPG/SSH sign");
