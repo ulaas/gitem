@@ -299,6 +299,9 @@ pub struct GitemApp {
     /// Whether settings and the session are saved. Off for tests and screenshots.
     pub persist: bool,
     about_open: bool,
+    about_git: Option<String>,
+    /// Reports from earlier crashes that nobody has looked at, newest first.
+    pub crash_reports: Vec<PathBuf>,
     #[cfg(windows)]
     styled_window: bool,
     /// Settings shown with no repository open.
@@ -323,6 +326,10 @@ impl GitemApp {
     pub fn new(ctx: &egui::Context, paths: &[PathBuf]) -> Self {
         let settings = Settings::load();
         let mut app = Self::with_settings(ctx, settings);
+        if let Ok(git) = &app.git {
+            crate::crash::watch_git_log(git.log.clone());
+        }
+        app.crash_reports = crate::crash::pending(&gitem_core::settings::config_dir());
         let restore: Vec<PathBuf> = if paths.is_empty() { app.settings.open_repos.iter().map(PathBuf::from).collect() } else { paths.to_vec() };
         for p in restore {
             app.open_repo(ctx, &p, paths.is_empty());
@@ -359,6 +366,8 @@ impl GitemApp {
             shot_inspect: None,
             persist: false,
             about_open: false,
+            about_git: None,
+            crash_reports: Vec::new(),
             #[cfg(windows)]
             styled_window: false,
             no_repo_settings: None,
@@ -961,6 +970,42 @@ impl GitemApp {
         });
     }
 
+    /// Offers the report from a crash. It stays on disk until the user has seen this.
+    fn crash_dialog(&mut self, ctx: &egui::Context) {
+        let Some(newest) = self.crash_reports.first().cloned() else { return };
+        let more = self.crash_reports.len() - 1;
+        let (mut dismiss, mut reveal, mut copy) = (false, false, false);
+        egui::Window::new("gitem crashed last time").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.label("A report was saved on this computer. Nothing was sent anywhere. If you share it, read it first: it names folders and the last git commands.");
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new(newest.display().to_string()).monospace().small()).selectable(true));
+            if more > 0 {
+                ui.label(RichText::new(format!("And {more} older report(s) in the same folder.")).small().color(self.pal.dim));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                reveal = ui.button("Show the report").clicked();
+                copy = ui.button("Copy it").clicked();
+                dismiss = ui.button("Dismiss").clicked();
+            });
+        });
+        if reveal {
+            open_file(&newest, "", &mut self.errors);
+        }
+        if copy {
+            match std::fs::read_to_string(&newest) {
+                Ok(t) => ctx.copy_text(t),
+                Err(e) => self.errors.push(format!("Could not read {}: {e}", newest.display())),
+            }
+        }
+        if dismiss {
+            for report in std::mem::take(&mut self.crash_reports) {
+                crate::crash::mark_seen(&report);
+            }
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
         let p = self.pal.clone();
         let several = self.repos.len() > 1;
@@ -1257,6 +1302,7 @@ impl GitemApp {
         }
 
         self.dialogs(&ctx, &mut out);
+        self.crash_dialog(&ctx);
         self.about(&ctx, &mut out);
         chrome::window_edges(&ctx, &pal);
         for a in out {

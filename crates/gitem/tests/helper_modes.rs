@@ -125,6 +125,21 @@ fn a_screenshot_stays_inside_the_config_folder() {
     assert!(config.path().join("app.ron").exists(), "eframe's state follows GITEM_CONFIG_DIR");
     assert!(!config.path().join("settings.json").exists(), "a screenshot doesn't save the session");
 }
+
+#[test]
+fn a_panic_leaves_a_report_in_the_config_folder() {
+    let d = tempfile::tempdir().unwrap();
+    let o = Command::new(BIN).arg("--test-panic").env("GITEM_CONFIG_DIR", d.path()).output().unwrap();
+    assert_eq!(o.status.code(), Some(101), "the crash itself isn't hidden");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("a panic asked for by a test"), "the message still reaches a console");
+    let reports = gitem::crash::pending(d.path());
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    let text = std::fs::read_to_string(&reports[0]).unwrap();
+    for part in ["gitem crash report", "version: ", "a panic asked for by a test", "main.rs", "backtrace:"] {
+        assert!(text.contains(part), "no {part:?} in:\n{text}");
+    }
+}
+
 #[test]
 fn the_passphrase_helper_prints_its_value_to_ssh_keygen() {
     // ssh-keygen passes the prompt as the only argument.

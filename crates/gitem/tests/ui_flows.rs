@@ -2303,6 +2303,23 @@ fn the_composer_refuses_to_commit_during_a_merge() {
 }
 
 #[test]
+fn a_crash_report_is_offered_once_and_then_kept_quietly() {
+    let f = Fx::new();
+    sample_history(&f);
+    let d = tempfile::tempdir().unwrap();
+    let report = d.path().join("crash-1.log");
+    std::fs::write(&report, "gitem crash report").unwrap();
+    let mut h = harness(&f);
+    h.state_mut().crash_reports = gitem::crash::pending(d.path());
+    settle(&mut h);
+    pump_for_label(&mut h, "gitem crashed last time");
+    click(&mut h, "Dismiss");
+    assert!(h.query_by_label("gitem crashed last time").is_none());
+    assert!(gitem::crash::pending(d.path()).is_empty(), "it won't be offered again");
+    assert!(d.path().join("crash-1.seen").exists(), "the file stays");
+}
+
+#[test]
 fn a_40_byte_branch_name_with_a_multibyte_character_does_not_panic() {
     let f = Fx::new();
     sample_history(&f);

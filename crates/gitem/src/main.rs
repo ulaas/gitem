@@ -60,6 +60,7 @@ fn tab_by_name(name: &str) -> Option<Tab> {
 }
 
 fn main() {
+    gitem::crash::install_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     std::process::exit(dispatch(&args));
 }
@@ -80,6 +81,8 @@ fn dispatch(args: &[String]) -> i32 {
             println!("gitem {}", gitem::app::version_line());
             0
         }
+        // Lets a test crash the real binary. Release builds treat it as an unknown option.
+        Some("--test-panic") if cfg!(debug_assertions) => panic!("a panic asked for by a test"),
         Some("--credential-helper") => gitem_core::cred::helper_main(args.get(1).map(String::as_str).unwrap_or("")),
         Some("--mcp") => gitem_core::mcp::serve(std::path::Path::new(args.get(1).map_or(".", String::as_str))),
         Some("--edit-file") if args.len() >= 2 => standalone::edit_file(PathBuf::from(&args[1])),
@@ -185,6 +188,9 @@ fn run_app(args: &[String]) -> i32 {
             a.persist = !is_shot;
             a.shot_tabs = tabs;
             a.shot_inspect = inspect;
+            if is_shot {
+                a.crash_reports.clear();
+            }
             if let Some(q) = &palette {
                 a.open_palette_with(q);
             }
