@@ -2690,6 +2690,38 @@ fn the_about_box_and_signing_page_run_git_once() {
 }
 
 #[test]
+fn line_actions_stay_clickable_at_the_default_window_size() {
+    let f = Fx::new();
+    f.write("f.txt", "one\ntwo\nthree\n");
+    f.commit("base");
+    f.write("f.txt", "one\nTWO\nthree\n");
+    for (width, mode) in [(1500.0, "Unified"), (1400.0, "Unified"), (1100.0, "Unified"), (1500.0, "Side by side")] {
+        let mut h = harness(&f);
+        h.set_size(vec2(width, 940.0));
+        settle(&mut h);
+        h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("f.txt".into())));
+        pump_for_label(&mut h, "Stage hunk");
+        click(&mut h, mode);
+        // The line's gutter is left of its text, on the first row whose text changed.
+        let head = h.get_by_label("Stage hunk").rect();
+        let row_h = 19.0;
+        let panel_left = h.get_by_label("Side by side").rect().left();
+        let added_row = if mode == "Unified" { 3.0 } else { 2.0 };
+        click_at(&mut h, egui::pos2(panel_left + 20.0, head.center().y + row_h * added_row));
+        pump_for_label(&mut h, "Stage 1 selected line(s)");
+        let stage = h.get_by_label("Stage 1 selected line(s)").rect();
+        let discard = h.get_by_label("Discard selected…").rect();
+        let details_left = h.query_all_by_label("Details").map(|n| n.rect().left()).fold(width, f32::min);
+        assert!(stage.right() <= details_left && discard.right() <= details_left, "{mode} at {width}: buttons run under the Details panel at {details_left}: stage {stage:?}, discard {discard:?}");
+        click(&mut h, "Stage 1 selected line(s)");
+        wait_for(&mut h, "the line to be staged", || !f.git(&["diff", "--cached", "--name-only"]).trim().is_empty());
+        wait_until_quiet(&mut h);
+        no_errors(&h);
+        f.git(&["reset", "-q"]);
+    }
+}
+
+#[test]
 fn a_crash_report_is_offered_once_and_then_kept_quietly() {
     let f = Fx::new();
     sample_history(&f);

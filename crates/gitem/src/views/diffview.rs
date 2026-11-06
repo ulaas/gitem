@@ -226,7 +226,8 @@ impl DiffView {
 
     fn toolbar(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let mut reload = false;
-        ui.horizontal(|ui| {
+        // Wraps, or the buttons at the end would run underneath the Details panel.
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.mode, Mode::Split, "Side by side");
             ui.selectable_value(&mut self.mode, Mode::Unified, "Unified");
             ui.separator();
