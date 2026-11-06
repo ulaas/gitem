@@ -559,7 +559,10 @@ pub fn lfs_track_form() -> FormDialog {
 /// Write a todo list to a temp file and start the rebase with it.
 pub fn start_interactive_rebase(repo: &Repo, base: Option<&str>, items: &[gitem_core::rebase::TodoItem], o: ops::RebaseOpts) -> Result<GitOp, String> {
     let helper = repo.git.helper.clone().ok_or("gitem cannot locate its own executable.")?;
-    let path = std::env::temp_dir().join(format!("gitem-todo-{}-{}.txt", std::process::id(), gitem_core::util::now_ts()));
+    // Two rebases can start in the same second, in different repositories of one app.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("gitem-todo-{}-{}-{n}.txt", std::process::id(), gitem_core::util::now_ts()));
     std::fs::write(&path, render_todo(items)).map_err(|e| e.to_string())?;
     let mut o = o;
     o.onto = base.unwrap_or_default().to_string();
@@ -821,6 +824,30 @@ mod tests {
         check("config", raw_config_form("local"), &[("key", "a.b"), ("value", "c d")], "config --local a.b 'c d'");
         check("global config", raw_config_form("global"), &[("key", "a.b"), ("value", "")], "config --global a.b ''");
         check("lfs", lfs_track_form(), &[("pattern", "*.psd")], "lfs track *.psd && add .gitattributes");
+    }
+
+    /// Each plan needs its own file. Git reads it only when the rebase gets going,
+    /// so with a shared one, a second rebase started in the same second, in another
+    /// open repository, would hand git the wrong commits.
+    #[test]
+    fn rebase_plans_started_together_keep_their_own_files() {
+        let d = tempfile::tempdir().unwrap();
+        let git = gitem_core::GitExe::discover(None).unwrap();
+        git.run(Some(d.path()), &["init", "-q"]).unwrap();
+        let repo = Repo::open(git, d.path()).unwrap();
+        let item = |sha: &str| gitem_core::rebase::TodoItem { action: gitem_core::rebase::RebaseAction::Pick, sha: sha.to_string(), text: "x".to_string() };
+        let todo_of = |op: &GitOp| {
+            let editor = &op.steps[0].env.iter().find(|(k, _)| k == "GIT_SEQUENCE_EDITOR").unwrap().1;
+            editor.rsplit('"').nth(1).unwrap().to_string()
+        };
+        let first = start_interactive_rebase(&repo, None, &[item("aaa")], ops::RebaseOpts::default()).unwrap();
+        let second = start_interactive_rebase(&repo, None, &[item("bbb")], ops::RebaseOpts::default()).unwrap();
+        let (a, b) = (todo_of(&first), todo_of(&second));
+        assert_ne!(a, b);
+        assert!(std::fs::read_to_string(&a).unwrap().contains("aaa"));
+        assert!(std::fs::read_to_string(&b).unwrap().contains("bbb"));
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
     }
 
     /// Submitting with a required field left empty, or only spaces, runs nothing.
