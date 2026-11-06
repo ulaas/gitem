@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -65,7 +66,7 @@ fn norm(p: &str) -> String {
     p.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone)]
 pub struct Tail {
     pub cwd: String,
     pub branch: String,
@@ -199,7 +200,8 @@ fn collect_jsonl(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, i64)>) {
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            if depth > 0 {
+            // Claude Code's subagents write here, under their parent's session id.
+            if depth > 0 && e.file_name() != "subagents" {
                 collect_jsonl(&p, depth - 1, out);
             }
         } else if p.extension().is_some_and(|x| x == "jsonl") {
@@ -216,6 +218,22 @@ pub fn default_roots() -> Vec<(&'static str, PathBuf)> {
     vec![("Claude Code", home.join(".claude/projects")), ("Codex", home.join(".codex/sessions")), ("Copilot", copilot.join("session-state"))]
 }
 
+/// Parsed transcripts by file, reused until the file changes: scans repeat often
+/// and most transcripts are finished.
+static PARSED: LazyLock<Mutex<HashMap<PathBuf, (i64, u64, Tail)>>> = LazyLock::new(Mutex::default);
+
+fn parse_file(path: &Path, modified: i64) -> Option<Tail> {
+    let len = std::fs::metadata(path).ok()?.len();
+    if let Some((m, l, t)) = PARSED.lock().ok()?.get(path)
+        && (*m, *l) == (modified, len)
+    {
+        return Some(t.clone());
+    }
+    let t = parse_tail(&read_tail(path)?);
+    PARSED.lock().ok()?.insert(path.to_path_buf(), (modified, len, t.clone()));
+    Some(t)
+}
+
 /// Sessions whose working folder is one of `worktrees`, newest first.
 pub fn scan(roots: &[(&'static str, PathBuf)], worktrees: &[String], now: i64) -> Vec<AgentSession> {
     let wanted: Vec<String> = worktrees.iter().map(|w| norm(w)).collect();
@@ -226,8 +244,7 @@ pub fn scan(roots: &[(&'static str, PathBuf)], worktrees: &[String], now: i64) -
         files.sort_by_key(|x| std::cmp::Reverse(x.1));
         files.truncate(MAX_FILES);
         for (path, modified) in files {
-            let Some(text) = read_tail(&path) else { continue };
-            let t = parse_tail(&text);
+            let Some(t) = parse_file(&path, modified) else { continue };
             if !wanted.contains(&norm(&t.cwd)) {
                 continue;
             }
@@ -238,6 +255,9 @@ pub fn scan(roots: &[(&'static str, PathBuf)], worktrees: &[String], now: i64) -
         }
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    // A resumed session can span several files. The newest speaks for it.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|s| seen.insert(s.id.clone()));
     out
 }
 
@@ -355,6 +375,28 @@ mod tests {
         assert_eq!(found[0].id, "s1");
         assert_eq!(found[0].state, AgentState::NeedsInput);
         assert_eq!(found[0].resume_command(), "claude --resume s1");
+    }
+
+    #[test]
+    fn subagents_and_repeated_ids_make_one_session() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("projects/x");
+        std::fs::create_dir_all(root.join("s1/subagents")).unwrap();
+        std::fs::write(root.join("s1.jsonl"), SAMPLE).unwrap();
+        std::fs::write(root.join("s1/subagents/agent-a.jsonl"), SAMPLE).unwrap();
+        std::fs::write(root.join("resumed.jsonl"), SAMPLE).unwrap();
+        let found = scan(&[("Claude Code", d.path().join("projects"))], &["c:/repo".to_string()], crate::util::now_ts());
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn a_changed_transcript_is_read_again() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("a.jsonl");
+        std::fs::write(&f, SAMPLE).unwrap();
+        assert_eq!(parse_file(&f, 5).unwrap().last_text, "Editing now");
+        std::fs::write(&f, format!("{SAMPLE}{}\n", r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Later"}]}}"#)).unwrap();
+        assert_eq!(parse_file(&f, 5).unwrap().last_text, "Later", "same second, larger file");
     }
 
     #[test]
