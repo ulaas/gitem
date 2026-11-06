@@ -15,6 +15,20 @@ pub struct Step {
     pub env: Vec<(String, String)>,
     /// A failure of this step does not abort the op.
     pub allow_fail: bool,
+    /// Runs only if the step before it failed: the fallback to a gentler first try.
+    pub only_after_failure: bool,
+    /// Skipped if this revision is already at this commit.
+    pub unless_at: Option<(String, String)>,
+}
+
+/// Checked when the op runs, not when it was offered: a menu or dialog can stay open
+/// while a terminal, or another tool, moves things.
+#[derive(Debug, Clone, Default)]
+pub struct Guard {
+    pub rev: String,
+    pub sha: String,
+    /// What to tell the user when `rev` has moved. Nothing has been done at that point.
+    pub why: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -23,6 +37,9 @@ pub struct GitOp {
     pub steps: Vec<Step>,
     /// Talks to a remote (shown with a progress bar, can be cancelled).
     pub network: bool,
+    pub guards: Vec<Guard>,
+    /// Said when a step marked `only_after_failure` was needed and worked.
+    pub fallback_note: Option<String>,
 }
 
 impl GitOp {
@@ -55,6 +72,27 @@ impl GitOp {
         }
         self
     }
+    /// Refuse to run at all unless `rev` is at `sha` by then.
+    pub fn expect_rev(mut self, rev: &str, sha: &str, why: &str) -> Self {
+        self.guards.push(Guard { rev: rev.to_string(), sha: sha.to_string(), why: why.to_string() });
+        self
+    }
+    /// Skip the last step if `rev` is already at `sha`.
+    pub fn unless_at(mut self, rev: &str, sha: &str) -> Self {
+        if let Some(s) = self.steps.last_mut() {
+            s.unless_at = Some((rev.to_string(), sha.to_string()));
+        }
+        self
+    }
+    /// A failure of the last step isn't final: try `args` instead, and say so if it works.
+    pub fn or_else(mut self, args: Vec<String>, note: &str) -> Self {
+        if let Some(s) = self.steps.last_mut() {
+            s.allow_fail = true;
+        }
+        self.steps.push(Step { args, only_after_failure: true, ..Default::default() });
+        self.fallback_note = Some(note.to_string());
+        self
+    }
     /// Treat paths literally, so `pages/[id].tsx` can't match as a glob. Every op
     /// acting on exact paths uses this; several of them discard data.
     pub fn literal(mut self) -> Self {
@@ -75,10 +113,25 @@ impl GitOp {
 
     /// Run all steps in order, stopping on the first hard failure.
     pub fn run(&self, git: &GitExe, cwd: Option<&Path>, cancel: Option<Arc<AtomicBool>>, on_line: &mut dyn FnMut(&str)) -> Result<Vec<GitOutput>> {
+        for g in &self.guards {
+            if !rev_is_at(git, cwd, &g.rev, &g.sha) {
+                return Err(crate::Error::Git(g.why.clone()));
+            }
+        }
         let mut out = Vec::new();
+        let mut last_ok = true;
         for s in &self.steps {
+            if s.only_after_failure && last_ok {
+                continue;
+            }
+            if let Some((rev, sha)) = &s.unless_at
+                && rev_is_at(git, cwd, rev, sha)
+            {
+                continue;
+            }
             let opts = RunOpts { stdin: s.stdin.clone(), env: s.env.clone(), is_write: true, cancel: cancel.clone() };
             let o = git.run_opts(cwd, &s.args, &opts, on_line)?;
+            last_ok = o.ok();
             if !o.ok() && !s.allow_fail {
                 o.into_result()?;
                 unreachable!("non-zero exit is an error");
@@ -87,6 +140,15 @@ impl GitOp {
         }
         Ok(out)
     }
+
+    /// What to say beyond "done", given what `run` returned.
+    pub fn outcome_note(&self, outputs: &[GitOutput]) -> Option<String> {
+        self.fallback_note.clone().filter(|_| outputs.len() == self.steps.len())
+    }
+}
+
+fn rev_is_at(git: &GitExe, cwd: Option<&Path>, rev: &str, sha: &str) -> bool {
+    git.run_raw(cwd, &["rev-parse", "--verify", "--quiet", rev]).is_ok_and(|o| o.ok() && o.text().trim() == sha)
 }
 
 fn v<S: AsRef<str>>(a: &[S]) -> Vec<String> {

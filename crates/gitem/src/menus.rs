@@ -230,12 +230,12 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
                 let key = gitem_core::cred::ai_key(cfg.provider.key_name());
                 let done = gitem_core::autorebase::run(&r, &n, &cfg.custom_instructions, &|s, u| gitem_core::ai::complete(&cfg, key.as_deref(), s, u)).map_err(|e| e.to_string())?;
                 if let Ok(mut u) = slot.lock() {
-                    *u = Some(gitem_core::autorebase::undo_op(&done.start));
+                    *u = Some(gitem_core::autorebase::undo_op(&done));
                 }
                 Ok(done.describe(&n))
             });
             let tab = Tab::Text(Box::new(crate::views::textview::TextView::with_undo(&format!("Auto-rebase onto {name}"), job, undo)));
-            cx.form(forms::FormDialog::new(format!("Auto-rebase onto {name}"), "Start").info("Rebases the current branch, sending each conflict to your AI provider. It stops and leaves the rebase to you if the model is unsure. You can undo it afterwards.").on_submit({
+            cx.form(forms::FormDialog::new(format!("Auto-rebase onto {name}"), "Start").info("Rebases the current branch, sending each conflict to your AI provider. It stops and leaves the rebase to you if the model is unsure. You can undo it afterwards, unless your uncommitted changes are in a file the undo has to change: then it stops and changes nothing.").on_submit({
                 let mut tab = Some(tab);
                 move |_| Ok(tab.take().map(Action::OpenTab).into_iter().collect())
             }));

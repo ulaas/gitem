@@ -3344,6 +3344,48 @@ fn a_selected_line_that_is_not_utf8_offers_no_way_to_rewrite_it() {
     no_errors(&h);
 }
 
+/// The whole route: the result tab, its Undo button and the confirm, with work in the tree.
+#[test]
+fn undo_of_an_auto_rebase_from_its_tab_keeps_uncommitted_work() {
+    let f = Fx::new();
+    f.write("c.txt", "base\n");
+    f.write("dirty.txt", "committed\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "work"]);
+    f.write("c.txt", "mine\n");
+    f.commit("my change");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "upstream\n");
+    f.commit("upstream change");
+    f.git(&["switch", "-q", "work"]);
+    f.write("dirty.txt", "UNCOMMITTED WORK\n");
+    let start = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    let mut h = harness(&f);
+    settle(&mut h);
+    let undo = gitem::views::textview::UndoSlot::default();
+    let slot = undo.clone();
+    let repo = h.state().repos[0].repo.clone();
+    let job: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(move || {
+        let done = gitem_core::autorebase::run(&repo, "main", "", &|_, _| Ok("merged".to_string())).map_err(|e| e.to_string())?;
+        *slot.lock().unwrap() = Some(gitem_core::autorebase::undo_op(&done));
+        Ok(done.describe("main"))
+    });
+    let tab = Tab::Text(Box::new(gitem::views::textview::TextView::with_undo("Auto-rebase", job, undo)));
+    h.state_mut().repos[0].open_tab(tab);
+    pump_for_label(&mut h, "Undo…");
+    assert_ne!(f.git(&["rev-parse", "HEAD"]).trim(), start, "it rebased");
+    wait_until_quiet(&mut h);
+    click(&mut h, "Undo…");
+    pump_for_label(&mut h, "Cancel");
+    assert_no_op_started(&mut h, "nothing happens before confirming");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Undo").click();
+    wait_for(&mut h, "the branch to go back", || f.git(&["rev-parse", "HEAD"]).trim() == start);
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(std::fs::read_to_string(f.root.join("dirty.txt")).unwrap(), "UNCOMMITTED WORK\n");
+}
+
 #[test]
 fn unstage_selected_line_takes_only_that_line_out_of_the_index() {
     let f = Fx::new();

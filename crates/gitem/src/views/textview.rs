@@ -60,7 +60,7 @@ impl TextView {
                 let op = slot.lock().ok().and_then(|g| g.clone());
                 if let Some(op) = op
                     && ui.small_button("Undo…").clicked() {
-                        cx.confirm("Undo", "Go back to where the branch was before this started? Work done since is discarded.", "Undo", op);
+                        cx.confirm("Undo", "Go back to where the branch was before this started? Uncommitted changes are kept. If they're in a file this has to change, it stops and changes nothing, so stash them first.", "Undo", op);
                     }
             }
         });

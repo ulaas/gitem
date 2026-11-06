@@ -52,7 +52,7 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
             let _ = tx2.send(OpMsg::Line(l.to_string()));
             ctx3.request_repaint();
         };
-        let res = op.run(&git, cwd.as_deref(), Some(c2), &mut on_line).map(|o| o.last().map(|x| x.text()).unwrap_or_default()).map_err(|e| e.to_string());
+        let res = op.run(&git, cwd.as_deref(), Some(c2), &mut on_line).map(|o| op.outcome_note(&o).unwrap_or_default()).map_err(|e| e.to_string());
         let _ = tx.send(OpMsg::Done(res));
         ctx2.request_repaint();
     });
@@ -159,11 +159,13 @@ impl RepoTab {
                 self.data.refresh(ctx, &self.repo);
                 self.data.mark_changed();
                 match res {
-                    Ok(_) => {
+                    Ok(note) => {
                         if let Some(p) = open_after {
                             out.push(Action::OpenRepo(p));
                         }
-                        if self.queue.is_empty() {
+                        if !note.is_empty() {
+                            out.push(Action::Toast(format!("{title}: {note}")));
+                        } else if self.queue.is_empty() {
                             out.push(Action::Toast(format!("{title}: done")));
                         }
                     }

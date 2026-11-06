@@ -1034,9 +1034,91 @@ fn auto_rebase_resolves_with_the_model_then_can_be_undone() {
     assert_eq!(f.subjects(), vec!["another", "my change", "upstream change", "base"]);
     assert!(sum.describe("main").contains("c.txt"));
 
-    f.run(autorebase::undo_op(&sum.start));
+    f.run(autorebase::undo_op(&sum));
     assert_eq!(f.repo.resolve("HEAD").unwrap(), sum.start);
     assert_eq!(f.read("c.txt"), "mine\nmiddle\n");
+}
+
+/// The rebase autostashes and restores this work, and `reset --hard` then destroyed it.
+#[test]
+fn undoing_a_finished_auto_rebase_keeps_uncommitted_work() {
+    use gitem_core::autorebase;
+    let f = Fx::new();
+    stacked_conflict(&f);
+    f.write("dirty.txt", "committed\n");
+    f.commit_all("add dirty");
+    f.write("dirty.txt", "UNCOMMITTED WORK\n");
+    f.write("new-untracked.txt", "also mine\n");
+    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("merged line".to_string())).unwrap();
+    assert_eq!(sum.paused, None);
+    assert_eq!(f.read("dirty.txt"), "UNCOMMITTED WORK\n", "the rebase restored it");
+
+    f.run(autorebase::undo_op(&sum));
+    assert_eq!(f.repo.resolve("HEAD").unwrap(), sum.start);
+    assert_eq!(f.read("dirty.txt"), "UNCOMMITTED WORK\n");
+    assert_eq!(f.read("new-untracked.txt"), "also mine\n");
+    assert_eq!(f.read("c.txt"), "mine\nmiddle\n");
+}
+
+#[test]
+fn undoing_a_paused_auto_rebase_keeps_uncommitted_work() {
+    use gitem_core::autorebase;
+    let f = Fx::new();
+    stacked_conflict(&f);
+    f.write("dirty.txt", "committed\n");
+    f.commit_all("add dirty");
+    f.write("dirty.txt", "UNCOMMITTED WORK\n");
+    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("UNSURE".to_string())).unwrap();
+    assert!(sum.paused.is_some());
+
+    f.run(autorebase::undo_op(&sum));
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
+    assert_eq!(f.repo.resolve("HEAD").unwrap(), sum.start);
+    assert_eq!(f.read("dirty.txt"), "UNCOMMITTED WORK\n");
+}
+
+/// Staged work makes `reset --keep` refuse even with nothing to move, and after an abort
+/// HEAD is already home, so the undo must not fail on it.
+#[test]
+fn undoing_a_paused_auto_rebase_with_staged_work_finishes_cleanly() {
+    use gitem_core::autorebase;
+    let f = Fx::new();
+    stacked_conflict(&f);
+    f.write("new-staged.txt", "staged work\n");
+    f.run(ops::stage_paths(&["new-staged.txt".to_string()]));
+    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("UNSURE".to_string())).unwrap();
+    assert!(sum.paused.is_some());
+    f.run(autorebase::undo_op(&sum));
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
+    assert_eq!(f.read("new-staged.txt"), "staged work\n");
+}
+
+/// Uncommitted work in a file the undo has to move: it stops, and nothing is lost.
+#[test]
+fn undo_refuses_when_uncommitted_work_is_in_a_file_it_would_change() {
+    use gitem_core::autorebase;
+    let f = Fx::new();
+    stacked_conflict(&f);
+    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("merged line".to_string())).unwrap();
+    let head = f.repo.resolve("HEAD").unwrap();
+    f.write("c.txt", "edited after the rebase\n");
+    assert!(!f.try_run(autorebase::undo_op(&sum)));
+    assert_eq!(f.read("c.txt"), "edited after the rebase\n");
+    assert_eq!(f.repo.resolve("HEAD").unwrap(), head, "the branch stays where it was");
+}
+
+#[test]
+fn undo_refuses_when_the_branch_moved_after_the_rebase() {
+    use gitem_core::autorebase;
+    let f = Fx::new();
+    stacked_conflict(&f);
+    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("merged line".to_string())).unwrap();
+    f.write("later.txt", "later\n");
+    f.commit_all("made after the rebase");
+    let head = f.repo.resolve("HEAD").unwrap();
+    assert!(!f.try_run(autorebase::undo_op(&sum)));
+    assert_eq!(f.repo.resolve("HEAD").unwrap(), head);
+    assert_eq!(f.read("later.txt"), "later\n");
 }
 
 #[test]
@@ -1049,17 +1131,17 @@ fn auto_rebase_pauses_when_the_model_is_unsure_or_fails() {
     let st = f.repo.status().unwrap();
     assert!(matches!(st.op, RepoOp::Rebase | RepoOp::RebaseInteractive), "left for the user to finish");
     assert_eq!(st.conflicts().count(), 1, "the file isn't touched");
-    f.run(autorebase::undo_op(&sum.start));
+    f.run(autorebase::undo_op(&sum));
     assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
 
     let sum = autorebase::run(&f.repo, "main", "", &|_, _| Err(gitem_core::Error::Other("HTTP 429: slow down".into()))).unwrap();
     assert!(sum.paused.as_deref().unwrap().contains("429"));
-    f.run(autorebase::undo_op(&sum.start));
+    f.run(autorebase::undo_op(&sum));
 
     // A model echoing conflict markers isn't accepted.
     let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("<<<<<<< a\nx\n=======\ny\n>>>>>>> b".to_string())).unwrap();
     assert!(sum.paused.as_deref().unwrap().contains("markers"));
-    f.run(autorebase::undo_op(&sum.start));
+    f.run(autorebase::undo_op(&sum));
     assert_eq!(f.read("c.txt"), "mine\nmiddle\n");
 }
 

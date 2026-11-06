@@ -15,6 +15,8 @@ const MAX_STEPS: usize = 500;
 pub struct Summary {
     /// HEAD before starting; resetting to it undoes everything.
     pub start: String,
+    /// HEAD when the rebase finished. Empty if it stopped early.
+    pub end: String,
     pub resolved: Vec<String>,
     /// Why the rebase stopped early, with the rebase left in progress.
     pub paused: Option<String>,
@@ -38,9 +40,19 @@ impl Summary {
     }
 }
 
-/// Everything needed to get back to where the rebase started.
-pub fn undo_op(start: &str) -> GitOp {
-    GitOp::new("Undo auto-rebase").step(&["rebase", "--abort"]).allow_fail().step(&["reset", "--hard", start])
+/// Everything needed to get back to where the rebase started, keeping uncommitted work.
+/// The rebase autostashes, so that work is back in the tree by now, and `reset --hard`
+/// would destroy it with the stash already gone. `--keep` refuses, changing nothing, if
+/// the reset would have to touch a file with uncommitted changes.
+pub fn undo_op(sum: &Summary) -> GitOp {
+    let start = sum.start.as_str();
+    let keep = ["reset", "--keep", start];
+    if sum.paused.is_some() {
+        // Aborting restores HEAD and the autostash. If the rebase was finished by hand
+        // since, there's nothing to abort and the reset does the work.
+        return GitOp::new("Undo auto-rebase").step(&["rebase", "--abort"]).allow_fail().step(&keep).unless_at("HEAD", start);
+    }
+    GitOp::new("Undo auto-rebase").expect_rev("HEAD", &sum.end, "The branch has moved since the rebase, so undoing it would drop those commits. Nothing was changed.").step(&keep)
 }
 
 /// Run the rebase. `complete` sends (system, user) to the AI provider.
@@ -57,6 +69,7 @@ pub fn run(repo: &Repo, onto: &str, instructions: &str, complete: &dyn Fn(&str, 
     for _ in 0..MAX_STEPS {
         let st = repo.status()?;
         if !matches!(st.op, RepoOp::Rebase | RepoOp::RebaseInteractive) {
+            sum.end = repo.resolve("HEAD")?;
             return Ok(sum);
         }
         let conflicts: Vec<String> = st.conflicts().map(|e| e.path.clone()).collect();
