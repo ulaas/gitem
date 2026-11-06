@@ -84,6 +84,15 @@ struct Text {
 }
 
 impl Text {
+    /// An empty last line with no newline after it isn't a line at all: "a\n" is one line.
+    fn new(mut lines: Vec<String>, final_newline: bool) -> Self {
+        if !final_newline && lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+            return Self { lines, final_newline: true };
+        }
+        Self { lines, final_newline }
+    }
+
     fn bytes(&self) -> Vec<u8> {
         let mut s = self.lines.join("\n");
         if self.final_newline && !self.lines.is_empty() {
@@ -143,7 +152,7 @@ fn case(no_newline: bool) -> impl Strategy<Value = Case> {
     let eol = move || if no_newline { any::<bool>().boxed() } else { Just(true).boxed() };
     (proptest::collection::vec(select(LINES).prop_map(String::from), 0..30), proptest::collection::vec(edit(), 1..7), eol(), eol(), 1u32..5, proptest::collection::vec(any::<bool>(), 16)).prop_map(|(base, edits, old_eol, new_eol, context, picks)| {
         let new = edited(&base, &edits);
-        Case { old: Text { lines: base, final_newline: old_eol }, new: Text { lines: new, final_newline: new_eol }, context, picks }
+        Case { old: Text::new(base, old_eol), new: Text::new(new, new_eol), context, picks }
     })
 }
 
@@ -286,9 +295,8 @@ fn whole_hunks_apply_exactly_even_without_a_final_newline() {
     });
 }
 
-/// `keep\nold` changed to `keep\nnew`, picking only `+new`, gives `keep\noldnew`.
+/// `keep\nold` changed to `keep\nnew`, picking only `+new`, used to give `keep\noldnew`.
 #[test]
-#[ignore = "VC-6, Phase 3"]
 fn picked_lines_next_to_a_missing_final_newline_stay_separate_lines() {
     let fx = Fx::new();
     check(32, case(true), |c| {
@@ -300,7 +308,6 @@ fn picked_lines_next_to_a_missing_final_newline_stay_separate_lines() {
 
 /// The smallest case behind the property above, spelled out.
 #[test]
-#[ignore = "VC-6, Phase 3"]
 fn staging_a_line_beside_a_missing_final_newline_keeps_both_lines_apart() {
     let fx = Fx::new();
     fx.prepare(b"keep\nold", b"keep\nnew", false);
@@ -311,18 +318,45 @@ fn staging_a_line_beside_a_missing_final_newline_keeps_both_lines_apart() {
     assert_eq!(String::from_utf8_lossy(&fx.in_index()), "keep\nold\nnew");
 }
 
-/// A Phase 3 fix may refuse these lines in the view, as the hunk buttons already do.
-/// If so, this check belongs with that refusal.
+/// Lines that aren't UTF-8 reach the patch builder decoded lossily, so it refuses them
+/// and the view says to stage the whole file. A patch from that text would write U+FFFD.
 #[test]
-#[ignore = "VC-7, Phase 3"]
-fn staging_a_line_keeps_bytes_that_are_not_utf8() {
+fn a_line_that_is_not_utf8_gets_no_patch_rather_than_a_rewritten_one() {
     let fx = Fx::new();
     fx.prepare(b"keep\n", b"keep\ncaf\xe9 added\n", false);
+    let before = fx.in_index();
     let f = &fx.repo.diff(&DiffSource::Unstaged, Some("f.txt"), &DiffOpts::default()).unwrap()[0];
     let added = f.hunks[0].lines.iter().position(|l| l.kind == LineKind::Add).unwrap();
-    let patch = build_patch(f, 0, Some(&[added]), PatchMode::Forward).unwrap();
+    for mode in [PatchMode::Forward, PatchMode::Reverse] {
+        assert!(build_patch(f, 0, Some(&[added]), mode).is_none());
+        assert!(build_patch(f, 0, None, mode).is_none());
+    }
+    assert_eq!(fx.in_index(), before);
+}
+
+/// Appending to a file with no final newline and staging only the `+` lines used to give
+/// `keep\noldold\nmore\n`, running two lines together.
+#[test]
+fn staging_only_added_lines_after_a_missing_final_newline_keeps_lines_apart() {
+    let fx = Fx::new();
+    fx.prepare(b"keep\nold", b"keep\nold\nmore\n", false);
+    let f = &fx.repo.diff(&DiffSource::Unstaged, Some("f.txt"), &DiffOpts::default()).unwrap()[0];
+    let added: Vec<usize> = f.hunks[0].lines.iter().enumerate().filter(|(_, l)| l.kind == LineKind::Add).map(|(i, _)| i).collect();
+    let patch = build_patch(f, 0, Some(&added), PatchMode::Forward).unwrap();
     ops::apply_patch("stage", patch, true, false).run(&fx.git, Some(&fx.root), None, &mut |_| {}).unwrap();
-    assert_eq!(fx.in_index(), b"keep\ncaf\xe9 added\n");
+    assert_eq!(String::from_utf8_lossy(&fx.in_index()), "keep\nold\nold\nmore\n");
+}
+
+/// Discard with only the `-` picked: the old line comes back as a line of its own.
+#[test]
+fn discarding_a_deleted_last_line_keeps_it_apart_from_the_new_one() {
+    let fx = Fx::new();
+    fx.prepare(b"keep\nold", b"keep\nnew\n", false);
+    let f = &fx.repo.diff(&DiffSource::Unstaged, Some("f.txt"), &DiffOpts::default()).unwrap()[0];
+    let del = f.hunks[0].lines.iter().position(|l| l.kind == LineKind::Del).unwrap();
+    let patch = build_patch(f, 0, Some(&[del]), PatchMode::Reverse).unwrap();
+    ops::apply_patch("discard", patch, false, true).run(&fx.git, Some(&fx.root), None, &mut |_| {}).unwrap();
+    assert_eq!(String::from_utf8_lossy(&fx.on_disk()), "keep\nold\nnew\n");
 }
 
 // ---- merge3 --------------------------------------------------------------------------

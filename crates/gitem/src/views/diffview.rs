@@ -284,7 +284,10 @@ impl DiffView {
                     cx.open(Tab::file_history(path));
                 }
             }
-            if self.can_stage() && !self.selected_lines.is_empty() {
+            if self.can_stage() && !self.selected_lines.is_empty() && !self.selection_is_exact() {
+                // As on the hunk buttons: a patch from this text would rewrite the file's bytes.
+                ui.label(RichText::new("Not UTF-8: stage the whole file").small().color(cx.pal.warn));
+            } else if self.can_stage() && !self.selected_lines.is_empty() {
                 let verb = if self.src == DiffSource::Unstaged { "Stage" } else { "Unstage" };
                 if ui.button(format!("{verb} {} selected line(s)", self.selected_lines.len())).clicked() {
                     self.apply_selected_lines(cx);
@@ -327,6 +330,12 @@ impl DiffView {
         v
     }
 
+    /// Whether every hunk with a selected line can be turned back into an exact patch.
+    fn selection_is_exact(&self) -> bool {
+        let Some((f, _)) = self.files.get().and_then(|files| files.get(self.selected_file)) else { return true };
+        self.selected_lines.iter().all(|(h, _)| f.hunks.get(*h).is_none_or(diff::hunk_is_exact))
+    }
+
     fn apply_selected_lines(&mut self, cx: &mut Cx) {
         let Some(files) = self.files.get() else { return };
         let Some((f, _)) = files.get(self.selected_file) else { return };
@@ -358,7 +367,7 @@ impl DiffView {
 
     fn hunk_buttons(&self, ui: &mut Ui, cx: &mut Cx, f: &FileDiff, hunk: usize) {
         // Text that isn't UTF-8 can't be rebuilt into an exact patch.
-        if self.can_stage() && f.hunks.get(hunk).is_some_and(|h| h.lines.iter().any(|l| l.text.contains('\u{FFFD}'))) {
+        if self.can_stage() && f.hunks.get(hunk).is_some_and(|h| !diff::hunk_is_exact(h)) {
             ui.label(RichText::new("Not UTF-8: stage the whole file").small().color(cx.pal.warn));
             return;
         }

@@ -3010,6 +3010,29 @@ fn clicking_a_selected_line_again_clears_it() {
     assert!(h.query_by_label("Discard selected…").is_none());
 }
 
+/// The diff's text is decoded lossily, so a patch from it would put U+FFFD in the file.
+#[test]
+fn a_selected_line_that_is_not_utf8_offers_no_way_to_rewrite_it() {
+    let f = Fx::new();
+    f.write("f.txt", "keep\n");
+    f.commit("base");
+    std::fs::write(f.root.join("f.txt"), b"keep\ncaf\xe9 added\n").unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Unstaged, "Not UTF-8: stage the whole file");
+    click_line(&mut h, "Not UTF-8: stage the whole file", 0, 2.0);
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.query_by_label("Stage 1 selected line(s)").is_none());
+    assert!(h.query_by_label("Discard selectedâ€¦").is_none());
+    assert_eq!(h.query_all_by_label("Not UTF-8: stage the whole file").count(), 2, "the hunk's notice, and the toolbar's in place of the buttons");
+    click(&mut h, "Stage file");
+    wait_for(&mut h, "the file to be staged", || f.git.run(Some(&f.root), &["show", ":f.txt"]).unwrap().stdout == b"keep\ncaf\xe9 added\n");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
 #[test]
 fn unstage_selected_line_takes_only_that_line_out_of_the_index() {
     let f = Fx::new();

@@ -367,6 +367,12 @@ fn push_range(v: &mut Vec<(usize, usize)>, a: usize, b: usize) {
     v.push((a, b));
 }
 
+/// Whether this hunk's text can be written back exactly. A replacement character means
+/// the bytes weren't UTF-8 (or, rarely, are that character, which gets the same answer).
+pub fn hunk_is_exact(h: &Hunk) -> bool {
+    !h.lines.iter().any(|l| l.text.contains(char::REPLACEMENT_CHARACTER))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchMode {
     /// Stage: applied forward with `git apply --cached`.
@@ -381,69 +387,78 @@ pub enum PatchMode {
 /// Unselected changes are neutralised so they stay untouched: in forward mode an
 /// unselected `-` becomes context and an unselected `+` vanishes; in reverse mode
 /// the roles swap. Use with `git apply --recount`, which fixes the line counts.
+/// `None` when nothing is selected, or when the hunk's text can't be rebuilt exactly.
 pub fn build_patch(f: &FileDiff, hunk_idx: usize, selected: Option<&[usize]>, mode: PatchMode) -> Option<String> {
     let h = f.hunks.get(hunk_idx)?;
+    // The text was decoded lossily, so a replacement character may stand for bytes that
+    // aren't UTF-8. Written back, it would corrupt the file, so such a hunk has no patch.
+    if !hunk_is_exact(h) {
+        return None;
+    }
     let is_sel = |i: usize| selected.is_none_or(|s| s.contains(&i));
-    let mut body = String::new();
+    // (sign, line, whether a "no newline" marker follows it)
+    let mut kept: Vec<(char, &DiffLine, bool)> = Vec::new();
     let mut any = false;
+    let mut last_kept = false;
+    for (i, l) in h.lines.iter().enumerate() {
+        let sign = match l.kind {
+            LineKind::Context => Some(' '),
+            LineKind::Add if is_sel(i) => {
+                any = true;
+                Some('+')
+            }
+            // Already in the target when reversing: keep it as context.
+            LineKind::Add => (mode == PatchMode::Reverse).then_some(' '),
+            LineKind::Del if is_sel(i) => {
+                any = true;
+                Some('-')
+            }
+            LineKind::Del => (mode == PatchMode::Forward).then_some(' '),
+            LineKind::NoNewline => {
+                if last_kept && let Some(k) = kept.last_mut() {
+                    k.2 = true;
+                }
+                continue;
+            }
+        };
+        last_kept = sign.is_some();
+        if let Some(sign) = sign {
+            kept.push((sign, l, false));
+        }
+    }
+    if !any {
+        return None;
+    }
+    // The sign of lines that exist only in the file being patched, and only in the result.
+    let (source_only, result_only) = if mode == PatchMode::Forward { ('-', '+') } else { ('+', '-') };
+    let last_in_result = kept.iter().rposition(|(sign, ..)| *sign != source_only);
+    let mut body = String::new();
     let (mut old_n, mut new_n) = (0u32, 0u32);
-    let mut last_kept = true;
-    let put = |body: &mut String, sign: char, l: &DiffLine| {
+    let mut put = |sign: char, l: &DiffLine, no_newline: bool| {
         body.push(sign);
         body.push_str(&l.text);
         if l.cr {
             body.push('\r');
         }
         body.push('\n');
-    };
-    for (i, l) in h.lines.iter().enumerate() {
-        match l.kind {
-            LineKind::Context => {
-                put(&mut body, ' ', l);
-                old_n += 1;
-                new_n += 1;
-                last_kept = true;
-            }
-            LineKind::Add => {
-                if is_sel(i) {
-                    put(&mut body, '+', l);
-                    new_n += 1;
-                    any = true;
-                    last_kept = true;
-                } else if mode == PatchMode::Reverse {
-                    // Already in the target when reversing: keep it as context.
-                    put(&mut body, ' ', l);
-                    old_n += 1;
-                    new_n += 1;
-                    last_kept = true;
-                } else {
-                    last_kept = false;
-                }
-            }
-            LineKind::Del => {
-                if is_sel(i) {
-                    put(&mut body, '-', l);
-                    old_n += 1;
-                    any = true;
-                    last_kept = true;
-                } else if mode == PatchMode::Forward {
-                    put(&mut body, ' ', l);
-                    old_n += 1;
-                    new_n += 1;
-                    last_kept = true;
-                } else {
-                    last_kept = false;
-                }
-            }
-            LineKind::NoNewline => {
-                if last_kept {
-                    body.push_str("\\ No newline at end of file\n");
-                }
-            }
+        if no_newline {
+            body.push_str("\\ No newline at end of file\n");
         }
-    }
-    if !any {
-        return None;
+        old_n += u32::from(sign != '+');
+        new_n += u32::from(sign != '-');
+    };
+    for (i, (sign, l, no_newline)) in kept.iter().copied().enumerate() {
+        // Something from the result follows a line with no newline: it needs one, or
+        // git would run the two together. The file being patched still has it without.
+        let followed = no_newline && last_in_result != Some(i) && sign != source_only;
+        match (followed, sign) {
+            (true, ' ') => {
+                put(source_only, l, true);
+                put(result_only, l, false);
+            }
+            (true, _) => put(sign, l, false),
+            (false, _) => put(sign, l, no_newline),
+        }
     }
     let mut out = String::new();
     for hl in &f.header {
