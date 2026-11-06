@@ -1,0 +1,320 @@
+//! The app as it starts and stops for real: `GitemApp::new`, the settings file, the
+//! saved session and `on_exit`. Everything else builds the app without saving.
+//!
+//! The settings path is process-wide, so these tests take turns. Tests marked with a
+//! bug's ID fail until that bug is fixed: run them with `--ignored`.
+gitem_testenv::isolate!();
+
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use eframe::App;
+use egui::vec2;
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
+use gitem::action::Action;
+use gitem::app::GitemApp;
+use gitem::views::Tab;
+use gitem_core::settings::{Settings, ThemeChoice};
+
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+/// Takes the turn and starts from no settings file.
+fn clean_slate() -> MutexGuard<'static, ()> {
+    let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let path = Settings::path();
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    turn
+}
+
+fn run_app(paths: &[PathBuf]) -> Harness<'static, GitemApp> {
+    let ctx = egui::Context::default();
+    let app = GitemApp::new(&ctx, paths);
+    Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5).build_ui_state(|ui, app: &mut GitemApp| app.frame(ui), app)
+}
+
+fn repo(parent: &Path, name: &str) -> PathBuf {
+    let root = parent.join(name);
+    std::fs::create_dir(&root).unwrap();
+    let git = gitem_core::GitExe::discover(None).unwrap();
+    git.run(Some(&root), &["init", "-q", "-b", "main"]).unwrap();
+    for (k, v) in [("user.name", "T"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")] {
+        git.run(Some(&root), &["config", k, v]).unwrap();
+    }
+    std::fs::write(root.join("a.txt"), "1\n").unwrap();
+    git.run(Some(&root), &["add", "."]).unwrap();
+    git.run(Some(&root), &["commit", "-q", "-m", "first"]).unwrap();
+    // As the app names it, which is how sessions store it.
+    let top = git.run(Some(&root), &["rev-parse", "--show-toplevel"]).unwrap().text();
+    PathBuf::from(top.trim())
+}
+
+fn name(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+fn steps(h: &mut Harness<GitemApp>, n: usize) {
+    for _ in 0..n {
+        h.step();
+    }
+}
+
+fn settled(h: &mut Harness<GitemApp>) {
+    let t = Instant::now();
+    while gitem::task::running(&h.ctx) > 0 || !h.state().ops_idle() {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(180), "background work never finished");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    steps(h, 5);
+}
+
+fn open_repos(h: &Harness<GitemApp>) -> Vec<String> {
+    h.state().repos.iter().map(|r| name(&r.repo.root)).collect()
+}
+
+fn error_dialog_showing(h: &Harness<GitemApp>) -> bool {
+    h.query_by_label("Something went wrong").is_some()
+}
+
+fn saved() -> Settings {
+    let text = std::fs::read_to_string(Settings::path()).expect("a settings file was written");
+    serde_json::from_str(&text).expect("the settings file is valid")
+}
+
+// ---- starting ------------------------------------------------------------------------
+
+#[test]
+fn starting_with_no_settings_file_works_and_writes_nothing_yet() {
+    let _turn = clean_slate();
+    let mut h = run_app(&[]);
+    steps(&mut h, 5);
+    assert!(!error_dialog_showing(&h));
+    assert!(h.state().repos.is_empty());
+    assert_eq!(h.state().settings.theme, Settings::default().theme);
+}
+
+#[test]
+fn an_argument_opens_that_repository() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let a = repo(d.path(), "a");
+    let mut h = run_app(std::slice::from_ref(&a));
+    settled(&mut h);
+    assert_eq!(open_repos(&h), vec![name(&a)]);
+    assert!(!error_dialog_showing(&h));
+}
+
+#[test]
+fn an_argument_that_is_not_a_repository_says_so() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let mut h = run_app(&[d.path().to_path_buf()]);
+    steps(&mut h, 5);
+    assert!(h.state().repos.is_empty());
+    assert!(error_dialog_showing(&h));
+}
+
+// ---- the session -----------------------------------------------------------------------
+
+#[test]
+fn the_session_comes_back_after_a_restart() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let (a, b) = (repo(d.path(), "a"), repo(d.path(), "b"));
+    {
+        let mut h = run_app(&[a.clone(), b.clone()]);
+        settled(&mut h);
+        h.state_mut().repos[1].open_tab(Tab::Contributors(Box::default()));
+        settled(&mut h);
+        h.state_mut().on_exit();
+    }
+    let on_disk = saved();
+    assert_eq!(on_disk.open_repos, vec![name(&a), name(&b)]);
+    assert!(on_disk.session_tabs[&name(&b)].iter().any(|t| t == "contributors"), "{:?}", on_disk.session_tabs);
+    assert!(on_disk.recent_repos.contains(&name(&a)));
+
+    let mut h = run_app(&[]);
+    settled(&mut h);
+    assert_eq!(open_repos(&h), vec![name(&a), name(&b)]);
+    assert!(h.state().repos[1].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Contributors(_))));
+    assert!(!h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Contributors(_))), "each repository has its own tabs");
+    assert!(!error_dialog_showing(&h));
+}
+
+#[test]
+fn a_repository_gone_from_disk_does_not_stop_the_session() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let a = repo(d.path(), "a");
+    let session = Settings { open_repos: vec![name(&d.path().join("deleted")), name(&a)], ..Default::default() };
+    session.save().unwrap();
+    let mut h = run_app(&[]);
+    settled(&mut h);
+    assert_eq!(open_repos(&h), vec![name(&a)]);
+    assert!(!error_dialog_showing(&h), "a restored session stays quiet about it");
+}
+
+/// `open_repos` `[B, C]` becomes `[A]` the moment `gitem A` runs, so B and C are gone
+/// at the next launch.
+#[test]
+#[ignore = "AS-9, Phase 3"]
+fn opening_by_argument_keeps_the_saved_session() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let (a, b, c) = (repo(d.path(), "a"), repo(d.path(), "b"), repo(d.path(), "c"));
+    Settings { open_repos: vec![name(&b), name(&c)], ..Default::default() }.save().unwrap();
+    {
+        let mut h = run_app(std::slice::from_ref(&a));
+        settled(&mut h);
+        h.state_mut().on_exit();
+    }
+    let kept = saved().open_repos;
+    assert!(kept.contains(&name(&b)) && kept.contains(&name(&c)), "{kept:?}");
+}
+
+// ---- saving ------------------------------------------------------------------------------
+
+#[test]
+fn a_changed_setting_reaches_the_file_without_waiting_for_exit() {
+    let _turn = clean_slate();
+    let mut h = run_app(&[]);
+    steps(&mut h, 2);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Settings(Box::new(|s| s.theme = ThemeChoice::Light)));
+    steps(&mut h, 3);
+    assert_eq!(saved().theme, ThemeChoice::Light);
+    let tmp = Settings::path().with_extension("json.tmp");
+    assert!(!tmp.exists(), "a save leaves no temp file behind");
+}
+
+#[test]
+fn an_app_built_not_to_save_never_writes() {
+    let _turn = clean_slate();
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, Settings::default());
+    app.on_exit();
+    assert!(!Settings::path().exists());
+}
+
+#[test]
+fn a_failed_save_is_reported_and_the_app_keeps_going() {
+    let _turn = clean_slate();
+    let mut h = run_app(&[]);
+    steps(&mut h, 2);
+    // A folder where the file goes makes the final rename fail on every platform.
+    std::fs::create_dir(Settings::path()).unwrap();
+    h.state_mut().on_exit();
+    steps(&mut h, 3);
+    assert!(error_dialog_showing(&h));
+    std::fs::remove_dir_all(Settings::path()).unwrap();
+}
+
+// ---- files from other versions -------------------------------------------------------------
+
+#[test]
+fn a_settings_file_from_an_older_version_loads_with_defaults_for_the_rest() {
+    let _turn = clean_slate();
+    std::fs::write(Settings::path(), r#"{"theme":"Light","recent_repos":["/old"]}"#).unwrap();
+    let mut h = run_app(&[]);
+    steps(&mut h, 3);
+    assert_eq!(h.state().settings.theme, ThemeChoice::Light);
+    assert_eq!(h.state().settings.recent_repos, vec!["/old"]);
+    assert_eq!(h.state().settings.language, Settings::default().language);
+    assert!(!error_dialog_showing(&h));
+}
+
+#[test]
+fn a_field_from_a_newer_version_is_ignored() {
+    let _turn = clean_slate();
+    std::fs::write(Settings::path(), r#"{"theme":"Light","a_setting_from_the_future":{"x":1}}"#).unwrap();
+    let mut h = run_app(&[]);
+    steps(&mut h, 3);
+    assert_eq!(h.state().settings.theme, ThemeChoice::Light);
+    assert!(!error_dialog_showing(&h));
+}
+
+#[test]
+fn a_corrupt_settings_file_still_lets_the_app_start() {
+    for broken in ["", "{", r#"{"theme":"Light","workspaces":[{"name":"w","repos":[]}],"#, "not json at all", "\u{0}\u{1}\u{2}", r#"{"theme":17}"#, r#"[1,2,3]"#] {
+        let _turn = clean_slate();
+        std::fs::write(Settings::path(), broken).unwrap();
+        let mut h = run_app(&[]);
+        steps(&mut h, 3);
+        assert!(h.state().repos.is_empty(), "{broken:?}");
+    }
+}
+
+/// A truncated file is read as defaults, and the next save destroys the original.
+#[test]
+#[ignore = "AS-2, Phase 3"]
+fn a_corrupt_settings_file_is_not_overwritten() {
+    let _turn = clean_slate();
+    let broken = r#"{"theme":"Light","workspaces":[{"name":"w","repos":[]}],"#;
+    std::fs::write(Settings::path(), broken).unwrap();
+    let mut h = run_app(&[]);
+    steps(&mut h, 3);
+    h.state_mut().on_exit();
+    let dir = Settings::path().parent().unwrap().to_path_buf();
+    let kept = std::fs::read_dir(dir).unwrap().flatten().any(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t == broken));
+    assert!(kept, "the original text is gone");
+}
+
+/// One enum value this build doesn't know throws away every other setting.
+#[test]
+#[ignore = "AS-2, Phase 3"]
+fn an_unknown_theme_from_a_newer_version_keeps_every_other_setting() {
+    let _turn = clean_slate();
+    std::fs::write(Settings::path(), r#"{"theme":"Neon","language":"tr","recent_repos":["/a"]}"#).unwrap();
+    let h = run_app(&[]);
+    assert_eq!(h.state().settings.language, "tr");
+    assert_eq!(h.state().settings.recent_repos, vec!["/a"]);
+}
+
+/// Saving rewrites the file from what this app knows, so a downgrade loses the rest.
+#[test]
+#[ignore = "AS-2, Phase 3"]
+fn a_field_from_a_newer_version_survives_a_save() {
+    let _turn = clean_slate();
+    std::fs::write(Settings::path(), r#"{"theme":"Light","a_setting_from_the_future":{"x":1}}"#).unwrap();
+    let mut h = run_app(&[]);
+    steps(&mut h, 3);
+    h.state_mut().on_exit();
+    assert!(std::fs::read_to_string(Settings::path()).unwrap().contains("a_setting_from_the_future"));
+}
+
+// ---- two copies running --------------------------------------------------------------------
+
+#[test]
+fn two_copies_saving_leave_a_valid_file() {
+    let _turn = clean_slate();
+    let mut first = run_app(&[]);
+    let mut second = run_app(&[]);
+    steps(&mut first, 2);
+    steps(&mut second, 2);
+    first.state_mut().settings.theme = ThemeChoice::Light;
+    second.state_mut().settings.theme = ThemeChoice::Dark;
+    first.state_mut().on_exit();
+    second.state_mut().on_exit();
+    assert_eq!(saved().theme, ThemeChoice::Dark, "the last to save wins, as a whole file");
+}
+
+/// A running copy saves its older view over what another copy just changed.
+#[test]
+#[ignore = "AS-8, Phase 3"]
+fn a_copy_exiting_keeps_a_setting_another_copy_changed() {
+    let _turn = clean_slate();
+    let mut first = run_app(&[]);
+    let mut second = run_app(&[]);
+    steps(&mut first, 2);
+    steps(&mut second, 2);
+    let ctx = second.ctx.clone();
+    second.state_mut().apply_action(&ctx, Action::Settings(Box::new(|s| s.language = "tr".to_string())));
+    steps(&mut second, 3);
+    assert_eq!(saved().language, "tr");
+    first.state_mut().on_exit();
+    assert_eq!(saved().language, "tr", "the other copy's change is gone");
+}
