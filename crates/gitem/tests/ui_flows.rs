@@ -90,13 +90,44 @@ fn pump(h: &mut Harness<GitemApp>, cond: impl Fn(&GitemApp) -> bool, what: &str)
     }
 }
 
-/// Step until all background reads have had a chance to land.
+/// Nothing is working in the background: no task on a thread, no git write.
+fn quiet(h: &Harness<GitemApp>) -> bool {
+    gitem::task::running(&h.ctx) == 0 && h.state().ops_idle()
+}
+
+/// Step until all background work has finished and its results are on screen.
 fn settle(h: &mut Harness<GitemApp>) {
     pump(h, |a| a.repos.first().is_some_and(|r| r.data.status.get().is_some() && r.data.refs.get().is_some()), "repo data");
+    // The file watcher reports changes at most every 400 ms, and only then does a
+    // refresh start. That's the one thing here with no signal to wait on.
     let t = Instant::now();
     while t.elapsed() < Duration::from_millis(500) {
         h.step();
         std::thread::sleep(Duration::from_millis(10));
+    }
+    wait_until_quiet(h);
+}
+
+/// A finished task lands on the next frame and may start another, and new windows
+/// spend their first frames measuring themselves. So it takes several quiet frames
+/// in a row, for as long as a slow machine needs to get there.
+fn wait_until_quiet(h: &mut Harness<GitemApp>) {
+    let t = Instant::now();
+    let mut quiet_frames = 0;
+    while quiet_frames < 5 {
+        h.step();
+        quiet_frames = if quiet(h) { quiet_frames + 1 } else { 0 };
+        assert!(t.elapsed() < Duration::from_secs(60), "background work never finished");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// For checking that something didn't happen. An op started by mistake is queued
+/// or running until it ends, so a slow one can't slip past as nothing having happened.
+fn assert_no_op_started(h: &mut Harness<GitemApp>, what: &str) {
+    for _ in 0..5 {
+        h.step();
+        assert!(h.state().ops_idle(), "{what}");
     }
 }
 
@@ -161,10 +192,7 @@ fn visit_all(h: &mut Harness<GitemApp>) {
     for tab in all_tabs() {
         let title = tab.title();
         h.state_mut().repos[0].open_tab(tab);
-        for _ in 0..10 {
-            h.step();
-            std::thread::sleep(Duration::from_millis(12));
-        }
+        wait_until_quiet(h);
         assert!(h.query_by_label("Something went wrong").is_none(), "error showing after opening {title}");
     }
 }
@@ -197,10 +225,7 @@ fn every_view_renders_on_an_empty_repo() {
     settle(&mut h);
     for tab in [Tab::home(), Tab::graph(), Tab::changes(), Tab::Worktrees(Box::default()), Tab::Contributors(Box::default()), Tab::Reflog(Box::default()), Tab::Composer(Box::default()), Tab::Console(Box::default())] {
         h.state_mut().repos[0].open_tab(tab);
-        for _ in 0..8 {
-            h.step();
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_quiet(&mut h);
         no_errors(&h);
     }
 }
@@ -329,10 +354,7 @@ fn every_view_renders_during_a_conflict() {
     h.state_mut().repos[0].open_tab(Tab::changes());
     pump_for_label(&mut h, "Commit to main");
     h.state_mut().repos[0].open_tab(Tab::graph());
-    for _ in 0..10 {
-        h.step();
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_until_quiet(&mut h);
     no_errors(&h);
 }
 
@@ -415,16 +437,10 @@ fn destructive_ops_wait_for_confirmation() {
     };
     confirm(&mut h);
     pump_for_label(&mut h, "Yes, delete");
-    for _ in 0..10 {
-        h.step();
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert_no_op_started(&mut h, "nothing happens before confirming");
     assert!(f.git(&["branch"]).contains("doomed"), "nothing happens before confirming");
     click(&mut h, "Cancel");
-    for _ in 0..10 {
-        h.step();
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert_no_op_started(&mut h, "cancel leaves it alone");
     assert!(f.git(&["branch"]).contains("doomed"), "cancel leaves it alone");
     confirm(&mut h);
     click(&mut h, "Yes, delete");
@@ -441,10 +457,7 @@ fn failed_ops_show_the_error_and_drop_queued_followups() {
     h.state_mut().apply_action(&ctx, Action::Run(ops::checkout("no-such-branch")));
     h.state_mut().apply_action(&ctx, Action::Run(ops::tag_create("must-not-exist", None, None, false)));
     pump_for_label(&mut h, "Something went wrong");
-    for _ in 0..10 {
-        h.step();
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert_no_op_started(&mut h, "the queued step after a failure must not run");
     assert!(f.git(&["tag"]).is_empty(), "the queued step after a failure must not run");
     click(&mut h, "Dismiss");
     no_errors(&h);
@@ -1088,10 +1101,7 @@ fn new_views_render() {
     let head = f.git(&["rev-parse", "HEAD"]).trim().to_string();
     for tab in [Tab::visual(""), Tab::visual("a.txt"), Tab::Treemap(Box::default()), Tab::tree(&head)] {
         h.state_mut().repos[0].open_tab(tab);
-        for _ in 0..12 {
-            h.step();
-            std::thread::sleep(Duration::from_millis(12));
-        }
+        wait_until_quiet(&mut h);
         no_errors(&h);
     }
     // Focus from the action reaches the graph.
@@ -1347,14 +1357,15 @@ fn settings_and_about_are_reachable_from_the_titlebar() {
     let mut h = harness(&f);
     settle(&mut h);
     click(&mut h, "About");
-    pump_for_label(&mut h, "Commit date");
+    // Not the commit rows: a build from a source tarball has no git history.
+    pump_for_label(&mut h, "Version");
     pump_for_label(&mut h, env!("CARGO_PKG_VERSION"));
     // New windows spend their first frames measuring themselves.
     for _ in 0..3 {
         h.step();
     }
     click(&mut h, "Close");
-    assert!(h.query_by_label("Commit date").is_none(), "the About box stays open");
+    assert!(h.query_by_label("Version").is_none(), "the About box stays open");
     assert!(!h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Settings(_))));
     let ctx = h.ctx.clone();
     h.state_mut().apply_action(&ctx, Action::OpenSettings);

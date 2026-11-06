@@ -406,6 +406,11 @@ impl GitemApp {
         }
     }
 
+    /// No git write is queued or running anywhere.
+    pub fn ops_idle(&self) -> bool {
+        self.global_queue.is_empty() && self.global_running.is_none() && self.repos.iter().all(|r| r.queue.is_empty() && r.running.is_none())
+    }
+
     pub fn palette_is_open(&self) -> bool {
         self.palette.is_some()
     }
