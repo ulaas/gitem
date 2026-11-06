@@ -443,10 +443,16 @@ pub fn empty_state(ui: &mut Ui, title: &str, hint: &str, p: &Palette) {
 }
 
 pub fn error_box(ui: &mut Ui, msg: &str, p: &Palette) {
-    egui::Frame::new().fill(p.danger.gamma_multiply(0.12)).stroke(Stroke::new(1.0, p.danger.gamma_multiply(0.6))).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
+    let frame = egui::Frame::new().fill(p.danger.gamma_multiply(0.12)).stroke(Stroke::new(1.0, p.danger.gamma_multiply(0.6))).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
         ui.label(RichText::new(msg).color(p.text));
     });
+    // Says what it is to a screen reader, and lets a test tell a view that failed
+    // to load from one that loaded.
+    frame.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("{ERROR_LABEL}{msg}")));
 }
+
+/// How the accessible label of every `error_box` starts.
+pub const ERROR_LABEL: &str = "Error: ";
 
 pub fn spinner_row(ui: &mut Ui, text: &str, p: &Palette) {
     ui.horizontal(|ui| {

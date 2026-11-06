@@ -69,6 +69,11 @@ impl ReviewView {
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
+        // With no commit yet, git's answer about the range would be a raw "fatal".
+        if cx.status().is_some_and(|s| s.head_sha.is_empty()) {
+            crate::widgets::empty_state(ui, "Nothing to review yet", "Review compares this branch's commits with its base. This repository has no commits.", &p);
+            return;
+        }
         if !self.loaded {
             self.loaded = true;
             self.saved = std::fs::read(store_path(cx)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();

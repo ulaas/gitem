@@ -151,8 +151,16 @@ fn pump_for_label(h: &mut Harness<GitemApp>, label: &str) {
     }
 }
 
+/// Views report a failed load inline, in an `error_box`, and not in the error dialog.
+fn error_boxes(h: &Harness<GitemApp>) -> Vec<String> {
+    use egui_kittest::kittest::NodeT;
+    h.query_all_by_label_contains(gitem::widgets::ERROR_LABEL).map(|n| n.accesskit_node().value().unwrap_or_default()).collect()
+}
+
 fn no_errors(h: &Harness<GitemApp>) {
     assert!(h.query_by_label("Something went wrong").is_none(), "an error dialog is showing");
+    let boxes = error_boxes(h);
+    assert!(boxes.is_empty(), "a view is showing an error: {boxes:?}");
 }
 
 fn all_tabs() -> Vec<Tab> {
@@ -198,6 +206,8 @@ fn visit_all(h: &mut Harness<GitemApp>) {
         h.state_mut().repos[0].open_tab(tab);
         wait_until_quiet(h);
         assert!(h.query_by_label("Something went wrong").is_none(), "error showing after opening {title}");
+        let boxes = error_boxes(h);
+        assert!(boxes.is_empty(), "{title} shows an error: {boxes:?}");
     }
 }
 
@@ -227,11 +237,56 @@ fn every_view_renders_on_an_empty_repo() {
     let f = Fx::new();
     let mut h = harness(&f);
     settle(&mut h);
-    for tab in [Tab::home(), Tab::graph(), Tab::changes(), Tab::Worktrees(Box::default()), Tab::Contributors(Box::default()), Tab::Reflog(Box::default()), Tab::Composer(Box::default()), Tab::Console(Box::default())] {
+    // What the rail offers. The rest of `all_tabs` names a commit or a file, which an
+    // empty repository doesn't have, so failing to load those is correct.
+    let tabs = [
+        Tab::home(),
+        Tab::graph(),
+        Tab::changes(),
+        Tab::Launchpad(Box::default()),
+        Tab::Search(Box::default()),
+        Tab::Worktrees(Box::default()),
+        Tab::Contributors(Box::default()),
+        Tab::Reflog(Box::default()),
+        Tab::Bisect(Box::default()),
+        Tab::Patches(Box::default()),
+        Tab::Composer(Box::default()),
+        Tab::Tools(Box::default()),
+        Tab::Config(Box::default()),
+        Tab::Credentials(Box::default()),
+        Tab::Console(Box::default()),
+        Tab::Settings(Box::default()),
+        Tab::Agents(Box::default()),
+        Tab::Review(Box::default()),
+        Tab::diff(DiffSource::Unstaged, None),
+        Tab::diff(DiffSource::Staged, None),
+    ];
+    for tab in tabs {
+        let title = tab.title();
         h.state_mut().repos[0].open_tab(tab);
         wait_until_quiet(&mut h);
+        let boxes = error_boxes(&h);
+        assert!(boxes.is_empty(), "{title} shows an error: {boxes:?}");
         no_errors(&h);
     }
+}
+
+/// A smoke test is only as good as its check, so the check gets seen failing.
+#[test]
+fn a_view_that_fails_to_load_is_noticed() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Commit("no-such-revision".into()), None));
+    let t = Instant::now();
+    while error_boxes(&h).is_empty() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the failed load never showed");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    let boxes = error_boxes(&h);
+    assert!(boxes[0].contains("no-such-revision") || boxes[0].contains("bad"), "{boxes:?}");
 }
 
 #[test]
@@ -349,16 +404,17 @@ fn resolve_a_conflict_with_the_merge_tool_and_finish_the_merge() {
 #[test]
 fn every_view_renders_during_a_conflict() {
     let f = Fx::new();
+    f.write("a.txt", "one\n");
     make_conflict(&f);
     f.write("a.txt", "x\n");
+    f.write("untracked.txt", "new\n");
     let mut h = harness(&f);
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::merge("c.txt"));
     pump_for_label(&mut h, "Take ours");
     h.state_mut().repos[0].open_tab(Tab::changes());
     pump_for_label(&mut h, "Commit to main");
-    h.state_mut().repos[0].open_tab(Tab::graph());
-    wait_until_quiet(&mut h);
+    visit_all(&mut h);
     no_errors(&h);
 }
 
@@ -2749,6 +2805,209 @@ fn a_40_byte_branch_name_with_a_multibyte_character_does_not_panic() {
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::compare(&name, "HEAD"));
     h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Range(name.clone(), "HEAD".into()), None));
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+/// A 30-line file with one line changed near the top and one near the bottom, so a
+/// diff of it has two hunks.
+fn two_hunks(f: &Fx) -> (String, String) {
+    let base: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+    f.write("f.txt", &base);
+    f.commit("base");
+    let edited = base.replace("line 2\n", "line 2 x\n").replace("line 25\n", "line 25 y\n");
+    f.write("f.txt", &edited);
+    (base, edited)
+}
+
+fn on_disk(f: &Fx) -> String {
+    std::fs::read_to_string(f.root.join("f.txt")).unwrap()
+}
+
+fn in_index(f: &Fx) -> String {
+    f.git(&["show", ":f.txt"])
+}
+
+fn open_diff(h: &mut Harness<GitemApp>, src: DiffSource, first_button: &str) {
+    h.state_mut().repos[0].open_tab(Tab::diff(src, Some("f.txt".into())));
+    pump_for_any(h, first_button);
+    click(h, "Unified");
+}
+
+/// The gutter of a row in a unified diff, counted from its hunk's header. Each hunk
+/// has its own button on the header row, so the row's position comes from that.
+fn click_line(h: &mut Harness<GitemApp>, button: &str, hunk: usize, row: f32) {
+    let head = h.query_all_by_label(button).nth(hunk).unwrap_or_else(|| panic!("no hunk {hunk}")).rect();
+    let left = h.get_by_label("Side by side").rect().left();
+    click_at(h, egui::pos2(left + 20.0, head.center().y + 19.0 * row));
+}
+
+fn click_nth(h: &mut Harness<GitemApp>, label: &str, n: usize) {
+    pump_for_any(h, label);
+    h.query_all_by_label(label).nth(n).unwrap_or_else(|| panic!("no {label} number {n}")).click();
+    h.step();
+    h.step();
+}
+
+/// A new window spends its first frames measuring itself, when a click can't land.
+fn confirm_discard(h: &mut Harness<GitemApp>) {
+    pump_for_label(h, "Discard");
+    for _ in 0..3 {
+        h.step();
+    }
+    click(h, "Discard");
+}
+
+#[test]
+fn discard_hunk_asks_first_and_reverts_only_that_hunk() {
+    let f = Fx::new();
+    let (base, edited) = two_hunks(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Unstaged, "Discard hunk…");
+    click_nth(&mut h, "Discard hunk…", 0);
+    pump_for_label(&mut h, "Discard");
+    assert_no_op_started(&mut h, "nothing is discarded before confirming");
+    assert_eq!(on_disk(&f), edited);
+    click(&mut h, "Cancel");
+    assert_no_op_started(&mut h, "cancel leaves the file alone");
+    assert_eq!(on_disk(&f), edited);
+
+    click_nth(&mut h, "Discard hunk…", 0);
+    click(&mut h, "Discard");
+    let want = base.replace("line 25\n", "line 25 y\n");
+    wait_for(&mut h, "the hunk to be discarded", || on_disk(&f) == want);
+    assert_eq!(in_index(&f), base, "the index isn't involved");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn discard_hunk_picks_the_second_hunk_when_that_is_the_one_clicked() {
+    let f = Fx::new();
+    let (base, _) = two_hunks(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Unstaged, "Discard hunk…");
+    click_nth(&mut h, "Discard hunk…", 1);
+    confirm_discard(&mut h);
+    let want = base.replace("line 2\n", "line 2 x\n");
+    wait_for(&mut h, "the hunk to be discarded", || on_disk(&f) == want);
+    no_errors(&h);
+}
+
+#[test]
+fn discard_selected_asks_first_and_reverts_only_those_lines() {
+    let f = Fx::new();
+    f.write("f.txt", "one\ntwo\nthree\n");
+    f.commit("base");
+    f.write("f.txt", "one\nnew a\nnew b\ntwo\nthree\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Unstaged, "Stage hunk");
+    // Rows: one, new a, new b. Pick "new b".
+    click_line(&mut h, "Stage hunk", 0, 3.0);
+    pump_for_label(&mut h, "Discard selected…");
+    click(&mut h, "Discard selected…");
+    pump_for_label(&mut h, "Discard");
+    assert_no_op_started(&mut h, "nothing is discarded before confirming");
+    assert_eq!(on_disk(&f), "one\nnew a\nnew b\ntwo\nthree\n");
+    click(&mut h, "Discard");
+    wait_for(&mut h, "the line to be discarded", || on_disk(&f) == "one\nnew a\ntwo\nthree\n");
+    assert_eq!(in_index(&f), "one\ntwo\nthree\n", "the index isn't involved");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn discard_selected_across_two_hunks_keeps_the_rest() {
+    let f = Fx::new();
+    let (base, _) = two_hunks(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Unstaged, "Stage hunk");
+    // In the first hunk: one line of context, the removed line, then the added one.
+    // In the second: three of context, then the same.
+    click_line(&mut h, "Stage hunk", 0, 3.0);
+    click_line(&mut h, "Stage hunk", 1, 5.0);
+    pump_for_label(&mut h, "Stage 2 selected line(s)");
+    click(&mut h, "Discard selected…");
+    confirm_discard(&mut h);
+    // A discard takes the selected added line out. The removed line wasn't selected, so stays gone.
+    let want = base.replace("line 2\n", "").replace("line 25\n", "");
+    wait_for(&mut h, "the lines to be discarded", || on_disk(&f) == want);
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn stage_selected_line_puts_only_that_line_in_the_index() {
+    let f = Fx::new();
+    f.write("f.txt", "one\ntwo\nthree\n");
+    f.commit("base");
+    let edited = "one\nnew a\nnew b\ntwo\nthree\n";
+    f.write("f.txt", edited);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Unstaged, "Stage hunk");
+    click_line(&mut h, "Stage hunk", 0, 3.0);
+    click(&mut h, "Stage 1 selected line(s)");
+    wait_for(&mut h, "the line to be staged", || in_index(&f) == "one\nnew b\ntwo\nthree\n");
+    assert_eq!(on_disk(&f), edited, "staging leaves the file alone");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn clicking_a_selected_line_again_clears_it() {
+    let f = Fx::new();
+    f.write("f.txt", "one\ntwo\n");
+    f.commit("base");
+    f.write("f.txt", "one\nnew\ntwo\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Unstaged, "Stage hunk");
+    click_line(&mut h, "Stage hunk", 0, 2.0);
+    pump_for_label(&mut h, "Stage 1 selected line(s)");
+    click_line(&mut h, "Stage hunk", 0, 2.0);
+    assert!(h.query_by_label("Stage 1 selected line(s)").is_none());
+    assert!(h.query_by_label("Discard selected…").is_none());
+}
+
+#[test]
+fn unstage_selected_line_takes_only_that_line_out_of_the_index() {
+    let f = Fx::new();
+    f.write("f.txt", "one\ntwo\nthree\n");
+    f.commit("base");
+    let edited = "one\nnew a\nnew b\ntwo\nthree\n";
+    f.write("f.txt", edited);
+    f.git(&["add", "f.txt"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Staged, "Unstage hunk");
+    // Rows: one, new a. Pick "new a".
+    click_line(&mut h, "Unstage hunk", 0, 2.0);
+    pump_for_label(&mut h, "Unstage 1 selected line(s)");
+    assert!(h.query_by_label("Discard selected…").is_none(), "a staged diff has nothing in the working tree to discard");
+    click(&mut h, "Unstage 1 selected line(s)");
+    wait_for(&mut h, "the line to be unstaged", || in_index(&f) == "one\nnew b\ntwo\nthree\n");
+    assert_eq!(on_disk(&f), edited, "unstaging leaves the file alone");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn unstage_hunk_takes_only_that_hunk_out_of_the_index() {
+    let f = Fx::new();
+    let (base, edited) = two_hunks(&f);
+    f.git(&["add", "f.txt"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_diff(&mut h, DiffSource::Staged, "Unstage hunk");
+    click_nth(&mut h, "Unstage hunk", 1);
+    let want = base.replace("line 2\n", "line 2 x\n");
+    wait_for(&mut h, "the hunk to be unstaged", || in_index(&f) == want);
+    assert_eq!(on_disk(&f), edited);
     wait_until_quiet(&mut h);
     no_errors(&h);
 }
