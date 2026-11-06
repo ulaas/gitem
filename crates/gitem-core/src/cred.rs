@@ -400,6 +400,9 @@ pub struct SshKey {
 }
 
 pub fn ssh_dir() -> std::path::PathBuf {
+    if let Some(dir) = crate::settings::config_dir_override() {
+        return dir.join("ssh");
+    }
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
     Path::new(&home).join(".ssh")
 }
@@ -458,6 +461,9 @@ pub fn ssh_generate(name: &str, comment: &str, passphrase: &str) -> Result<Strin
 }
 
 pub fn ssh_agent_list() -> Result<String> {
+    if isolated() {
+        return Ok("The SSH agent isn't used in this run.".to_string());
+    }
     // `ssh-add -l` exits 1 with "no identities"; that is a state, not an error.
     match run_tool("ssh-add", &["-l"]) {
         Ok(s) => Ok(s),
@@ -467,6 +473,9 @@ pub fn ssh_agent_list() -> Result<String> {
 }
 
 pub fn ssh_agent_add(path: &str) -> Result<String> {
+    if isolated() {
+        return Err(Error::Other("The SSH agent isn't used in this run.".to_string()));
+    }
     run_tool("ssh-add", &[path])
 }
 
@@ -532,6 +541,14 @@ mod tests {
     fn git_helpers_are_not_asked_when_isolated() {
         let git = GitExe::discover(None).unwrap();
         assert_eq!(git_credential_fill(&git, "https://gitem-test.invalid"), None);
+    }
+
+    #[test]
+    fn ssh_keys_and_the_agent_stay_out_of_it_when_isolated() {
+        assert!(ssh_dir().starts_with(crate::settings::config_dir()));
+        assert!(list_ssh_keys().is_empty());
+        assert!(ssh_agent_list().unwrap().contains("isn't used"));
+        assert!(ssh_agent_add("no-such-key").is_err());
     }
 
     /// The only test of the Win32 calls. It adds one uniquely named entry to a real
