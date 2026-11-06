@@ -1704,3 +1704,20 @@ fn the_sidebar_has_a_files_view() {
     pump_for_label(&mut h, "Branches section");
     no_errors(&h);
 }
+
+#[test]
+fn hovering_a_tab_keeps_the_normal_pointer() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    h.step();
+    h.step();
+    let (path, leaf) = h.state().repos[0].dock.iter_leaves().next().unwrap();
+    let at = h.ctx.read_response(gitem::app::dock_tab_id(path, leaf.active.0)).expect("the active tab").rect.center();
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default);
+}

@@ -1223,6 +1223,11 @@ impl GitemApp {
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 DockArea::new(dock).id(egui::Id::new(DOCK_ID)).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_inside(ui, &mut viewer);
                 paint_active_tab_markers(ui, dock, &pal);
+                // egui_dock shows a grab cursor on any hovered tab. Keep the usual pointer
+                // until a tab is actually being dragged, which has its own cursor.
+                if ui.ctx().output(|o| o.cursor_icon) == egui::CursorIcon::Grab {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                }
             });
 
             if let Some(pl) = &mut self.palette {
