@@ -919,6 +919,142 @@ fn batch_selection_stages_only_what_was_picked() {
 }
 
 #[test]
+fn changes_list_is_flat_until_the_tree_is_turned_on() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("src/views/one.rs", "1\n");
+    f.write("src/views/two.rs", "2\n");
+    f.write("src/main.rs", "3\n");
+    f.write("top.txt", "4\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "src/main.rs");
+    assert!(h.query_by_label("src").is_none(), "flat by default, with no folder rows");
+
+    click(&mut h, "Show as tree");
+    assert!(h.state().settings.changes_tree, "the choice is kept in settings");
+    pump_for_label(&mut h, "src");
+    assert!(h.query_by_label("views").is_some());
+    assert!(h.query_by_label("src/views/one.rs").is_some(), "everything starts open");
+
+    // Files in a tree do the same as in the list.
+    h.get_by_label("top.txt").click_modifiers(egui::Modifiers::COMMAND);
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "1 selected");
+    click(&mut h, "Clear");
+
+    click(&mut h, "views");
+    assert!(h.query_by_label("src/views/one.rs").is_none(), "closing a folder hides its files");
+    assert!(h.query_by_label("src/main.rs").is_some(), "and nothing else");
+    click(&mut h, "views");
+    assert!(h.query_by_label("src/views/one.rs").is_some());
+
+    click(&mut h, "Collapse folders");
+    assert!(h.query_by_label("src/main.rs").is_none());
+    assert!(h.query_by_label("top.txt").is_some(), "a file outside folders stays");
+    click(&mut h, "Expand folders");
+    assert!(h.query_by_label("src/main.rs").is_some());
+
+    click(&mut h, "Show as tree");
+    pump_for_label(&mut h, "src/main.rs");
+    assert!(h.query_by_label("views").is_none(), "and back to the flat list");
+    no_errors(&h);
+}
+
+#[test]
+fn a_folder_in_the_changes_tree_stages_and_unstages_as_one() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("src/views/one.rs", "1\n");
+    f.write("src/main.rs", "2\n");
+    f.write("top.txt", "3\n");
+    let mut h = harness(&f);
+    h.state_mut().settings.changes_tree = true;
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "views");
+
+    h.get_by_label("src").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Stage 2 file(s)");
+    wait_for(&mut h, "folder staged", || f.git(&["diff", "--cached", "--name-only"]).lines().count() == 2);
+    let staged = f.git(&["diff", "--cached", "--name-only"]);
+    assert!(staged.contains("src/main.rs") && staged.contains("src/views/one.rs") && !staged.contains("top.txt"), "{staged}");
+
+    // The same folder now shows under Staged, once the status has caught up.
+    pump(&mut h, |a| a.repos[0].data.status.get().is_some_and(|s| s.entries.iter().filter(|e| e.is_staged()).count() == 2), "status to show the staged folder");
+    pump_for_label(&mut h, "src");
+    h.get_by_label("src").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Unstage 2 file(s)");
+    wait_for(&mut h, "folder unstaged", || f.git(&["diff", "--cached", "--name-only"]).is_empty());
+    no_errors(&h);
+}
+
+#[test]
+fn a_filtered_tree_shows_matches_and_stages_only_those() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("src/keep.rs", "1\n");
+    f.write("src/other.rs", "2\n");
+    let mut h = harness(&f);
+    h.state_mut().settings.changes_tree = true;
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "src");
+
+    click(&mut h, "src");
+    assert!(h.query_by_label("src/keep.rs").is_none(), "folder closed");
+    // Other panes have filter boxes too: this one sits straight above the folder.
+    let src = h.get_by_label("src").rect();
+    let above = |r: egui::Rect| r.left() < src.center().x && r.right() > src.center().x && r.bottom() <= src.top();
+    let filter = h.query_all_by_role(egui::accesskit::Role::TextInput).map(|i| i.rect()).enumerate().filter(|(_, r)| above(*r)).max_by(|a, b| a.1.bottom().total_cmp(&b.1.bottom())).expect("the Changes filter").0;
+    h.query_all_by_role(egui::accesskit::Role::TextInput).nth(filter).unwrap().focus();
+    h.step();
+    h.query_all_by_role(egui::accesskit::Role::TextInput).nth(filter).unwrap().type_text("keep");
+    h.step();
+    pump_for_label(&mut h, "src/keep.rs");
+    assert!(h.query_by_label("src/other.rs").is_none(), "only what matches");
+
+    h.get_by_label("src").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Stage 1 file(s)");
+    wait_for(&mut h, "match staged", || !f.git(&["diff", "--cached", "--name-only"]).is_empty());
+    assert_eq!(f.git(&["diff", "--cached", "--name-only"]).trim(), "src/keep.rs");
+    no_errors(&h);
+}
+
+#[test]
+fn every_section_of_the_changes_tree_renders_during_a_conflict() {
+    let f = Fx::new();
+    f.write("dir/c.txt", "base\n");
+    f.commit("base");
+    f.git(&["checkout", "-q", "-b", "side"]);
+    f.write("dir/c.txt", "side\n");
+    f.commit("side");
+    f.git(&["checkout", "-q", "main"]);
+    f.write("dir/c.txt", "main\n");
+    f.commit("main");
+    assert!(f.git.run(Some(&f.root), &["merge", "side"]).is_err() || f.git(&["status", "--short"]).contains("UU"));
+    f.write("dir/staged.txt", "s\n");
+    f.git(&["add", "dir/staged.txt"]);
+    f.write("dir/new.txt", "n\n");
+    let mut h = harness(&f);
+    h.state_mut().settings.changes_tree = true;
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "dir/c.txt");
+    assert!(h.query_by_label("dir/staged.txt").is_some());
+    assert!(h.query_by_label("dir/new.txt").is_some());
+    no_errors(&h);
+}
+
+#[test]
 fn health_view_enables_and_undoes_an_option() {
     let f = Fx::new();
     sample_history(&f);

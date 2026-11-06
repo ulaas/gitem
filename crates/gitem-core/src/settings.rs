@@ -152,6 +152,8 @@ pub struct Settings {
     pub palette_recent: Vec<String>,
     /// The sidebar shows files rather than branches and the like.
     pub sidebar_files: bool,
+    /// The Changes list groups files by folder rather than listing them flat.
+    pub changes_tree: bool,
     /// Open tabs per repository, restored next time.
     pub session_tabs: std::collections::HashMap<String, Vec<String>>,
     /// Tab arrangement per repository, including splits.
@@ -212,6 +214,7 @@ impl Default for Settings {
             language: "en".to_string(),
             graph_layout: None,
             palette_recent: Vec::new(),
+            changes_tree: false,
             sidebar_files: false,
             session_tabs: std::collections::HashMap::new(),
             session_layouts: std::collections::HashMap::new(),

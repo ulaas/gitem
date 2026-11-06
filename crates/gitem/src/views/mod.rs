@@ -6,6 +6,7 @@ use crate::action::Cx;
 
 pub mod agents;
 pub mod changes;
+pub mod changes_tree;
 pub mod composer;
 pub mod console;
 pub mod contributors;

@@ -8,12 +8,43 @@ use gitem_core::ops;
 use gitem_core::repo::DiffSource;
 use gitem_core::{ai, cred};
 
-use crate::action::Cx;
+use crate::action::{Action, Cx};
+use crate::chrome::{self, icon};
 use crate::forms;
 use crate::menus;
 use crate::task::Task;
 use crate::views::Tab;
+use crate::views::changes_tree::{self, Node, Row, RowKind};
 use crate::widgets::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Conflicts,
+    Staged,
+    Unstaged,
+}
+
+impl Section {
+    const ALL: [Section; 3] = [Section::Conflicts, Section::Staged, Section::Unstaged];
+
+    fn holds(self, e: &StatusEntry) -> bool {
+        match self {
+            Section::Conflicts => e.conflict.is_some(),
+            Section::Staged => e.is_staged(),
+            Section::Unstaged => e.is_unstaged(),
+        }
+    }
+}
+
+/// How a file row shows in the tree: its depth and bare name.
+type Leaf<'a> = Option<(usize, &'a str)>;
+
+/// The trees for one status and filter.
+struct TreeCache {
+    status_gen: u64,
+    filter: String,
+    nodes: [Node; 3],
+}
 
 #[derive(Default)]
 pub struct ChangesView {
@@ -32,6 +63,10 @@ pub struct ChangesView {
     /// Ctrl-clicked paths, for batch actions.
     selected: HashSet<String>,
     init: bool,
+    tree: Option<TreeCache>,
+    /// Closed folders in the tree, per section: everything starts open, so a change
+    /// never hides inside a folder nobody chose to close.
+    collapsed: [HashSet<String>; 3],
 }
 
 fn change_of(e: &StatusEntry, staged: bool) -> FileChange {
@@ -99,18 +134,37 @@ impl ChangesView {
         egui::Panel::bottom("commit-box").resizable(true).default_size(190.0).show(ui, |ui| self.commit_box(ui, cx, &st));
 
         egui::ScrollArea::vertical().id_salt("changes-list").auto_shrink([false, false]).show(ui, |ui| {
-            ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter files").desired_width(f32::INFINITY));
-            self.batch_bar(ui, cx, &st);
+            let as_tree = cx.settings.changes_tree;
             let matches = |e: &StatusEntry, f: &str| f.is_empty() || e.path.to_lowercase().contains(&f.to_lowercase());
             let f = self.filter.clone();
+            if as_tree {
+                self.update_tree(cx.data.status_gen, &st, &f);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if as_tree {
+                        self.fold_button(ui, &p);
+                    }
+                    if chrome::icon_button(ui, icon::TREE_VIEW, "Show as tree", "Group changed files by folder", as_tree, &p).clicked() {
+                        cx.out.push(Action::Settings(Box::new(move |s| s.changes_tree = !as_tree)));
+                    }
+                    ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter files").desired_width(f32::INFINITY));
+                });
+            });
+            self.batch_bar(ui, cx, &st);
 
             // Conflicts first: they block everything else.
             let conflicts: Vec<&StatusEntry> = st.conflicts().filter(|e| matches(e, &f)).collect();
             if !conflicts.is_empty() {
                 section(ui, &format!("Merge conflicts ({})", conflicts.len()), &p);
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for e in conflicts {
-                    conflict_row(ui, cx, e);
+                if as_tree {
+                    self.tree_rows(ui, cx, &st, Section::Conflicts);
+                } else {
+                    for e in conflicts {
+                        conflict_row(ui, cx, e, None);
+                    }
                 }
                 ui.spacing_mut().item_spacing.y = 4.0;
             }
@@ -131,8 +185,12 @@ impl ChangesView {
                 });
             });
             ui.spacing_mut().item_spacing.y = 0.0;
-            for e in &staged {
-                staged_row(ui, cx, e, &st, &mut self.selected);
+            if as_tree {
+                self.tree_rows(ui, cx, &st, Section::Staged);
+            } else {
+                for e in &staged {
+                    staged_row(ui, cx, e, &st, &mut self.selected, None);
+                }
             }
             ui.spacing_mut().item_spacing.y = 4.0;
 
@@ -164,14 +222,76 @@ impl ChangesView {
                 });
             });
             ui.spacing_mut().item_spacing.y = 0.0;
-            for e in &unstaged {
-                unstaged_row(ui, cx, e, &mut self.selected);
+            if as_tree {
+                self.tree_rows(ui, cx, &st, Section::Unstaged);
+            } else {
+                for e in &unstaged {
+                    unstaged_row(ui, cx, e, &mut self.selected, None);
+                }
             }
             ui.spacing_mut().item_spacing.y = 4.0;
             if st.is_clean() {
                 empty_state(ui, "Working tree clean", "Changes appear here as you edit files.", &p);
             }
         });
+    }
+
+    /// Rebuild the trees only when the status or the filter changed.
+    fn update_tree(&mut self, status_gen: u64, st: &RepoStatus, filter: &str) {
+        if self.tree.as_ref().is_some_and(|t| t.status_gen == status_gen && t.filter == filter) {
+            return;
+        }
+        let needle = filter.to_lowercase();
+        let nodes = Section::ALL.map(|section| Node::build(st.entries.iter().enumerate().filter(|(_, e)| section.holds(e) && (needle.is_empty() || e.path.to_lowercase().contains(&needle))).map(|(i, e)| (i, e.path.as_str()))));
+        self.tree = Some(TreeCache { status_gen, filter: filter.to_string(), nodes });
+    }
+
+    /// Closes every folder, or opens them all again if any is closed.
+    fn fold_button(&mut self, ui: &mut Ui, p: &crate::theme::Palette) {
+        let any_closed = self.collapsed.iter().any(|c| !c.is_empty());
+        let (glyph, name) = if any_closed { (icon::ARROWS_OUT_LINE_VERTICAL, "Expand folders") } else { (icon::ARROWS_IN_LINE_VERTICAL, "Collapse folders") };
+        if chrome::icon_button(ui, glyph, name, "", false, p).clicked() {
+            if any_closed {
+                self.collapsed.iter_mut().for_each(HashSet::clear);
+            } else if let Some(tree) = &self.tree {
+                for (closed, node) in self.collapsed.iter_mut().zip(&tree.nodes) {
+                    closed.extend(node.folders());
+                }
+            }
+        }
+    }
+
+    fn tree_rows(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section) {
+        let Some(tree) = &self.tree else { return };
+        let i = section as usize;
+        // A filter looks for files, so nothing it finds stays hidden in a closed folder.
+        let filtering = !tree.filter.is_empty();
+        let rows = tree.nodes[i].rows(if filtering { None } else { Some(&self.collapsed[i]) });
+        let mut toggled = None;
+        for (at, r) in rows.iter().enumerate() {
+            match r.kind {
+                RowKind::File(index) => {
+                    let Some(e) = st.entries.get(index) else { continue };
+                    let leaf = Some((r.depth, r.name.as_str()));
+                    match section {
+                        Section::Conflicts => conflict_row(ui, cx, e, leaf),
+                        Section::Staged => staged_row(ui, cx, e, st, &mut self.selected, leaf),
+                        Section::Unstaged => unstaged_row(ui, cx, e, &mut self.selected, leaf),
+                    }
+                }
+                RowKind::Dir { open, count } => {
+                    let resp = folder_row(ui, r, open, count, cx.pal);
+                    if resp.clicked() {
+                        toggled = Some(r.path.clone());
+                    }
+                    resp.context_menu(|ui| folder_menu(ui, cx, st, section, &rows, at, count, filtering));
+                }
+            }
+        }
+        if let Some(path) = toggled
+            && !self.collapsed[i].remove(&path) {
+                self.collapsed[i].insert(path);
+            }
     }
 
     fn commit_box(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus) {
@@ -324,12 +444,68 @@ impl ChangesView {
     }
 }
 
-fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry) {
+fn folder_row(ui: &mut Ui, r: &Row, open: bool, count: usize, p: &crate::theme::Palette) -> egui::Response {
+    let (rect, resp) = row(ui, 22.0, false, p);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, r.name.as_str()));
+    tree_guides(ui, rect, r.depth, p);
+    let x = rect.left() + r.depth as f32 * TREE_INDENT;
+    let y = rect.center().y;
+    let caret = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
+    ui.painter().text(egui::pos2(x + 10.0, y), egui::Align2::CENTER_CENTER, caret, prop(10.5), p.faint);
+    ui.painter().text(egui::pos2(x + 27.0, y), egui::Align2::CENTER_CENTER, if open { icon::FOLDER_OPEN } else { icon::FOLDER }, prop(14.0), p.series[3]);
+    let n = ui.painter().text(egui::pos2(rect.right() - 6.0, y), egui::Align2::RIGHT_CENTER, count.to_string(), mono(11.0), p.faint);
+    let text = egui::Rect::from_min_max(egui::pos2(x + 37.0, rect.top()), egui::pos2(n.left() - 6.0, rect.bottom()));
+    ui.painter().with_clip_rect(text.intersect(ui.clip_rect())).text(egui::pos2(text.left(), y), egui::Align2::LEFT_CENTER, &r.name, prop(13.0), p.text);
+    resp
+}
+
+/// `rows[at]` is the folder. Git takes the folder itself where it can, which also keeps
+/// the command short for a folder of thousands of files. A filter narrows the list to
+/// fewer files than the folder holds, so then the action names exactly those.
+#[allow(clippy::too_many_arguments)]
+fn folder_menu(ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section, rows: &[Row], at: usize, count: usize, filtering: bool) {
+    let folder = rows[at].path.clone();
+    let targets = || -> Vec<String> {
+        if filtering {
+            changes_tree::files_in(rows, at).into_iter().filter_map(|i| st.entries.get(i)).map(|e| e.path.clone()).collect()
+        } else {
+            vec![folder.clone()]
+        }
+    };
+    match section {
+        Section::Staged => {
+            if ui.button(format!("Unstage {count} file(s)")).clicked() {
+                cx.run(ops::unstage_paths(&targets(), !st.head_sha.is_empty()));
+                ui.close();
+            }
+            ui.separator();
+        }
+        Section::Unstaged => {
+            if ui.button(format!("Stage {count} file(s)")).clicked() {
+                cx.run(ops::stage_paths(&targets()));
+                ui.close();
+            }
+            ui.separator();
+        }
+        Section::Conflicts => {}
+    }
+    if ui.button("Copy path").clicked() {
+        cx.copy(folder.clone());
+        ui.close();
+    }
+}
+
+fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf) {
     let p = cx.pal.clone();
     let code = e.conflict.clone().unwrap_or_default();
     let (rect, resp) = row(ui, 24.0, false, &p);
-    let tr = egui::Rect::from_min_max(rect.min + egui::vec2(8.0, 0.0), egui::pos2(rect.right() - 40.0, rect.bottom()));
-    paint_path(ui, tr, &e.path, &p);
+    let (depth, shown) = leaf.unwrap_or((0, &e.path));
+    if leaf.is_some() {
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, e.path.as_str()));
+        tree_guides(ui, rect, depth, &p);
+    }
+    let tr = egui::Rect::from_min_max(rect.min + egui::vec2(8.0 + depth as f32 * TREE_INDENT, 0.0), egui::pos2(rect.right() - 40.0, rect.bottom()));
+    paint_path(ui, tr, shown, &p);
     paint_text(ui, egui::Rect::from_min_max(egui::pos2(rect.right() - 30.0, rect.top()), rect.max), &code, mono(12.0), p.warn);
     let resp = resp.on_hover_text(conflict_help(&code));
     // During a rebase "ours" is the upstream, and "theirs" is your own commit.
@@ -386,10 +562,17 @@ fn select_click(ui: &Ui, resp: &egui::Response, path: &str, selected: &mut HashS
     false
 }
 
-fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, selected: &mut HashSet<String>) {
+fn changed_file_row(ui: &mut Ui, ch: &FileChange, selected: bool, leaf: Leaf, p: &crate::theme::Palette) -> egui::Response {
+    match leaf {
+        Some((depth, name)) => tree_file_row(ui, ch, name, depth, selected, p),
+        None => file_row(ui, ch, selected, p),
+    }
+}
+
+fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, selected: &mut HashSet<String>, leaf: Leaf) {
     let p = cx.pal.clone();
     let ch = change_of(e, true);
-    let resp = file_row(ui, &ch, selected.contains(&e.path), &p);
+    let resp = changed_file_row(ui, &ch, selected.contains(&e.path), leaf, &p);
     if select_click(ui, &resp, &e.path, selected) {
     } else if resp.clicked() {
         cx.diff(DiffSource::Staged, Some(&e.path));
@@ -411,11 +594,11 @@ fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, select
     });
 }
 
-fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, selected: &mut HashSet<String>) {
+fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, selected: &mut HashSet<String>, leaf: Leaf) {
     let p = cx.pal.clone();
     let untracked = e.worktree == FileStatus::Untracked;
     let ch = change_of(e, false);
-    let resp = file_row(ui, &ch, selected.contains(&e.path), &p);
+    let resp = changed_file_row(ui, &ch, selected.contains(&e.path), leaf, &p);
     let src = if untracked { DiffSource::Untracked } else { DiffSource::Unstaged };
     if select_click(ui, &resp, &e.path, selected) {
     } else if resp.clicked() {

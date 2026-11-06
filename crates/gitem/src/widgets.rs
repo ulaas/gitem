@@ -306,6 +306,28 @@ pub fn file_row(ui: &mut Ui, change: &FileChange, selected: bool, p: &Palette) -
     resp
 }
 
+/// Width of one level of a tree list.
+pub const TREE_INDENT: f32 = 14.0;
+
+/// Guides that show which folder a row belongs to.
+pub fn tree_guides(ui: &Ui, rect: Rect, depth: usize, p: &Palette) {
+    for level in 0..depth {
+        ui.painter().vline(rect.left() + 10.0 + level as f32 * TREE_INDENT, rect.y_range(), egui::Stroke::new(1.0, p.border));
+    }
+}
+
+/// A changed file in a tree list: indented, with its name alone, since the folders above
+/// it say where it is. It keeps the full path as its accessible label.
+pub fn tree_file_row(ui: &mut Ui, change: &FileChange, name: &str, depth: usize, selected: bool, p: &Palette) -> Response {
+    let (rect, resp) = row(ui, 22.0, selected, p);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, change.path.as_str()));
+    tree_guides(ui, rect, depth, p);
+    let x = rect.left() + depth as f32 * TREE_INDENT;
+    ui.painter().text(pos2(x + 10.0, rect.center().y), Align2::CENTER_CENTER, change.status.letter().to_string(), mono(12.0), status_color(change.status, p));
+    paint_path(ui, Rect::from_min_max(pos2(x + 20.0, rect.top()), pos2(rect.right() - 6.0, rect.bottom())), name, p);
+    resp
+}
+
 /// Build a line of code with syntax colours and intra-line change backgrounds.
 pub fn code_job(text: &str, size: f32, base: Color32, spans: Option<&Spans>, words: Option<&[(usize, usize)]>, word_bg: Color32) -> LayoutJob {
     let mut job = LayoutJob::default();
