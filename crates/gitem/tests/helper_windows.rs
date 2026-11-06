@@ -112,7 +112,7 @@ fn rebase_editor_writes_the_todo_or_empties_it_to_abort() {
 }
 
 fn merge_mode(d: &tempfile::TempDir, base: &[u8], local: &[u8], remote: &[u8]) -> (Mode, PathBuf) {
-    let merged = temp_file(d, "merged", b"<<<<<<< markers from git\n");
+    let merged = temp_file(d, "merged", b"");
     let m = MergeSource::Files { base: temp_file(d, "base", base), local: temp_file(d, "local", local), remote: temp_file(d, "remote", remote), merged: merged.clone() };
     (Mode::Merge(Box::new(MergeView::with_source(m))), merged)
 }

@@ -801,6 +801,308 @@ fn merge_tab_reloads_when_the_conflict_changes_and_refuses_stale_saves() {
     assert_eq!(std::fs::read_to_string(f.root.join("c.txt")).unwrap(), "mine two\n", "the second commit's content, not the first resolution");
 }
 
+/// Two separate conflicts in one file, in a merge. Takes the lines for each side.
+fn make_two_conflicts(f: &Fx) {
+    f.write("c.txt", "one\nkeep 1\nkeep 2\nkeep 3\nkeep 4\ntwo\nend\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.write("c.txt", "A-side\nkeep 1\nkeep 2\nkeep 3\nkeep 4\nB-side\nend\n");
+    f.commit("side change");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "A-main\nkeep 1\nkeep 2\nkeep 3\nkeep 4\nB-main\nend\n");
+    f.commit("main change");
+    assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok(), "merge should conflict");
+}
+
+fn c_txt(f: &Fx) -> String {
+    std::fs::read_to_string(f.root.join("c.txt")).unwrap()
+}
+
+fn open_merge(h: &mut Harness<GitemApp>, label: &str) {
+    settle(h);
+    h.state_mut().repos[0].open_tab(Tab::merge("c.txt"));
+    pump_for_label(h, label);
+}
+
+/// The merge tool used to rebuild from the index and save over this.
+#[test]
+fn a_hand_edit_in_the_file_is_seen_and_survives_the_merge_tool() {
+    let f = Fx::new();
+    make_two_conflicts(&f);
+    let on_disk = c_txt(&f);
+    // Fix the first conflict by hand, leaving the second.
+    let start = on_disk.find("<<<<<<<").unwrap();
+    let end = on_disk.find(">>>>>>>").unwrap();
+    let end = end + on_disk[end..].find('\n').unwrap() + 1;
+    f.write("c.txt", &format!("{}HAND-WRITTEN\n{}", &on_disk[..start], &on_disk[end..]));
+
+    let mut h = harness(&f);
+    open_merge(&mut h, "1 of 1 conflict(s) left");
+    pump_for_label(&mut h, "Start over from the three versions…");
+    click(&mut h, "All ours");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(c_txt(&f), "HAND-WRITTEN\nkeep 1\nkeep 2\nkeep 3\nkeep 4\nB-main\nend\n");
+}
+
+#[test]
+fn an_earlier_partial_save_is_seen_by_a_new_tab() {
+    let f = Fx::new();
+    make_two_conflicts(&f);
+    {
+        let mut h = harness(&f);
+        open_merge(&mut h, "2 of 2 conflict(s) left");
+        click_nth(&mut h, "Take ours", 0);
+        click(&mut h, "Save with markers");
+        pump_for_label(&mut h, "Saved");
+        assert_eq!(f.git(&["status", "--short"]).trim(), "UU c.txt", "still unresolved");
+    }
+    let saved = c_txt(&f);
+    assert!(saved.starts_with("A-main\n") && saved.contains("<<<<<<<"), "{saved}");
+    let mut h = harness(&f);
+    open_merge(&mut h, "1 of 1 conflict(s) left");
+    click(&mut h, "All theirs");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(c_txt(&f), "A-main\nkeep 1\nkeep 2\nkeep 3\nkeep 4\nB-side\nend\n", "the first choice stands");
+}
+
+#[test]
+fn an_untouched_conflict_opens_as_a_plain_merge() {
+    let f = Fx::new();
+    make_two_conflicts(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "2 of 2 conflict(s) left");
+    assert!(h.query_by_label("Start over from the three versions…").is_none());
+}
+
+#[test]
+fn starting_over_asks_and_only_then_uses_the_three_versions() {
+    let f = Fx::new();
+    make_two_conflicts(&f);
+    f.write("c.txt", "HAND-WRITTEN\n");
+    let mut h = harness(&f);
+    open_merge(&mut h, "Start over from the three versions…");
+    click(&mut h, "Start over from the three versions…");
+    click(&mut h, "Keep the file's state");
+    assert_eq!(c_txt(&f), "HAND-WRITTEN\n");
+    click(&mut h, "Start over from the three versions…");
+    click(&mut h, "Start over");
+    pump_for_label(&mut h, "2 of 2 conflict(s) left");
+    assert_eq!(c_txt(&f), "HAND-WRITTEN\n", "nothing is written until a save");
+    click(&mut h, "All theirs");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(c_txt(&f), "A-side\nkeep 1\nkeep 2\nkeep 3\nkeep 4\nB-side\nend\n");
+}
+
+#[test]
+fn saving_over_a_file_changed_behind_the_tab_asks_first() {
+    let f = Fx::new();
+    make_two_conflicts(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "2 of 2 conflict(s) left");
+    click(&mut h, "All ours");
+    f.write("c.txt", "EDITED ELSEWHERE\n");
+    click(&mut h, "Save and mark resolved");
+    pump_for_label(&mut h, "Replace the file");
+    assert_no_op_started(&mut h, "nothing is marked resolved yet");
+    assert_eq!(c_txt(&f), "EDITED ELSEWHERE\n");
+
+    click(&mut h, "Keep this tab as it is");
+    assert_eq!(c_txt(&f), "EDITED ELSEWHERE\n");
+
+    click(&mut h, "Save and mark resolved");
+    click(&mut h, "Reload from disk");
+    pump_for_label(&mut h, "Start over from the three versions…");
+    assert_eq!(c_txt(&f), "EDITED ELSEWHERE\n");
+
+    // A plain merge again, then changed once more, and this time replaced.
+    click(&mut h, "Start over from the three versions…");
+    click(&mut h, "Start over");
+    click(&mut h, "All ours");
+    f.write("c.txt", "EDITED AGAIN\n");
+    click(&mut h, "Save and mark resolved");
+    click(&mut h, "Replace the file");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(c_txt(&f), "A-main\nkeep 1\nkeep 2\nkeep 3\nkeep 4\nB-main\nend\n");
+}
+
+#[test]
+fn a_tabs_own_save_is_not_taken_for_someone_elses_edit() {
+    let f = Fx::new();
+    make_two_conflicts(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "2 of 2 conflict(s) left");
+    click_nth(&mut h, "Take ours", 0);
+    click(&mut h, "Save with markers");
+    pump_for_label(&mut h, "Saved");
+    click(&mut h, "All theirs");
+    click(&mut h, "Save and mark resolved");
+    assert!(h.query_by_label("Replace the file").is_none());
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+}
+
+#[test]
+fn switching_off_plain_editing_keeps_what_was_typed() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "1 of 1 conflict(s) left");
+    click(&mut h, "Edit text");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    pump_for_role(&mut h, input);
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text("TYPED\n");
+    h.step();
+    h.step();
+    click(&mut h, "Edit text");
+    // Still one conflict to decide, and the typed line is in the result.
+    pump_for_label(&mut h, "1 of 1 conflict(s) left");
+    click(&mut h, "All theirs");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    let saved = c_txt(&f);
+    assert!(saved.contains("TYPED\n") && saved.contains("TOP-SIDE\n") && !saved.contains("<<<<<<<"), "{saved}");
+}
+
+#[test]
+fn plain_editing_with_broken_markers_stays_put_rather_than_lose_the_text() {
+    let f = Fx::new();
+    make_conflict(&f);
+    f.write("c.txt", "<<<<<<< HEAD\nhalf a conflict\n");
+    let mut h = harness(&f);
+    open_merge(&mut h, "Start over from the three versions…");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    pump_for_role(&mut h, input);
+    click(&mut h, "Edit text");
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.query_by_role(input).is_some(), "it stays on the text");
+    assert_eq!(c_txt(&f), "<<<<<<< HEAD\nhalf a conflict\n");
+}
+
+#[test]
+fn inline_edit_undo_and_base_decide_a_conflict() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "1 of 1 conflict(s) left");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    // Edit starts from nothing while undecided. Apply makes the text the resolution.
+    click(&mut h, "Edit");
+    pump_for_role(&mut h, input);
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text("INLINE");
+    h.step();
+    h.step();
+    click(&mut h, "Apply");
+    pump_for_label(&mut h, "✔ All 1 conflict(s) resolved");
+    // Undo reopens it.
+    click(&mut h, "Undo");
+    pump_for_label(&mut h, "1 of 1 conflict(s) left");
+    // The Base pane opens beside the others, and Base resolves to its text.
+    let toolbar_base = h.query_all_by_label("Base").next().unwrap().rect();
+    click_at(&mut h, toolbar_base.center());
+    h.step();
+    let conflict_base = h.query_all_by_label("Base").nth(1).unwrap();
+    conflict_base.click();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "✔ All 1 conflict(s) resolved");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(c_txt(&f), "top\nmiddle\nbottom\n");
+}
+
+#[test]
+fn an_inline_edit_saved_with_its_own_text() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "1 of 1 conflict(s) left");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    click(&mut h, "Edit");
+    pump_for_role(&mut h, input);
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text("INLINE");
+    h.step();
+    h.step();
+    click(&mut h, "Apply");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(c_txt(&f), "INLINE\nmiddle\nbottom\n");
+}
+
+#[test]
+fn delete_the_file_resolves_a_conflict_with_a_deleted_side() {
+    let f = Fx::new();
+    f.write("c.txt", "base\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.git(&["rm", "-q", "c.txt"]);
+    f.commit("delete it");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "changed\n");
+    f.commit("change it");
+    assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok());
+    let mut h = harness(&f);
+    open_merge(&mut h, "Delete the file");
+    assert!(h.query_by_label("Keep theirs").is_none(), "that side has no file to keep");
+    click(&mut h, "Delete the file");
+    wait_for(&mut h, "the file to be gone", || !f.root.join("c.txt").exists() && f.git(&["status", "--short"]).trim() == "D  c.txt");
+    no_errors(&h);
+}
+
+/// An empty file is a version like any other, and used to read as deleted.
+#[test]
+fn an_empty_file_on_one_side_is_not_called_deleted() {
+    let f = Fx::new();
+    f.write("c.txt", "base\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.write("c.txt", "changed\n");
+    f.commit("change it");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "");
+    f.commit("empty it");
+    assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok());
+    let mut h = harness(&f);
+    open_merge(&mut h, "Take ours");
+    assert!(h.query_by_label("Delete the file").is_none());
+    click(&mut h, "Take ours");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(c_txt(&f), "");
+}
+
+#[test]
+fn a_real_autocrlf_file_keeps_its_line_ends_through_the_merge_tool() {
+    let f = Fx::new();
+    f.git(&["config", "core.autocrlf", "true"]);
+    f.write("c.txt", "top\r\nmiddle\r\nbottom\r\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.write("c.txt", "TOP-SIDE\r\nmiddle\r\nbottom\r\n");
+    f.commit("side change");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "TOP-MAIN\r\nmiddle\r\nbottom\r\n");
+    f.commit("main change");
+    assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok());
+    assert!(c_txt(&f).contains("\r\n"), "git writes the conflict with the file's own ending");
+    let mut h = harness(&f);
+    open_merge(&mut h, "1 of 1 conflict(s) left");
+    assert!(h.query_by_label("Start over from the three versions…").is_none(), "line ends alone don't count as an edit");
+    click(&mut h, "All theirs");
+    click(&mut h, "Save and mark resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert_eq!(c_txt(&f), "TOP-SIDE\r\nmiddle\r\nbottom\r\n");
+}
+
 #[test]
 fn a_rebase_plan_refuses_to_run_if_head_moved() {
     let f = Fx::new();
@@ -2878,6 +3180,15 @@ fn click_line(h: &mut Harness<GitemApp>, button: &str, hunk: usize, row: f32) {
     click_at(h, egui::pos2(left + 20.0, head.center().y + 19.0 * row));
 }
 
+fn pump_for_role(h: &mut Harness<GitemApp>, role: egui::accesskit::Role) {
+    let t = Instant::now();
+    while h.query_by_role(role).is_none() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "no widget with the role {role:?}");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
 fn click_nth(h: &mut Harness<GitemApp>, label: &str, n: usize) {
     pump_for_any(h, label);
     h.query_all_by_label(label).nth(n).unwrap_or_else(|| panic!("no {label} number {n}")).click();
@@ -3025,7 +3336,7 @@ fn a_selected_line_that_is_not_utf8_offers_no_way_to_rewrite_it() {
         h.step();
     }
     assert!(h.query_by_label("Stage 1 selected line(s)").is_none());
-    assert!(h.query_by_label("Discard selectedâ€¦").is_none());
+    assert!(h.query_by_label("Discard selected…").is_none());
     assert_eq!(h.query_all_by_label("Not UTF-8: stage the whole file").count(), 2, "the hunk's notice, and the toolbar's in place of the buttons");
     click(&mut h, "Stage file");
     wait_for(&mut h, "the file to be staged", || f.git.run(Some(&f.root), &["show", ":f.txt"]).unwrap().stdout == b"keep\ncaf\xe9 added\n");

@@ -1,7 +1,7 @@
 //! Rebase with AI conflict resolution. It stops rather than guessing: when the
 //! model is unsure or a conflict isn't plain text, the rebase pauses for you.
 use crate::ai;
-use crate::merge::{MergeDoc, Region, Resolution, has_conflict_markers};
+use crate::merge::{MergeDoc, Region, Resolution, has_conflict_markers, plain_text, to_crlf, worktree_uses_crlf};
 use crate::model::RepoOp;
 use crate::ops::{self, GitOp};
 use crate::repo::Repo;
@@ -96,10 +96,15 @@ fn resolve_file(repo: &Repo, path: &str, instructions: &str, complete: &dyn Fn(&
     let (Some(bt), Some(ot), Some(tt)) = (text(&b), text(&o), text(&t)) else {
         return Err("it isn't UTF-8 text".to_string());
     };
-    let mut doc = MergeDoc::new(&bt, &ot, &tt);
+    // With core.autocrlf the versions are LF while the file is CRLF, and it should stay so.
+    let disk = std::fs::read(repo.root.join(path)).unwrap_or_default();
+    let mut doc = match std::str::from_utf8(&disk) {
+        Ok(d) if worktree_uses_crlf(d, [&bt, &ot, &tt]) => MergeDoc::checked_with_git(&repo.git, &to_crlf(&bt), &to_crlf(&ot), &to_crlf(&tt)),
+        _ => MergeDoc::checked_with_git(&repo.git, &bt, &ot, &tt),
+    };
     for r in &mut doc.regions {
         if let Region::Conflict { base, ours, theirs, resolution } = r {
-            let (s, u) = ai::conflict_prompt(path, &base.join("\n"), &ours.join("\n"), &theirs.join("\n"), instructions);
+            let (s, u) = ai::conflict_prompt(path, &plain_text(base), &plain_text(ours), &plain_text(theirs), instructions);
             let reply = ai::clean_message(&complete(&s, &u).map_err(|e: Error| e.to_string())?);
             if reply.trim() == ai::UNSURE {
                 return Err("the AI wasn't confident in a resolution".to_string());

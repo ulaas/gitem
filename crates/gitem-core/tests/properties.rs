@@ -366,7 +366,7 @@ fn merge_lines() -> impl Strategy<Value = Vec<String>> {
 }
 
 fn doc_with(regions: Vec<Region>) -> MergeDoc {
-    MergeDoc { regions, eol_crlf: false, final_newline: false, bom: false }
+    MergeDoc { regions, ..MergeDoc::default() }
 }
 
 fn rendered(lines: &[String]) -> String {
@@ -457,34 +457,38 @@ fn git_finds_a_conflict(fx: &Fx, b: &str, o: &str, t: &str) -> bool {
     fx.git.run_raw(Some(&fx.root), &["merge-file", "-p", "ours.txt", "base.txt", "theirs.txt"]).unwrap().code > 0
 }
 
-/// This engine merges these clean while git reports a conflict, so the tool would
-/// offer to save the result as resolved.
+/// The engine alone merges these clean while git reports a conflict, so the tool would
+/// offer to save the result as resolved. The tool and auto-rebase ask git as well.
 #[test]
-#[ignore = "VC-17, Phase 3"]
 fn a_known_conflict_in_git_is_a_conflict_here() {
     let fx = Fx::new();
     let (b, o, t) = ("e\n\nd\nb\na\n", "n0\ne\n\nd\n", "e\n\na\nb\nd\n");
     assert!(git_finds_a_conflict(&fx, b, o, t));
-    assert!(MergeDoc::new(b, o, t).conflict_count() > 0, "{}", MergeDoc::new(b, o, t).render("o", "t"));
+    let mut d = MergeDoc::checked_with_git(&fx.git, b, o, t);
+    assert_eq!(d.conflict_count(), 1, "{}", d.render("o", "t"));
+    // Each side's own text is what taking it gives.
+    d.resolve_all(Resolution::Theirs);
+    assert_eq!(d.render("o", "t"), t);
+    let mut d = MergeDoc::checked_with_git(&fx.git, b, o, t);
+    d.resolve_all(Resolution::Ours);
+    assert_eq!(d.render("o", "t"), o);
 }
 
 /// Rare: the review saw it in 5 of 400 small files, so this runs many.
 #[test]
-#[ignore = "VC-17, Phase 3"]
 fn a_conflict_in_git_is_a_conflict_here() {
     let fx = Fx::new();
     let text = |l: &[String]| if l.is_empty() { String::new() } else { format!("{}\n", l.join("\n")) };
     check(600, (merge_lines(), merge_lines(), merge_lines()), |(b, o, t)| {
         let (b, o, t) = (text(&b), text(&o), text(&t));
-        let found_here = MergeDoc::new(&b, &o, &t).conflict_count() > 0;
-        prop_assert!(found_here || !git_finds_a_conflict(&fx, &b, &o, &t), "git found a conflict and this engine didn't");
+        let found_here = MergeDoc::checked_with_git(&fx.git, &b, &o, &t).conflict_count() > 0;
+        prop_assert!(found_here || !git_finds_a_conflict(&fx, &b, &o, &t), "git found a conflict and this tool didn't");
         Ok(())
     });
 }
 
-/// The final newline is taken from ours, whichever side's last line is kept.
+/// The final newline used to come from ours, whichever side's last line was kept.
 #[test]
-#[ignore = "VC-16, Phase 3"]
 fn taking_theirs_with_ours_unchanged_keeps_their_final_newline() {
     assert_eq!(MergeDoc::new("a\nb", "a\nb", "a\nb\nc\n").render("o", "t"), "a\nb\nc\n");
 }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use egui::{Color32, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 use gitem_core::RepoOp;
-use gitem_core::merge::{MergeDoc, Region, Resolution, has_conflict_markers};
+use gitem_core::merge::{self, MergeDoc, Region, Resolution, has_conflict_markers, plain, plain_text};
 use gitem_core::{ops, util};
 
 use crate::action::Cx;
@@ -28,6 +28,14 @@ struct Loaded {
     missing_theirs: bool,
     /// Which versions of the file this was loaded from.
     signature: String,
+    /// The merge of the three versions alone, when the file on disk differs from it.
+    fresh: Option<MergeDoc>,
+    /// The file's bytes as read, if it could be shown. Saving compares against these.
+    disk: Option<Vec<u8>>,
+    /// The file on disk, for plain editing: its conflict markers aren't well formed.
+    raw: Option<String>,
+    /// The file exists but isn't text this tool can show without altering it.
+    disk_unreadable: bool,
 }
 
 /// Bytes as text, only if nothing would be altered by treating them so. Lossy
@@ -36,12 +44,38 @@ fn exact_text(b: &[u8]) -> Option<&str> {
     if util::is_binary(b) { None } else { std::str::from_utf8(b).ok() }
 }
 
-fn build_doc(b: Vec<u8>, o: Vec<u8>, t: Vec<u8>, signature: String) -> Loaded {
-    let (mo, mt) = (o.is_empty(), t.is_empty());
-    match (exact_text(&b), exact_text(&o), exact_text(&t)) {
-        (Some(bt), Some(ot), Some(tt)) => Loaded { doc: MergeDoc::new(bt, ot, tt), binary: false, missing_ours: mo, missing_theirs: mt, signature },
-        _ => Loaded { doc: MergeDoc::default(), binary: true, missing_ours: mo, missing_theirs: mt, signature },
+/// Whether the index holds this stage of a conflict. An empty file is still a version:
+/// only its absence means that side deleted the file.
+fn has_stage(signature: &str, stage: u8) -> bool {
+    signature.lines().any(|l| l.split('\t').next().is_some_and(|meta| meta.ends_with(&format!(" {stage}"))))
+}
+
+/// The versions to merge, and the file on disk if there is one. The file decides what's
+/// shown: it may hold hand edits or an earlier partial save, and those must survive.
+fn build_doc(git: &gitem_core::GitExe, b: Vec<u8>, o: Vec<u8>, t: Vec<u8>, signature: String, disk: Option<Vec<u8>>) -> Loaded {
+    let in_repo = !signature.is_empty();
+    let (missing_ours, missing_theirs) = (in_repo && !has_stage(&signature, 2), in_repo && !has_stage(&signature, 3));
+    let mut loaded = Loaded { doc: MergeDoc::default(), binary: true, missing_ours, missing_theirs, signature, fresh: None, disk: None, raw: None, disk_unreadable: false };
+    let (Some(bt), Some(ot), Some(tt)) = (exact_text(&b), exact_text(&o), exact_text(&t)) else { return loaded };
+    loaded.binary = false;
+    let disk_text = disk.as_deref().and_then(exact_text);
+    loaded.disk_unreadable = disk.is_some() && disk_text.is_none();
+    // With core.autocrlf the versions are LF while the file is CRLF, and it should stay so.
+    loaded.doc = match disk_text {
+        Some(d) if merge::worktree_uses_crlf(d, [bt, ot, tt]) => MergeDoc::checked_with_git(git, &merge::to_crlf(bt), &merge::to_crlf(ot), &merge::to_crlf(tt)),
+        _ => MergeDoc::checked_with_git(git, bt, ot, tt),
+    };
+    let Some(text) = disk_text else { return loaded };
+    if loaded.doc.matches_marked_text(text) {
+        // The file is as git wrote it, so the finer view of the three versions is the same text.
+    } else if let Some(on_disk) = MergeDoc::from_marked_text(text, &loaded.doc) {
+        loaded.fresh = Some(std::mem::replace(&mut loaded.doc, on_disk));
+    } else {
+        loaded.raw = Some(text.to_string());
+        loaded.fresh = Some(loaded.doc.clone());
     }
+    loaded.disk = disk;
+    loaded
 }
 
 pub struct MergeView {
@@ -67,6 +101,16 @@ pub struct MergeView {
     ai: Task<Vec<(usize, Vec<String>)>>,
     /// Testing aid: resolve everything to theirs and save without a click.
     pub auto_accept: bool,
+    /// The newest load has been taken into the fields below.
+    load_seen: bool,
+    /// The file's bytes when last read or written here.
+    disk_seen: Option<Vec<u8>>,
+    /// What the file would hold with nothing further decided, for spotting unsaved work.
+    clean_text: String,
+    /// Asked whether to replace what's on disk with a fresh merge.
+    confirm_restart: bool,
+    /// The file changed since it was read: a save (and whether to mark it) awaiting a yes.
+    pending_save: Option<bool>,
 }
 
 impl MergeView {
@@ -94,7 +138,22 @@ impl MergeView {
             sides: ("ours", "theirs"),
             ai: Task::default(),
             auto_accept: false,
+            load_seen: false,
+            disk_seen: None,
+            clean_text: String::new(),
+            confirm_restart: false,
+            pending_save: None,
         }
+    }
+
+    /// What closing this tab would lose. Saved work and a resolved file are safe.
+    pub fn unsaved(&self) -> Option<String> {
+        if self.resolved {
+            return None;
+        }
+        let loaded = self.doc.get().filter(|l| !l.binary)?;
+        let now = if self.raw_mode { self.raw_text.clone() } else { loaded.doc.render("ours", "theirs") };
+        (self.load_seen && (self.editing.is_some() || now != self.clean_text)).then(|| format!("{}: conflict resolutions not saved", self.title()))
     }
 
     pub fn key(&self) -> String {
@@ -114,21 +173,106 @@ impl MergeView {
 
     fn start(&mut self, ui: &Ui, cx: &Cx) {
         self.started = true;
+        self.load_seen = false;
         let repo = cx.repo.clone();
         match &self.source {
             MergeSource::Repo(p) => {
                 let p = p.clone();
                 self.doc.spawn(ui.ctx(), move || -> Result<Loaded, String> {
-                    Ok(build_doc(repo.stage_content(1, &p), repo.stage_content(2, &p), repo.stage_content(3, &p), repo.unmerged_signature(&p)))
+                    let disk = std::fs::read(repo.root.join(&p)).ok();
+                    Ok(build_doc(&repo.git, repo.stage_content(1, &p), repo.stage_content(2, &p), repo.stage_content(3, &p), repo.unmerged_signature(&p), disk))
                 });
             }
-            MergeSource::Files { base, local, remote, .. } => {
-                let (b, l, r) = (base.clone(), local.clone(), remote.clone());
+            MergeSource::Files { base, local, remote, merged } => {
+                let (b, l, r, m) = (base.clone(), local.clone(), remote.clone(), merged.clone());
                 self.doc.spawn(ui.ctx(), move || -> Result<Loaded, String> {
                     let rd = |p: &PathBuf| std::fs::read(p).unwrap_or_default();
-                    Ok(build_doc(rd(&b), rd(&l), rd(&r), String::new()))
+                    // Standalone callers may pass a merged file that doesn't hold anything yet.
+                    let disk = std::fs::read(&m).ok().filter(|d| !d.is_empty());
+                    Ok(build_doc(&repo.git, rd(&b), rd(&l), rd(&r), String::new(), disk))
                 });
             }
+        }
+    }
+
+    /// Takes a fresh load into the tab's own state, once.
+    fn take_load(&mut self, loaded: &mut Loaded) {
+        if std::mem::replace(&mut self.load_seen, true) {
+            return;
+        }
+        self.disk_seen = loaded.disk.clone();
+        self.clean_text = loaded.doc.render("ours", "theirs");
+        if let Some(text) = loaded.raw.take() {
+            self.clean_text = text.clone();
+            self.raw_text = text;
+            self.raw_mode = true;
+        }
+    }
+
+    /// Says when what's on screen isn't a plain merge of the three versions.
+    fn disk_notice(&mut self, ui: &mut Ui, loaded: &mut Loaded, pal: &Palette) {
+        if loaded.disk_unreadable {
+            ui.colored_label(pal.warn, "The file on disk isn't UTF-8 text, so it can't be shown here. Saving asks before replacing it.");
+        }
+        let Some(fresh) = loaded.fresh.clone() else { return };
+        ui.horizontal_wrapped(|ui| {
+            let why = if self.raw_mode { "The file's conflict markers aren't well formed, so it's open as plain text." } else { "The file on disk isn't a plain merge, so it's shown as it stands. Hand edits and earlier saves are kept." };
+            ui.colored_label(pal.warn, why);
+            if self.confirm_restart {
+                ui.colored_label(pal.warn, "Start over? Saving then replaces what's on disk.");
+                if ui.small_button("Start over").clicked() {
+                    loaded.doc = fresh;
+                    loaded.fresh = None;
+                    self.raw_mode = false;
+                    self.editing = None;
+                    self.expanded.clear();
+                    self.confirm_restart = false;
+                }
+                if ui.small_button("Keep the file's state").clicked() {
+                    self.confirm_restart = false;
+                }
+            } else if ui.small_button("Start over from the three versions…").clicked() {
+                self.confirm_restart = true;
+            }
+        });
+    }
+
+    /// The file changed behind this tab, so a save needs a decision.
+    fn save_prompt(&mut self, ui: &mut Ui, cx: &mut Cx, doc: &MergeDoc, pal: &Palette) {
+        let Some(mark) = self.pending_save else { return };
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(pal.warn, "The file on disk has changed since this tab read it. Saving would replace that.");
+            if ui.small_button("Replace the file").clicked() {
+                self.pending_save = None;
+                self.disk_seen = std::fs::read(self.target(cx)).ok();
+                self.save(cx, doc, mark);
+            }
+            if ui.small_button("Reload from disk").clicked() {
+                self.pending_save = None;
+                self.reset_for_reload();
+            }
+            if ui.small_button("Keep this tab as it is").clicked() {
+                self.pending_save = None;
+            }
+        });
+    }
+
+    fn reset_for_reload(&mut self) {
+        self.started = false;
+        self.doc.value = None;
+        self.editing = None;
+        self.expanded.clear();
+        self.raw_mode = false;
+        self.saved = false;
+        self.current = 0;
+        self.confirm_restart = false;
+        self.pending_save = None;
+    }
+
+    fn target(&self, cx: &Cx) -> PathBuf {
+        match &self.source {
+            MergeSource::Repo(p) => cx.repo.root.join(p),
+            MergeSource::Files { merged, .. } => merged.clone(),
         }
     }
 
@@ -167,10 +311,13 @@ impl MergeView {
             self.doc.value = Some(loaded);
             return;
         }
+        self.take_load(&mut loaded);
         if self.auto_accept {
             loaded.doc.resolve_all(Resolution::Theirs);
             self.save(cx, &loaded.doc, true);
         }
+        self.disk_notice(ui, &mut loaded, &pal);
+        self.save_prompt(ui, cx, &loaded.doc, &pal);
         self.toolbar(ui, cx, &mut loaded.doc);
         ui.separator();
         if self.raw_mode {
@@ -197,13 +344,7 @@ impl MergeView {
             self.resolved = now.is_empty();
             let stale = self.doc.get().is_some_and(|l| l.signature != now);
             if !now.is_empty() && stale {
-                self.started = false;
-                self.doc.value = None;
-                self.editing = None;
-                self.expanded.clear();
-                self.raw_mode = false;
-                self.saved = false;
-                self.current = 0;
+                self.reset_for_reload();
             }
         }
     }
@@ -307,7 +448,7 @@ impl MergeView {
                 let cfg = cx.settings.ai.clone();
                 let path = self.title();
                 let open: Vec<(usize, String, String, String)> = doc.regions.iter().enumerate().filter_map(|(i, r)| match r {
-                    Region::Conflict { base, ours, theirs, resolution: Resolution::Unresolved } => Some((i, base.join("\n"), ours.join("\n"), theirs.join("\n"))),
+                    Region::Conflict { base, ours, theirs, resolution: Resolution::Unresolved } => Some((i, plain_text(base), plain_text(ours), plain_text(theirs))),
                     _ => None,
                 }).collect();
                 self.ai.spawn(ui.ctx(), move || -> Result<Vec<(usize, Vec<String>)>, String> {
@@ -333,10 +474,7 @@ impl MergeView {
             }
             toggle(ui, &mut self.show_base, "Base", "Show the common ancestor");
             if ui.selectable_label(self.raw_mode, "Edit text").on_hover_text("Edit the merged result as plain text").clicked() {
-                self.raw_mode = !self.raw_mode;
-                if self.raw_mode {
-                    self.raw_text = doc.render("ours", "theirs");
-                }
+                self.toggle_raw(cx, doc);
             }
             ui.separator();
             let done = if self.raw_mode { !has_conflict_markers(&self.raw_text) } else { unresolved == 0 };
@@ -357,16 +495,44 @@ impl MergeView {
         });
     }
 
+    /// Leaving plain editing keeps what was typed: the text becomes the document, its
+    /// markers becoming conflicts again. Markers that make no sense stay here to be fixed.
+    fn toggle_raw(&mut self, cx: &mut Cx, doc: &mut MergeDoc) {
+        if !self.raw_mode {
+            self.raw_text = doc.render("ours", "theirs");
+            self.raw_mode = true;
+            return;
+        }
+        if self.raw_text != doc.render("ours", "theirs") {
+            match MergeDoc::from_marked_text(&self.raw_text, doc) {
+                Some(edited) => {
+                    *doc = edited;
+                    self.editing = None;
+                    self.expanded.clear();
+                }
+                None => {
+                    cx.toast("The conflict markers aren't complete. Fix them to leave plain editing, so nothing typed is lost.");
+                    return;
+                }
+            }
+        }
+        self.raw_mode = false;
+    }
+
     fn save(&mut self, cx: &mut Cx, doc: &MergeDoc, mark: bool) {
         let text = if self.raw_mode { self.raw_text.clone() } else { doc.render("ours", "theirs") };
-        let target = match &self.source {
-            MergeSource::Repo(p) => cx.repo.root.join(p),
-            MergeSource::Files { merged, .. } => merged.clone(),
-        };
-        if let Err(e) = std::fs::write(&target, text) {
+        let target = self.target(cx);
+        // Someone may have edited the file since it was read. Never overwrite that unasked.
+        if std::fs::read(&target).ok() != self.disk_seen {
+            self.pending_save = Some(mark);
+            return;
+        }
+        if let Err(e) = std::fs::write(&target, &text) {
             cx.error(format!("Could not write {}: {e}", target.display()));
             return;
         }
+        self.disk_seen = Some(text.clone().into_bytes());
+        self.clean_text = text;
         self.saved = true;
         match &self.source {
             MergeSource::Repo(p) => {
@@ -462,12 +628,12 @@ impl MergeView {
             Region::Stable(lines) => {
                 let shown: Vec<(Option<usize>, &str)> = if collapsed {
                     let n = lines.len();
-                    let mut v: Vec<(Option<usize>, &str)> = lines[..COLLAPSE_CONTEXT].iter().enumerate().map(|(k, l)| (Some(k), l.as_str())).collect();
+                    let mut v: Vec<(Option<usize>, &str)> = lines[..COLLAPSE_CONTEXT].iter().enumerate().map(|(k, l)| (Some(k), plain(l))).collect();
                     v.push((None, ""));
-                    v.extend(lines[n - COLLAPSE_CONTEXT..].iter().enumerate().map(|(k, l)| (Some(k), l.as_str())));
+                    v.extend(lines[n - COLLAPSE_CONTEXT..].iter().enumerate().map(|(k, l)| (Some(k), plain(l))));
                     v
                 } else {
-                    lines.iter().enumerate().map(|(k, l)| (Some(k), l.as_str())).collect()
+                    lines.iter().enumerate().map(|(k, l)| (Some(k), plain(l))).collect()
                 };
                 let hidden = lines.len().saturating_sub(COLLAPSE_CONTEXT * 2);
                 for (row, (marker, text)) in shown.iter().enumerate() {
@@ -550,7 +716,7 @@ impl MergeView {
                     set(Resolution::Base);
                 }
                 if c.small_button("Edit").clicked() {
-                    let cur = resolved_lines(base, ours, theirs, resolution).join("\n");
+                    let cur = plain_text(&resolved_lines(base, ours, theirs, resolution));
                     self.editing = Some((i, cur));
                 }
                 if !unresolved && c.small_button("Undo").clicked() {
@@ -590,7 +756,7 @@ impl MergeView {
 fn lines_at(ui: &Ui, pane: Rect, lines: &[String], row_h: f32, font: f32, color: Color32) {
     for (k, l) in lines.iter().enumerate() {
         let y = pane.top() + k as f32 * row_h;
-        paint_text(ui, Rect::from_min_size(pos2(pane.left() + 6.0, y), vec2(pane.width() - 8.0, row_h)), l, mono(font), color);
+        paint_text(ui, Rect::from_min_size(pos2(pane.left() + 6.0, y), vec2(pane.width() - 8.0, row_h)), plain(l), mono(font), color);
     }
 }
 
