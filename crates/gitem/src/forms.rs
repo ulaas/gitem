@@ -189,7 +189,8 @@ impl FormDialog {
         let mut submit = false;
         ui.horizontal(|ui| {
             let fill = if self.danger { p.danger } else { p.accent };
-            let b = egui::Button::new(RichText::new(self.submit.as_str()).color(p.on_accent)).fill(fill);
+            let text = if self.danger { egui::Color32::WHITE } else { p.on_accent };
+            let b = egui::Button::new(RichText::new(self.submit.as_str()).color(text)).fill(fill);
             submit = ui.add(b).clicked();
             if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 *closed = true;

@@ -40,13 +40,99 @@ const fn hex(c: u32) -> Color32 {
     Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
+/// Named accents: `(name, on dark themes, on light themes)`. A colour that reads on a
+/// dark background is too pale for a light one, so each has both.
+pub const ACCENTS: [(&str, u32, u32); 19] = [
+    ("Blue", 0x4c95ec, 0x2563c9),
+    ("Sky", 0x38bdf8, 0x0369a1),
+    ("Cyan", 0x22d3ee, 0x0e7490),
+    ("Teal", 0x2dd4bf, 0x0f766e),
+    ("Emerald", 0x34d399, 0x047857),
+    ("Green", 0x4ade80, 0x15803d),
+    ("Lime", 0xa3e635, 0x4d7c0f),
+    ("Yellow", 0xfacc15, 0x8f5a06),
+    ("Amber", 0xfbbf24, 0xa84d08),
+    ("Orange", 0xfb923c, 0xc2410c),
+    ("Coral", 0xff7f6e, 0xc8402e),
+    ("Red", 0xf87171, 0xc81e1e),
+    ("Rose", 0xfb7185, 0xbe123c),
+    ("Pink", 0xf472b6, 0xbe185d),
+    ("Fuchsia", 0xe879f9, 0xa21caf),
+    ("Purple", 0xc084fc, 0x7e22ce),
+    ("Violet", 0xa78bfa, 0x6d28d9),
+    ("Indigo", 0x818cf8, 0x4338ca),
+    ("Gray", 0x9aa7b8, 0x475569),
+];
+
+/// The colour of an accent setting, if it's a name or `#rrggbb`.
+pub fn accent_color(setting: &str, dark: bool) -> Option<Color32> {
+    if let Some(digits) = setting.strip_prefix('#') {
+        return (digits.len() == 6).then(|| u32::from_str_radix(digits, 16).ok()).flatten().map(hex);
+    }
+    ACCENTS.iter().find(|a| a.0 == setting).map(|a| hex(if dark { a.1 } else { a.2 }))
+}
+
+/// WCAG contrast ratio between two opaque colours, from 1 to 21.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let lum = |c: Color32| {
+        let ch = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
+    };
+    let (x, y) = (lum(a), lum(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
 impl Palette {
     pub fn get(t: ThemeChoice) -> Self {
         match t {
             ThemeChoice::Dark => Self::dark(),
             ThemeChoice::Light => Self::light(),
             ThemeChoice::Midnight => Self::midnight(),
+            ThemeChoice::Black => Self::dark_family([0x000000, 0x0b0b0c, 0x161618, 0x202023, 0x2b2b2f], [0x28282c, 0x38383d, 0x47474d], [0xececec, 0xaeaeae, 0x848484], 0x4c95ec),
+            ThemeChoice::Slate => Self::dark_family([0x1a2029, 0x202733, 0x2a3341, 0x323c4c, 0x3a4555], [0x3a465b, 0x485671, 0x576583], [0xe4e8ef, 0xaab3c2, 0x8c96a8], 0x5aa2f0),
+            ThemeChoice::Forest => Self::dark_family([0x141c18, 0x1a241f, 0x24302a, 0x2c3a33, 0x33443b], [0x35473e, 0x43584d, 0x50675a], [0xe3ebe6, 0xa6b5ab, 0x84958b], 0x3fbf8a),
+            ThemeChoice::Plum => Self::dark_family([0x1c1722, 0x241d2b, 0x2f2738, 0x382f43, 0x40364c], [0x41364e, 0x504361, 0x5e4f71], [0xebe6f0, 0xb3a9bf, 0x93899f], 0xb083f0),
+            ThemeChoice::Mocha => Self::dark_family([0x1e1815, 0x26201c, 0x322a25, 0x3b322c, 0x453a33], [0x473c35, 0x584b42, 0x67584e], [0xefe8e1, 0xbcb0a5, 0x998d82], 0xe0954a),
+            ThemeChoice::Paper => Self::light_family([0xfbf7ee, 0xf3ecdf, 0xe9e0cf, 0xe2d8c5, 0xd3c8b3], [0xfffcf5, 0xf1e8d8, 0xb3a78f], [0x2b251b, 0x5c5345, 0x756b5a], 0xb4531c),
+            ThemeChoice::Mist => Self::light_family([0xf5f8fb, 0xebf0f5, 0xdfe6ee, 0xd6dfe9, 0xc7d2de], [0xffffff, 0xe2edf8, 0xa9b7c6], [0x17212c, 0x465362, 0x63707c], 0x1f6fc4),
+            ThemeChoice::Sage => Self::light_family([0xf5f8f3, 0xebf0e7, 0xdfe6da, 0xd5ddcf, 0xc5cfbd], [0xffffff, 0xe4eede, 0xa8b49d], [0x1b241a, 0x4a5546, 0x66715e], 0x1f7a4d),
+            ThemeChoice::Blush => Self::light_family([0xfcf6f7, 0xf5ebee, 0xecdfe3, 0xe4d5da, 0xd6c4ca], [0xffffff, 0xf6e5ea, 0xb8a4ab], [0x2a1c20, 0x5e4a50, 0x7a656b], 0xbe2f63),
         }
+    }
+
+    /// A theme with an accent setting applied. An empty or unreadable one leaves the
+    /// theme's own accent.
+    pub fn for_settings(t: ThemeChoice, accent: &str) -> Self {
+        let base = Self::get(t);
+        match accent_color(accent, base.dark) {
+            Some(c) => base.with_accent(c),
+            None => base,
+        }
+    }
+
+    /// Everything that follows the accent: selections, the status bar, and text on it.
+    pub fn with_accent(self, accent: Color32) -> Self {
+        let on_accent = [Color32::WHITE, hex(0x111318)].into_iter().find(|c| contrast(*c, accent) >= 4.5).unwrap_or(if contrast(Color32::WHITE, accent) > contrast(hex(0x111318), accent) { Color32::WHITE } else { hex(0x111318) });
+        let (selection, status) = if self.dark { (0.38, 0.24) } else { (0.24, 0.2) };
+        Self { accent, on_accent, selection: mix(self.bg, accent, selection), status_bg: mix(self.bg, accent, status), ..self }
+    }
+
+    /// Surfaces darkest first: `bg, panel, panel2, hover, border`. Then buttons:
+    /// `fill, hover, border`, and text: `text, dim, faint`.
+    fn dark_family(surface: [u32; 5], button: [u32; 3], text: [u32; 3], accent: u32) -> Self {
+        Self { bg: hex(surface[0]), panel: hex(surface[1]), panel2: hex(surface[2]), hover: hex(surface[3]), border: hex(surface[4]), button: hex(button[0]), button_hover: hex(button[1]), button_border: hex(button[2]), text: hex(text[0]), dim: hex(text[1]), faint: hex(text[2]), ..Self::dark() }.with_accent(hex(accent))
+    }
+
+    fn light_family(surface: [u32; 5], button: [u32; 3], text: [u32; 3], accent: u32) -> Self {
+        Self { bg: hex(surface[0]), panel: hex(surface[1]), panel2: hex(surface[2]), hover: hex(surface[3]), border: hex(surface[4]), button: hex(button[0]), button_hover: hex(button[1]), button_border: hex(button[2]), text: hex(text[0]), dim: hex(text[1]), faint: hex(text[2]), ..Self::light() }.with_accent(hex(accent))
     }
 
     pub fn dark() -> Self {
@@ -56,7 +142,7 @@ impl Palette {
             panel: hex(0x1d2025),
             panel2: hex(0x25292f),
             hover: hex(0x2b3037),
-            selection: hex(0x274b80),
+            selection: hex(0x1f3d6b),
             border: hex(0x32363d),
             button: hex(0x343b46),
             button_hover: hex(0x424b59),
@@ -65,7 +151,7 @@ impl Palette {
             text: hex(0xe6e6e3),
             dim: hex(0xa8a9a3),
             faint: hex(0x7d7e79),
-            accent: hex(0x3987e5),
+            accent: hex(0x2875d3),
             on_accent: Color32::WHITE,
             add_bg: Color32::from_rgba_unmultiplied(25, 158, 112, 40),
             add_word: Color32::from_rgba_unmultiplied(25, 158, 112, 110),
@@ -102,7 +188,7 @@ impl Palette {
             text: hex(0x1a1a18),
             dim: hex(0x52514e),
             faint: hex(0x7b7a75),
-            accent: hex(0x2a78d6),
+            accent: hex(0x2875d3),
             on_accent: Color32::WHITE,
             add_bg: Color32::from_rgba_unmultiplied(27, 175, 122, 40),
             add_word: Color32::from_rgba_unmultiplied(27, 175, 122, 110),
@@ -274,4 +360,63 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
     ctx.set_theme(if p.dark { egui::Theme::Dark } else { egui::Theme::Light });
     ctx.set_style_of(if p.dark { egui::Theme::Dark } else { egui::Theme::Light }, style);
     ctx.set_zoom_factor(scale.clamp(0.6, 3.0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(name: &str, p: &Palette, failures: &mut Vec<String>) {
+        let mut need = |what: &str, a: Color32, b: Color32, min: f32| {
+            let got = contrast(a, b);
+            if got < min {
+                failures.push(format!("{name}: {what} {got:.2} < {min}"));
+            }
+        };
+        need("text on bg", p.text, p.bg, 7.0);
+        need("text on panel", p.text, p.panel, 7.0);
+        need("text on button", p.text, p.button, 4.5);
+        need("text on selection", p.text, p.selection, 4.5);
+        need("text on status bar", p.text, p.status_bg, 4.5);
+        need("dim on panel", p.dim, p.panel, 4.5);
+        need("faint on panel", p.faint, p.panel, 3.0);
+        need("accent text on its button", p.on_accent, p.accent, 4.5);
+        need("accent on panel", p.accent, p.panel, 3.0);
+        need("accent on selection", p.accent, p.selection, 1.7);
+    }
+
+    #[test]
+    fn every_theme_and_accent_stays_readable() {
+        let mut failures = Vec::new();
+        for t in ThemeChoice::ALL {
+            check(t.name(), &Palette::get(t), &mut failures);
+            for (name, _, _) in ACCENTS {
+                check(&format!("{} + {name}", t.name()), &Palette::for_settings(t, name), &mut failures);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn accent_settings() {
+        assert_eq!(accent_color("#102030", true), Some(hex(0x102030)));
+        assert_eq!(accent_color("#10203", true), None);
+        assert_eq!(accent_color("#zzzzzz", true), None);
+        assert_eq!(accent_color("", true), None);
+        assert_eq!(accent_color("No such accent", false), None);
+        assert_ne!(accent_color("Teal", true), accent_color("Teal", false), "tuned for each background");
+        let own = Palette::get(ThemeChoice::Dark);
+        assert_eq!(Palette::for_settings(ThemeChoice::Dark, "nonsense").accent, own.accent);
+        assert_ne!(Palette::for_settings(ThemeChoice::Dark, "Teal").accent, own.accent);
+    }
+
+    #[test]
+    fn themes_are_distinct_and_know_their_family() {
+        let mut seen = std::collections::HashSet::new();
+        for t in ThemeChoice::ALL {
+            assert!(seen.insert(Palette::get(t).bg.to_array()), "{} shares a background", t.name());
+        }
+        let dark = ThemeChoice::ALL.iter().filter(|t| Palette::get(**t).dark).count();
+        assert_eq!((dark, ThemeChoice::ALL.len() - dark), (7, 5));
+    }
 }

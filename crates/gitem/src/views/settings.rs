@@ -12,7 +12,7 @@ use crate::action::{Action, Cx};
 use crate::chrome::icon;
 use crate::forms::FormDialog;
 use crate::task::Task;
-use crate::theme::Palette;
+use crate::theme::{ACCENTS, Palette, accent_color, contrast};
 use crate::widgets::*;
 
 const REVEAL: &str = "None: reveal in file manager";
@@ -221,31 +221,35 @@ fn segmented<T: PartialEq + Clone>(ui: &mut Ui, value: &mut T, options: &[(T, &s
     changed
 }
 
-/// The three themes as small pictures of the app, so you choose by looking.
-fn theme_picker(ui: &mut Ui, value: &mut ThemeChoice, p: &Palette) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 12.0;
-        for (choice, name) in [(ThemeChoice::Dark, "Dark"), (ThemeChoice::Midnight, "Midnight"), (ThemeChoice::Light, "Light")] {
-            let t = Palette::get(choice);
+/// Themes as small pictures of the app, so you choose by looking.
+fn theme_picker(ui: &mut Ui, value: &mut ThemeChoice, accent: &str, dark: bool, p: &Palette) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(12.0, 10.0);
+        for choice in ThemeChoice::ALL {
+            let t = Palette::for_settings(choice, accent);
+            if t.dark != dark {
+                continue;
+            }
+            let name = choice.name();
             let on = *value == choice;
-            let (outer, resp) = ui.allocate_exact_size(vec2(124.0, 96.0), Sense::click());
+            let (outer, resp) = ui.allocate_exact_size(vec2(112.0, 94.0), Sense::click());
             let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
             resp.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, on, format!("{name} theme")));
             if resp.clicked() {
                 *value = choice;
             }
-            let pic = Rect::from_min_size(outer.min, vec2(outer.width(), 74.0));
+            let pic = Rect::from_min_size(outer.min, vec2(outer.width(), 72.0));
             let painter = ui.painter();
             painter.rect_filled(pic, 6.0, t.bg);
             // Rail, toolbar, and a little graph on the panel.
             let rail = Rect::from_min_size(pic.min + vec2(4.0, 11.0), vec2(9.0, pic.height() - 15.0));
-            for (i, c) in [t.series[0], t.series[2], t.series[3]].iter().enumerate() {
+            for (i, c) in [t.accent, t.series[2], t.series[3]].iter().enumerate() {
                 painter.circle_filled(pos2(rail.center().x, rail.top() + 6.0 + i as f32 * 10.0), 2.0, *c);
             }
             let panel = Rect::from_min_max(pos2(rail.right() + 2.0, pic.top() + 11.0), pic.max - vec2(4.0, 4.0));
             painter.rect_filled(panel, 3.0, t.panel);
             painter.circle_filled(pic.min + vec2(9.0, 6.0), 2.0, t.accent);
-            for (i, (lane, width)) in [(t.series[0], 58.0), (t.series[1], 44.0), (t.series[0], 66.0), (t.series[2], 36.0)].iter().enumerate() {
+            for (i, (lane, width)) in [(t.accent, 58.0), (t.series[1], 44.0), (t.accent, 66.0), (t.series[2], 36.0)].iter().enumerate() {
                 let y = panel.top() + 9.0 + i as f32 * 12.0;
                 painter.circle_filled(pos2(panel.left() + 8.0, y), 2.5, *lane);
                 painter.rect_filled(Rect::from_min_size(pos2(panel.left() + 16.0, y - 1.5), vec2(*width, 3.0)), 1.0, if i == 0 { t.text } else { t.dim });
@@ -260,6 +264,42 @@ fn theme_picker(ui: &mut Ui, value: &mut ThemeChoice, p: &Palette) {
                 x = g.right() + 4.0;
             }
             painter.text(pos2(x, text_y), Align2::LEFT_CENTER, name, prop(12.5), label);
+        }
+    });
+}
+
+/// One round accent swatch. Returns true when clicked.
+fn swatch(ui: &mut Ui, color: egui::Color32, name: &str, on: bool, p: &Palette) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, on, name));
+    let c = rect.center();
+    if on || resp.hovered() {
+        ui.painter().circle_stroke(c, 13.5, Stroke::new(if on { 2.0 } else { 1.0 }, if on { p.text } else { p.dim }));
+    }
+    ui.painter().circle_filled(c, 10.5, color);
+    if on {
+        let mark = [egui::Color32::WHITE, egui::Color32::BLACK].into_iter().max_by(|a, b| contrast(*a, color).total_cmp(&contrast(*b, color))).unwrap_or(egui::Color32::WHITE);
+        ui.painter().text(c, Align2::CENTER_CENTER, icon::CHECK, prop(13.0), mark);
+    }
+    resp.on_hover_text(name).clicked()
+}
+
+/// The theme's own accent, every named one, and a custom colour.
+fn accent_picker(ui: &mut Ui, accent: &mut String, theme: ThemeChoice, p: &Palette) {
+    let own = Palette::get(theme).accent;
+    let dark = p.dark;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
+        if swatch(ui, own, "Theme default accent", accent.is_empty(), p) {
+            accent.clear();
+        }
+        ui.add_space(8.0);
+        for (name, _, _) in ACCENTS {
+            let Some(color) = accent_color(name, dark) else { continue };
+            if swatch(ui, color, &format!("{name} accent"), *accent == name, p) {
+                *accent = name.to_string();
+            }
         }
     });
 }
@@ -362,9 +402,17 @@ impl SettingsView {
 
     fn appearance(&mut self, ui: &mut Ui, s: &mut Settings, p: &Palette) {
         group(ui, "Theme", p, |g| {
-            g.ui.add_space(12.0);
-            theme_picker(g.ui, &mut s.theme, p);
-            g.ui.add_space(8.0);
+            g.stacked("Dark", "", |ui| theme_picker(ui, &mut s.theme, &s.accent, true, p));
+            g.stacked("Light", "", |ui| theme_picker(ui, &mut s.theme, &s.accent, false, p));
+        });
+        group(ui, "Accent color", p, |g| {
+            g.stacked("Accent", "Buttons, selections, and highlights. Named colors are tuned for dark and light themes.", |ui| accent_picker(ui, &mut s.accent, s.theme, p));
+            g.row("Custom color", "Used as is in every theme.", |ui| {
+                let mut color = p.accent;
+                if egui::color_picker::color_edit_button_srgba(ui, &mut color, egui::color_picker::Alpha::Opaque).changed() {
+                    s.accent = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+                }
+            });
         });
         group(ui, "Text and size", p, |g| {
             g.row("Interface zoom", "", |ui| {

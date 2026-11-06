@@ -64,6 +64,36 @@ pub enum ThemeChoice {
     Dark,
     Light,
     Midnight,
+    Black,
+    Slate,
+    Forest,
+    Plum,
+    Mocha,
+    Paper,
+    Mist,
+    Sage,
+    Blush,
+}
+
+impl ThemeChoice {
+    pub const ALL: [ThemeChoice; 12] = [Self::Dark, Self::Midnight, Self::Black, Self::Slate, Self::Forest, Self::Plum, Self::Mocha, Self::Light, Self::Paper, Self::Mist, Self::Sage, Self::Blush];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::Midnight => "Midnight",
+            Self::Black => "Black",
+            Self::Slate => "Slate",
+            Self::Forest => "Forest",
+            Self::Plum => "Plum",
+            Self::Mocha => "Mocha",
+            Self::Paper => "Paper",
+            Self::Mist => "Mist",
+            Self::Sage => "Sage",
+            Self::Blush => "Blush",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +101,8 @@ pub enum ThemeChoice {
 pub struct Settings {
     pub git_path: String,
     pub theme: ThemeChoice,
+    /// A named accent, "#rrggbb", or empty for the theme's own.
+    pub accent: String,
     pub ui_scale: f32,
     pub editor_font_size: f32,
     pub recent_repos: Vec<String>,
@@ -139,6 +171,7 @@ impl Default for Settings {
         Self {
             git_path: String::new(),
             theme: ThemeChoice::Dark,
+            accent: String::new(),
             ui_scale: 1.0,
             editor_font_size: 13.0,
             recent_repos: Vec::new(),

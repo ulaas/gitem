@@ -209,7 +209,7 @@ fn switches_theme_without_trouble() {
     sample_history(&f);
     let mut h = harness(&f);
     settle(&mut h);
-    for t in [gitem_core::settings::ThemeChoice::Light, gitem_core::settings::ThemeChoice::Midnight, gitem_core::settings::ThemeChoice::Dark] {
+    for t in gitem_core::settings::ThemeChoice::ALL {
         h.state_mut().settings.theme = t;
         for _ in 0..4 {
             h.step();
@@ -1628,5 +1628,26 @@ fn the_palette_footer_switches_modes() {
     click(&mut h, "@ branches");
     h.step();
     pump_for_label(&mut h, "Stage All");
+    no_errors(&h);
+}
+
+#[test]
+fn accents_and_new_themes_can_be_chosen_and_saved() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Settings(Box::default()));
+    pump_for_label(&mut h, "Teal accent");
+    click(&mut h, "Teal accent");
+    h.step();
+    assert_eq!(h.state().settings.accent, "Teal");
+    click(&mut h, "Paper theme");
+    h.step();
+    assert_eq!(h.state().settings.theme, gitem_core::settings::ThemeChoice::Paper);
+    assert_eq!(h.state().settings.accent, "Teal", "the accent stays through a theme change");
+    click(&mut h, "Theme default accent");
+    h.step();
+    assert!(h.state().settings.accent.is_empty());
     no_errors(&h);
 }

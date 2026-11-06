@@ -217,7 +217,7 @@ impl ToolsView {
         }
         let list = self.clean_list.get().cloned().unwrap_or_default();
         ui.label(RichText::new(format!("{} item(s) would be deleted", list.len())).color(p.dim));
-        let b = egui::Button::new(RichText::new("Delete these…").color(p.on_accent)).fill(p.danger);
+        let b = egui::Button::new(RichText::new("Delete these…").color(egui::Color32::WHITE)).fill(p.danger);
         if ui.add_enabled(!list.is_empty(), b).clicked() {
             cx.confirm("Clean working tree", &format!("Permanently delete {} untracked item(s)? This cannot be undone.", list.len()), "Delete", ops::clean(self.clean_dirs, self.clean_ignored));
         }

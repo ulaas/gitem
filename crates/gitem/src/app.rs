@@ -290,7 +290,7 @@ pub struct GitemApp {
     palette: Option<PaletteState>,
     global_queue: VecDeque<(GitOp, Option<PathBuf>)>,
     global_running: Option<Running>,
-    applied: Option<(gitem_core::settings::ThemeChoice, u32)>,
+    applied: Option<(gitem_core::settings::ThemeChoice, u32, String)>,
     open_path: String,
     settings_dirty: bool,
     pub shot: Option<Shot>,
@@ -335,7 +335,7 @@ impl GitemApp {
     pub fn with_settings(ctx: &egui::Context, settings: Settings) -> Self {
         theme::install_fonts(ctx);
         let git = GitExe::discover((!settings.git_path.is_empty()).then(|| Path::new(&settings.git_path))).map_err(|e| e.to_string());
-        let pal = Palette::get(settings.theme);
+        let pal = Palette::for_settings(settings.theme, &settings.accent);
         Self {
             git,
             settings,
@@ -415,10 +415,10 @@ impl GitemApp {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        let want = (self.settings.theme, (self.settings.ui_scale * 100.0) as u32);
-        if self.applied != Some(want) {
+        let want = (self.settings.theme, (self.settings.ui_scale * 100.0) as u32, self.settings.accent.clone());
+        if self.applied.as_ref() != Some(&want) {
             self.applied = Some(want);
-            self.pal = Palette::get(self.settings.theme);
+            self.pal = Palette::for_settings(self.settings.theme, &self.settings.accent);
             theme::apply(ctx, &self.pal, self.settings.ui_scale);
         }
         crate::i18n::set_language(&self.settings.language);
@@ -971,7 +971,7 @@ impl GitemApp {
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    go = ui.add(egui::Button::new(RichText::new(c.label.as_str()).color(p.on_accent)).fill(p.danger)).clicked();
+                    go = ui.add(egui::Button::new(RichText::new(c.label.as_str()).color(Color32::WHITE)).fill(p.danger)).clicked();
                     close = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
                 });
             });

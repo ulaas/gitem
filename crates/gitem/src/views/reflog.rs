@@ -170,10 +170,10 @@ impl BisectView {
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(RichText::new("✔ Good").color(p.on_accent)).fill(p.good)).clicked() {
+            if ui.add(egui::Button::new(RichText::new("✔ Good").color(egui::Color32::WHITE)).fill(p.good)).clicked() {
                 cx.run(ops::bisect_mark("good"));
             }
-            if ui.add(egui::Button::new(RichText::new("✖ Bad").color(p.on_accent)).fill(p.danger)).clicked() {
+            if ui.add(egui::Button::new(RichText::new("✖ Bad").color(egui::Color32::WHITE)).fill(p.danger)).clicked() {
                 cx.run(ops::bisect_mark("bad"));
             }
             if ui.button("Skip").clicked() {

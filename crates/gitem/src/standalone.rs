@@ -57,7 +57,7 @@ fn repo_here() -> Option<Repo> {
 impl HelperApp {
     pub fn new(mode: Mode) -> Self {
         let settings = Settings::load();
-        let pal = Palette::get(settings.theme);
+        let pal = Palette::for_settings(settings.theme, &settings.accent);
         let shot = std::env::var_os("GITEM_SHOT").map(|p| (PathBuf::from(p), std::time::Instant::now(), false));
         Self { mode, repo: repo_here(), data: RepoData::default(), settings, pal, themed: false, error: None, result: None, shot, accept: std::env::var("GITEM_TEST_ACCEPT").ok().map(|v| (v, 0)), #[cfg(windows)] styled_window: false }
     }

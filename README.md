@@ -55,6 +55,7 @@ gitem looks for git in this order:
 | Agents | A board of Claude Code and Codex sessions in this repository's worktrees, with resume, archive, and a file activity treemap; start a session in any worktree |
 | Review | Sessions with a file checklist, comment threads, AI findings, a reading-order suggestion, and handing open notes to an agent |
 | Auto-rebase | Rebase with AI conflict resolution that pauses when the model is unsure, with one-click undo |
+| Themes | Seven dark and five light themes, with nineteen named accent colors or any custom color; named accents are tuned for dark and light, and tests check their contrast in every theme |
 | Command palette | `Ctrl+P`: commands, branches, and files in one search, with recent commands first. Start with `>` for commands, `@` for branches, `/` for files, or `:` for commits |
 | Window | Every window, helpers included, has the app's own titlebar, and the main one has an icon rail of views with tooltips, so it looks the same on every platform; an About box shows the commit a build came from (also `gitem --version`) |
 | Modes | Zen mode (`Ctrl+Shift+Z`) hides the side panels; dockable tabs replace detachable views |

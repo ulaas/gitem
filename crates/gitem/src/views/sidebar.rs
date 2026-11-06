@@ -138,10 +138,10 @@ impl Sidebar {
         let mut right = rect.right() - 4.0;
         // Incoming comes last, at the edge, so it's the easiest to spot.
         if b.behind > 0 {
-            right = count_pill(ui, right, rect.center().y, &format!("↓{}", b.behind), p.incoming(), &p);
+            right = count_pill(ui, right, rect.center().y, &format!("↓{}", b.behind), p.incoming());
         }
         if b.ahead > 0 {
-            right = count_pill(ui, right, rect.center().y, &format!("↑{}", b.ahead), p.outgoing(), &p);
+            right = count_pill(ui, right, rect.center().y, &format!("↑{}", b.ahead), p.outgoing());
         }
         if b.upstream_gone {
             let g = ui.painter().layout_no_wrap("gone".to_string(), prop(10.5), p.warn);
@@ -432,12 +432,12 @@ impl Dir {
 }
 
 /// A small coloured count, right-aligned at `right`. Returns the space left of it.
-fn count_pill(ui: &Ui, right: f32, y: f32, text: &str, color: egui::Color32, p: &crate::theme::Palette) -> f32 {
-    let g = ui.painter().layout_no_wrap(text.to_string(), mono(10.5), p.on_accent);
+fn count_pill(ui: &Ui, right: f32, y: f32, text: &str, color: egui::Color32) -> f32 {
+    let g = ui.painter().layout_no_wrap(text.to_string(), mono(10.5), egui::Color32::WHITE);
     let size = vec2(g.size().x + 8.0, 15.0);
     let r = egui::Rect::from_min_size(pos2(right - size.x, y - size.y / 2.0), size);
     ui.painter().rect_filled(r, 7.0, color);
-    ui.painter().galley(pos2(r.left() + 4.0, y - g.size().y / 2.0), g, p.on_accent);
+    ui.painter().galley(pos2(r.left() + 4.0, y - g.size().y / 2.0), g, egui::Color32::WHITE);
     r.left() - 3.0
 }
 
