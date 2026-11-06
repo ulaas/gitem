@@ -119,6 +119,19 @@ pub fn unstage_all(has_head: bool) -> GitOp {
     }
 }
 
+/// Unstage named files while a merge, cherry-pick or rebase is going. `reset` would end
+/// the operation, and `restore --staged -- .` would turn its conflicts into plain edits,
+/// so `paths` must leave out conflicted files. The list goes over stdin, since a large
+/// merge can hold more names than fit on a command line.
+pub fn unstage_during_op(paths: &[String]) -> GitOp {
+    let mut names = Vec::new();
+    for p in paths {
+        names.extend_from_slice(p.as_bytes());
+        names.push(0);
+    }
+    GitOp::new(format!("Unstage {} file(s)", paths.len())).step(&["restore", "--staged", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(names).literal()
+}
+
 /// Discard worktree changes of tracked files.
 pub fn discard_paths(paths: &[String]) -> GitOp {
     let mut a = v(&["restore", "--worktree", "--"]);

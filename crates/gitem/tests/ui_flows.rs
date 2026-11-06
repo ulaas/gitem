@@ -2024,6 +2024,71 @@ fn local_and_remote_branches_open_to_their_latest_commits() {
     pump_for_label(&mut h, "Load 20 more");
     no_errors(&h);
 }
+fn merge_with_staged_files(f: &Fx) {
+    f.write("auto.txt", "base\n");
+    f.write("c.txt", "top\nmiddle\nbottom\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.write("auto.txt", "from side\n");
+    f.write("c.txt", "TOP-SIDE\nmiddle\nbottom\n");
+    f.commit("side change");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "TOP-MAIN\nmiddle\nbottom\n");
+    f.commit("main change");
+    assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok(), "merge should conflict");
+}
+
+#[test]
+fn unstage_all_during_a_merge_keeps_the_merge() {
+    let f = Fx::new();
+    merge_with_staged_files(&f);
+    assert!(f.git(&["status", "--short"]).contains("M  auto.txt"));
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    click(&mut h, "Unstage all");
+    wait_for(&mut h, "the file to be unstaged", || !f.git(&["status", "--short"]).contains("M  auto.txt"));
+    wait_until_quiet(&mut h);
+    assert!(f.root.join(".git/MERGE_HEAD").exists(), "the merge was cancelled");
+    assert!(f.git(&["status", "--short"]).contains("UU c.txt"), "the conflict was lost: {}", f.git(&["status", "--short"]));
+    no_errors(&h);
+}
+
+#[test]
+fn the_composer_refuses_to_commit_during_a_merge() {
+    let f = Fx::new();
+    merge_with_staged_files(&f);
+    let before = f.git(&["rev-parse", "HEAD"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Composer(Box::default()));
+    click(&mut h, "New commit");
+    let msg = h.query_all_by_role(egui::accesskit::Role::MultilineTextInput).last().unwrap().rect();
+    h.event(egui::Event::PointerMoved(msg.center()));
+    h.event(egui::Event::PointerButton { pos: msg.center(), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: msg.center(), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.step();
+    h.event(egui::Event::Text("one commit".into()));
+    h.step();
+    h.query_all_by_label("Add ▾").next().unwrap().click();
+    h.step();
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Commit 1").click();
+    h.step();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Create 1 commit(s)");
+    h.get_by_label("Create 1 commit(s)").click();
+    for _ in 0..3 {
+        h.step();
+    }
+    assert_no_op_started(&mut h, "the composer started git during a merge");
+    assert!(f.root.join(".git/MERGE_HEAD").exists(), "the merge was cancelled");
+    assert_eq!(f.git(&["rev-parse", "HEAD"]), before);
+    assert!(h.query_by_label_contains("Finish or abort it first").is_some(), "the reason isn't on screen");
+}
+
 #[test]
 fn a_40_byte_branch_name_with_a_multibyte_character_does_not_panic() {
     let f = Fx::new();

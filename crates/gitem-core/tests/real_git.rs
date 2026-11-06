@@ -1147,6 +1147,60 @@ fn tests_never_see_the_machines_git_config() {
     let scratch = std::env::temp_dir();
     assert!(gitem_core::settings::config_dir().starts_with(scratch), "settings are in the scratch folder");
 }
+
+/// A merge with one conflict (`c.txt`), and an auto-merged and a new file staged.
+fn merge_with_a_conflict(f: &Fx) {
+    f.write("c.txt", "base\n");
+    f.write("auto.txt", "base\n");
+    f.commit_all("base");
+    f.run(ops::branch_create("side", None, true));
+    f.write("c.txt", "side\n");
+    f.write("auto.txt", "side\n");
+    f.write("new.txt", "new\n");
+    f.commit_all("on side");
+    f.run(ops::checkout("main"));
+    f.write("c.txt", "main\n");
+    f.commit_all("on main");
+    assert!(!f.repo.git.run_raw(Some(&f.repo.root), &["merge", "side"]).unwrap().ok(), "the merge should conflict");
+}
+
+fn staged_paths(f: &Fx) -> Vec<String> {
+    f.repo.status().unwrap().entries.iter().filter(|e| e.is_staged()).map(|e| e.path.clone()).collect()
+}
+
+#[test]
+fn unstaging_during_a_merge_keeps_the_merge_and_its_conflicts() {
+    let f = Fx::new();
+    merge_with_a_conflict(&f);
+    let staged = staged_paths(&f);
+    assert_eq!(staged, ["auto.txt", "new.txt"]);
+    f.run(ops::unstage_during_op(&staged));
+    let st = f.repo.status().unwrap();
+    assert_eq!(st.op, RepoOp::Merge);
+    assert!(f.repo.git_dir.join("MERGE_HEAD").exists(), "the merge is still going");
+    assert_eq!(st.conflicts().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["c.txt"], "the conflict is still a conflict");
+    assert!(staged_paths(&f).is_empty());
+    assert_eq!(f.read("auto.txt"), "side\n", "only the index changes");
+}
+
+#[test]
+fn unstaging_during_a_cherry_pick_keeps_it_going() {
+    let f = Fx::new();
+    f.write("c.txt", "base\n");
+    f.commit_all("base");
+    f.run(ops::branch_create("side", None, true));
+    f.write("c.txt", "side\n");
+    f.write("other.txt", "other\n");
+    let picked = f.commit_all("on side");
+    f.run(ops::checkout("main"));
+    f.write("c.txt", "main\n");
+    f.commit_all("on main");
+    assert!(!f.repo.git.run_raw(Some(&f.repo.root), &["cherry-pick", &picked]).unwrap().ok());
+    f.run(ops::unstage_during_op(&staged_paths(&f)));
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::CherryPick);
+    assert!(f.repo.git_dir.join("CHERRY_PICK_HEAD").exists());
+}
+
 #[test]
 fn tokens_in_urls_stay_out_of_titles_previews_and_the_console() {
     let f = Fx::new();

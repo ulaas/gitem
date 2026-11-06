@@ -176,7 +176,13 @@ impl ChangesView {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !staged.is_empty() {
                         if ui.small_button("Unstage all").clicked() {
-                            cx.run(ops::unstage_all(!st.head_sha.is_empty()));
+                            if st.op == RepoOp::None {
+                                cx.run(ops::unstage_all(!st.head_sha.is_empty()));
+                            } else {
+                                // `reset` would cancel the operation. This also leaves conflicts as they are.
+                                let paths: Vec<String> = st.entries.iter().filter(|e| e.is_staged()).map(|e| e.path.clone()).collect();
+                                cx.run(ops::unstage_during_op(&paths));
+                            }
                         }
                         if ui.small_button("View all").clicked() {
                             cx.diff(DiffSource::Staged, None);
@@ -364,6 +370,9 @@ impl ChangesView {
                 "Amend commit".to_string()
             } else if staged_n > 0 {
                 format!("Commit {staged_n} file(s)")
+            } else if st.op == RepoOp::Merge {
+                // Finishing a merge stages nothing by itself, whatever is left unstaged.
+                "Finish merge".to_string()
             } else {
                 format!("Stage all and commit {unstaged_n} file(s)")
             };

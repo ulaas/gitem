@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use egui::{RichText, Ui};
 use gitem_core::ai::{self, ComposedCommit};
+use gitem_core::model::RepoOp;
 use gitem_core::repo::DiffSource;
 use gitem_core::{cred, ops};
 
@@ -73,10 +74,13 @@ impl ComposerView {
                 ui.add(egui::Spinner::new().size(14.0));
             }
             ui.separator();
-            let ready = !self.groups.is_empty() && self.groups.iter().all(|g| !g.message.trim().is_empty() && !g.files.is_empty());
+            // Its clean start would cancel a merge or cherry-pick and clear a rebase's conflicts,
+            // and its first commit would end the operation early.
+            let mid_op = st.op != RepoOp::None;
+            let ready = !mid_op && !self.groups.is_empty() && self.groups.iter().all(|g| !g.message.trim().is_empty() && !g.files.is_empty());
             let staged_exists = st.entries.iter().any(|e| e.is_staged());
             let b = egui::Button::new(RichText::new(format!("Create {} commit(s)", self.groups.len())).color(if ready { p.on_accent } else { p.faint })).fill(if ready { p.accent } else { p.panel2 });
-            if ui.add_enabled(ready, b).on_disabled_hover_text("Every commit needs a message and at least one file").clicked() {
+            if ui.add_enabled(ready, b).on_disabled_hover_text(if mid_op { "Finish or abort the operation in progress first" } else { "Every commit needs a message and at least one file" }).clicked() {
                 // Start from a clean index so each commit contains only its group.
                 if staged_exists {
                     cx.run(ops::unstage_all(!st.head_sha.is_empty()));
@@ -86,6 +90,9 @@ impl ComposerView {
                     cx.run(ops::commit(&ops::CommitOpts { message: g.message.clone(), ..Default::default() }));
                 }
                 self.groups.clear();
+            }
+            if mid_op {
+                ui.colored_label(p.warn, format!("{} is in progress. Finish or abort it first.", st.op.label()));
             }
         });
         ui.separator();
