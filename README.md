@@ -117,7 +117,7 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 | `Ctrl+Shift+H` | Commit graph |
 | `Ctrl+B` | Toggle sidebar |
 | `F5` | Refresh |
-| `Ctrl+Enter` | Commit, or submit a form |
+| `Ctrl+Enter` | Submit the open form. With none open, or from the commit box, commit |
 | `↑` `↓` or `J` `K` | Move through the graph |
 | `Alt+↑` `Alt+↓` | Previous and next change in a diff; move a commit in the rebase editor |
 | `P` `R` `E` `S` `F` `D` | Set the rebase action |
@@ -129,7 +129,12 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 
 ## Safety
 
-- Destructive commands ask first and show the exact git command. You can turn this off in Settings.
+- Destructive commands ask first and show the exact git command, including a plain force push from the push form. You can turn this off in Settings. Deleting a stored secret asks too, and a revealed secret hides itself after 30 seconds or when you leave its page.
+- Unstaging during a merge, cherry-pick or rebase keeps the operation and its conflicts. The Commit Composer waits until the operation is finished.
+- A command gitem starts in a terminal, such as an agent or a worktree task, comes from `PATH` on Windows, never from the repository folder. For a tool in the repository, give its path in the setting: `.\gradlew test`. "Open Terminal" itself is unchanged.
+- Passwords and tokens inside remote URLs are masked in titles, the Console and tooltips. Git still gets the real URL, and Copy URL copies it.
+- Very long lines are cut on screen at 5,000 bytes, with a note saying so, because drawing a whole line of a few megabytes would crash the GPU buffer. Staging, saving, copying and Find still use the whole line.
+- If gitem crashes it writes `crash-*.log` to its config folder, and offers it on the next launch. It holds the panic message, a backtrace and the last git commands. Nothing is sent anywhere.
 - Repository content is treated as untrusted. Background reads disable `core.fsmonitor`, so opening a repository can't run a program it configures. Links never pass through a shell, and repo files are revealed rather than launched unless you've configured an editor.
 - Secrets go to the OS vault on Windows. On other platforms they're kept in a private file (mode 0600), and the app says so.
 - `GITEM_CONFIG_DIR` moves everything gitem keeps into that folder: settings, window state, and secrets. On Windows that means a plain file instead of the OS vault, so use it for testing, not for real tokens.
