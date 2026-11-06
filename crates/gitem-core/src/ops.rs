@@ -974,9 +974,10 @@ pub fn publish_repository(name: &str, url: &str, branch: &str) -> GitOp {
     GitOp::new(format!("Publish to {name}")).step(&["remote", "add", "--", name, url]).step(&["push", "--progress", "--set-upstream", "--", name, branch]).net()
 }
 
-/// Folder comparison in the configured difftool.
+/// Folder comparison in the configured difftool. Real copies, since making a symlink
+/// fails on Windows without the right privilege, even where `core.symlinks` is on.
 pub fn difftool_dir(a: &str, b: &str) -> GitOp {
-    GitOp::new(format!("Open directory compare of {a} and {b}")).step(&["difftool", "--dir-diff", "--no-prompt", a, b])
+    GitOp::new(format!("Open directory compare of {a} and {b}")).step(&["difftool", "--dir-diff", "--no-symlinks", "--no-prompt", a, b])
 }
 
 #[cfg(test)]

@@ -2820,8 +2820,9 @@ fn two_hunks(f: &Fx) -> (String, String) {
     (base, edited)
 }
 
+/// Empty while git is replacing the file, which a test polling it can catch on Windows.
 fn on_disk(f: &Fx) -> String {
-    std::fs::read_to_string(f.root.join("f.txt")).unwrap()
+    std::fs::read_to_string(f.root.join("f.txt")).unwrap_or_default()
 }
 
 fn in_index(f: &Fx) -> String {
