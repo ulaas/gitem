@@ -13,6 +13,7 @@ pub mod credentials;
 pub mod diffview;
 pub mod fileview;
 pub mod graph;
+pub mod graphcols;
 pub mod health;
 pub mod history;
 pub mod home;

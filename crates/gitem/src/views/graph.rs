@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use egui::epaint::CubicBezierShape;
-use egui::{Align2, Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
+use egui::{Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
 use gitem_core::graph::{self, GraphRow};
 use gitem_core::model::*;
 use gitem_core::ops;
@@ -14,6 +14,7 @@ use crate::forms;
 use crate::menus;
 use crate::task::Task;
 use crate::views::Tab;
+use crate::views::graphcols::Columns;
 use crate::widgets::*;
 
 const ROW_H: f32 = 24.0;
@@ -55,10 +56,6 @@ pub struct GraphView {
     match_list: Vec<usize>,
     match_pos: usize,
     filter_to_matches: bool,
-    show_author: bool,
-    show_date: bool,
-    show_sha: bool,
-    show_refs: bool,
     wip: bool,
     match_all: bool,
     match_case: bool,
@@ -74,13 +71,12 @@ pub struct GraphView {
     fold_request: std::cell::Cell<Option<Option<u16>>>,
     minimap_lines: bool,
     show_minimap: bool,
-    columns: Vec<String>,
+    pub cols: Columns,
     layout_applied: bool,
     worktree_counts: Task<HashMap<String, usize>>,
     counts_gen: Option<u64>,
 }
 
-const DEFAULT_COLUMNS: [&str; 6] = ["refs", "graph", "message", "author", "date", "sha"];
 const FOLDED_W: f32 = 3.0;
 
 impl Default for GraphView {
@@ -99,10 +95,6 @@ impl Default for GraphView {
             match_list: Vec::new(),
             match_pos: 0,
             filter_to_matches: false,
-            show_author: true,
-            show_date: true,
-            show_sha: true,
-            show_refs: true,
             wip: false,
             match_all: false,
             match_case: false,
@@ -116,7 +108,7 @@ impl Default for GraphView {
             fold_request: std::cell::Cell::new(None),
             minimap_lines: false,
             show_minimap: true,
-            columns: DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect(),
+            cols: Columns::default(),
             layout_applied: false,
             worktree_counts: Task::default(),
             counts_gen: None,
@@ -246,7 +238,8 @@ impl GraphView {
     fn toolbar(&mut self, ui: &mut Ui, cx: &mut Cx) -> bool {
         let p = cx.pal.clone();
         let mut changed = false;
-        ui.horizontal(|ui| {
+        // Wraps, or a narrow panel would be stretched and clip the rightmost columns.
+        ui.horizontal_wrapped(|ui| {
             let r = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search: message, @me, @:author, committer:, file:, change:, #:sha").desired_width(280.0));
             if std::mem::take(&mut self.focus_search) {
                 r.request_focus();
@@ -337,43 +330,8 @@ impl GraphView {
                 chip(ui, &format!("only {s}"), p.accent);
             }
             ui.menu_button("Columns ▾", |ui| {
-                ui.checkbox(&mut self.show_refs, "Branch / tag");
-                ui.checkbox(&mut self.show_author, "Author");
-                ui.checkbox(&mut self.show_date, "Date");
-                ui.checkbox(&mut self.show_sha, "SHA");
-                let mut changes = cx.settings.graph_changes_column;
-                if ui.checkbox(&mut changes, "Changes").changed() {
-                    cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.graph_changes_column = changes)));
-                }
-                ui.separator();
-                ui.label("Order");
-                for i in 0..self.columns.len() {
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).clicked() {
-                            self.columns.swap(i, i - 1);
-                        }
-                        if ui.add_enabled(i + 1 < self.columns.len(), egui::Button::new("▼").small()).clicked() {
-                            self.columns.swap(i, i + 1);
-                        }
-                        ui.label(self.columns[i].as_str());
-                    });
-                }
-                ui.separator();
-                if ui.button("Save as default layout").clicked() {
-                    let hidden: Vec<String> = [("refs", self.show_refs), ("author", self.show_author), ("date", self.show_date), ("sha", self.show_sha)].iter().filter(|x| !x.1).map(|x| x.0.to_string()).collect();
-                    let l = gitem_core::settings::GraphLayout { columns: self.columns.clone(), hidden };
-                    cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.graph_layout = Some(l))));
-                    ui.close();
-                }
-                if ui.button("Apply saved layout").clicked() {
-                    self.layout_applied = false;
-                    ui.close();
-                }
-                if ui.button("Reset layout").clicked() {
-                    self.columns = DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect();
-                    (self.show_refs, self.show_author, self.show_date, self.show_sha) = (true, true, true, true);
-                    ui.close();
-                }
+                self.cols.changes = cx.settings.graph_changes_column;
+                self.cols.menu(ui, cx);
                 ui.separator();
                 ui.checkbox(&mut self.show_minimap, "Minimap");
                 ui.checkbox(&mut self.minimap_lines, "Minimap shows lines changed");
@@ -425,11 +383,7 @@ impl GraphView {
         if !self.layout_applied {
             self.layout_applied = true;
             if let Some(l) = &cx.settings.graph_layout {
-                self.columns = l.columns.clone();
-                self.show_refs = !l.hidden.iter().any(|h| h == "refs");
-                self.show_author = !l.hidden.iter().any(|h| h == "author");
-                self.show_date = !l.hidden.iter().any(|h| h == "date");
-                self.show_sha = !l.hidden.iter().any(|h| h == "sha");
+                self.cols.apply(l);
             }
         }
         match self.fold_request.take() {
@@ -573,10 +527,9 @@ impl GraphView {
 
     fn table(&mut self, ui: &mut Ui, cx: &mut Cx, g: &Graph) {
         let p = cx.pal.clone();
-        let total_w = ui.available_width();
+        let total_w = ui.available_width().min(ui.clip_rect().right() - ui.cursor().left());
         let minimap_w = if self.show_minimap { 14.0 } else { 0.0 };
         let w = total_w - minimap_w;
-        let refs_w = if self.show_refs { 190.0 } else { 0.0 };
         // Folded lanes stay visible as thin lines, so history remains connected.
         let mut lane_offsets: Vec<f32> = Vec::with_capacity(g.max_width as usize + 1);
         let mut lane_acc = 10.0;
@@ -584,65 +537,17 @@ impl GraphView {
             lane_offsets.push(lane_acc);
             lane_acc += if self.folded.contains(&c) { FOLDED_W } else { LANE_W };
         }
-        let graph_w = lane_acc.clamp(60.0, 260.0);
         let show_changes = cx.settings.graph_changes_column;
-        let changes_w = if show_changes { 90.0 } else { 0.0 };
-        let author_w = if self.show_author { 130.0 } else { 0.0 } + changes_w;
-        let date_w = if self.show_date { 100.0 } else { 0.0 };
-        let sha_w = if self.show_sha { 66.0 } else { 0.0 };
-        let msg_w = (w - refs_w - graph_w - author_w - date_w - sha_w).max(120.0);
-        let (mut x_refs, mut x_graph, mut x_msg, mut x_author, mut x_date, mut x_sha) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let mut x_acc = 0.0;
-        for col in &self.columns {
-            match col.as_str() {
-                "refs" => {
-                    x_refs = x_acc;
-                    x_acc += refs_w;
-                }
-                "graph" => {
-                    x_graph = x_acc;
-                    x_acc += graph_w;
-                }
-                "message" => {
-                    x_msg = x_acc;
-                    x_acc += msg_w;
-                }
-                "author" => {
-                    x_author = x_acc;
-                    x_acc += author_w;
-                }
-                "date" => {
-                    x_date = x_acc;
-                    x_acc += date_w;
-                }
-                "sha" => {
-                    x_sha = x_acc;
-                    x_acc += sha_w;
-                }
-                _ => {}
-            }
-        }
+        self.cols.changes = show_changes;
+        let cols = self.cols.layout(w, lane_acc.clamp(60.0, 260.0));
+        let at = |key: &str| cols.iter().find(|c| c.key == key).map_or((0.0, 0.0), |c| (c.x, c.w));
+        let ((x_refs, refs_w), (x_graph, graph_w), (x_msg, msg_w)) = (at("refs"), at("graph"), at("message"));
+        let ((x_changes, changes_w), (x_author, author_w), (x_date, date_w), (x_sha, sha_w)) = (at("changes"), at("author"), at("date"), at("sha"));
+        let (show_refs, show_author, show_date, show_sha) = (refs_w > 0.0, author_w > 0.0, date_w > 0.0, sha_w > 0.0);
 
-        // Header
-        let (hdr, _) = ui.allocate_exact_size(vec2(total_w, 20.0), Sense::hover());
+        let (hdr, _) = ui.allocate_exact_size(vec2(total_w, 22.0), Sense::hover());
         ui.painter().rect_filled(hdr, 0.0, p.panel2);
-        let htext = |ui: &Ui, x: f32, t: &str| {
-            ui.painter().text(pos2(hdr.left() + x + 6.0, hdr.center().y), Align2::LEFT_CENTER, t, prop(11.0), p.dim);
-        };
-        if self.show_refs {
-            htext(ui, x_refs, "BRANCH / TAG");
-        }
-        htext(ui, x_graph, "GRAPH");
-        htext(ui, x_msg, "COMMIT MESSAGE");
-        if self.show_author {
-            htext(ui, x_author, if show_changes { "CHANGES" } else { "AUTHOR" });
-        }
-        if self.show_date {
-            htext(ui, x_date, "DATE");
-        }
-        if self.show_sha {
-            htext(ui, x_sha, "SHA");
-        }
+        self.cols.header(ui, hdr, &cols, &p, cx);
 
         // Row order: all commits, or only matches when filtering.
         let visible: Vec<usize> = if self.filter_to_matches && self.matches.get().is_some() { self.match_list.clone() } else { (0..g.commits.len()).collect() };
@@ -717,7 +622,7 @@ impl GraphView {
                     }
 
                     // Ref badges, draggable onto other rows.
-                    if self.show_refs && !c.refs.is_empty() {
+                    if show_refs && !c.refs.is_empty() {
                         let clip = Rect::from_min_size(pos2(rect.left() + x_refs, rect.top()), vec2(refs_w - 4.0, ROW_H));
                         let mut x = clip.left() + 4.0;
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(clip));
@@ -757,26 +662,26 @@ impl GraphView {
                         p.text
                     };
                     if let Some((a, d)) = show_changes.then(|| self.stats.get().and_then(|s| s.get(&c.sha).copied())).flatten() {
-                        let cr = Rect::from_min_size(pos2(rect.left() + x_author + 6.0, rect.top()), vec2(changes_w - 8.0, ROW_H));
+                        let cr = Rect::from_min_size(pos2(rect.left() + x_changes + 6.0, rect.top()), vec2(changes_w - 8.0, ROW_H));
                         paint_text(ui, cr, &format!("+{a}"), mono(11.0), p.add_fg);
-                        paint_text(ui, Rect::from_min_size(cr.min + vec2(42.0, 0.0), vec2(40.0, ROW_H)), &format!("-{d}"), mono(11.0), p.del_fg);
+                        paint_text(ui, Rect::from_min_size(cr.min + vec2(42.0, 0.0), vec2((changes_w - 50.0).max(0.0), ROW_H)), &format!("-{d}"), mono(11.0), p.del_fg);
                     }
                     let mr = Rect::from_min_size(pos2(rect.left() + x_msg + 6.0, rect.top()), vec2(msg_w - 10.0, ROW_H));
                     paint_text(ui, mr, &c.subject, prop(13.0), text_col);
                     if !is_wip {
-                        if self.show_author {
+                        if show_author {
                             let cy = rect.center().y;
-                            paint_avatar(ui, pos2(rect.left() + x_author + changes_w + 15.0, cy), 8.0, &c.author_name, &c.author_email, &p, cx.settings.gravatar);
-                            paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_author + changes_w + 27.0, rect.top()), vec2(author_w - changes_w - 30.0, ROW_H)), &c.author_name, prop(12.0), p.dim);
+                            paint_avatar(ui, pos2(rect.left() + x_author + 15.0, cy), 8.0, &c.author_name, &c.author_email, &p, cx.settings.gravatar);
+                            paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_author + 27.0, rect.top()), vec2((author_w - 30.0).max(0.0), ROW_H)), &c.author_name, prop(12.0), p.dim);
                         }
-                        if self.show_date {
+                        if show_date {
                             let t = time_label(c.commit_time, cx.settings.date_relative);
                             paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_date + 6.0, rect.top()), vec2(date_w - 8.0, ROW_H)), &t, prop(12.0), p.dim);
                         }
-                        if self.show_sha {
+                        if show_sha {
                             paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_sha + 6.0, rect.top()), vec2(sha_w - 8.0, ROW_H)), c.short(), mono(11.5), p.faint);
                         }
-                    } else if let Some(s) = cx.status() {
+                    } else if let Some(s) = cx.status().filter(|_| show_author) {
                         paint_text(ui, Rect::from_min_size(pos2(rect.left() + x_author + 6.0, rect.top()), vec2(author_w - 8.0, ROW_H)), &format!("{} file(s)", s.entries.len()), prop(12.0), p.dim);
                     }
 

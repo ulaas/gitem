@@ -1252,3 +1252,93 @@ fn toolbar_icons_have_names() {
         pump_for_label(&mut h, name);
     }
 }
+
+fn graph_columns<'a>(h: &'a Harness<GitemApp>) -> &'a gitem::views::graphcols::Columns {
+    h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Graph(g) = t { Some(&g.cols) } else { None }).expect("a graph tab")
+}
+
+fn pointer_drag(h: &mut Harness<GitemApp>, from: egui::Pos2, to: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(from));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    for i in 1..=6 {
+        h.event(egui::Event::PointerMoved(from + (to - from) * (i as f32 / 6.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.step();
+    h.step();
+}
+
+#[test]
+fn graph_columns_resize_and_move_by_dragging_and_are_remembered() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    pump_for_label(&mut h, "Resize Branch / tag column");
+
+    // The divider next to the message resizes what's past it.
+    let c = h.get_by_label("Resize Branch / tag column").rect().center();
+    pointer_drag(&mut h, c, c + vec2(60.0, 0.0));
+    assert_eq!(graph_columns(&h).widths["refs"].round(), 250.0);
+
+    // Dragging a header moves the column.
+    let sha = h.get_by_label("SHA column").rect().center();
+    let refs = h.get_by_label("Branch / tag column").rect();
+    pointer_drag(&mut h, sha, refs.left_center() + vec2(4.0, 0.0));
+    assert_eq!(graph_columns(&h).order[0], "sha");
+
+    // Both are saved, for the next graph opened.
+    let saved = h.state().settings.graph_layout.clone().expect("a saved layout");
+    assert_eq!(saved.columns[0], "sha");
+    assert_eq!(saved.widths["refs"].round(), 250.0);
+
+    // A header's context menu hides columns.
+    h.get_by_label("Date column").click_secondary();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Reset columns");
+    click(&mut h, "Date");
+    assert!(!graph_columns(&h).shown("date"));
+    assert!(h.state().settings.graph_layout.as_ref().unwrap().hidden.iter().any(|x| x == "date"));
+    no_errors(&h);
+}
+
+#[test]
+fn the_sidebar_shows_incoming_and_outgoing_commits_on_a_branch() {
+    let r = with_remote();
+    r.commit_elsewhere("theirs.txt", "from elsewhere");
+    r.f.write("mine.txt", "mine\n");
+    r.f.commit("from here");
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    // Nothing is known about the remote until a fetch.
+    assert!(h.query_by_label("Incoming from origin/main (1)").is_none());
+    click(&mut h, "Fetch");
+    pump_for_label(&mut h, "Incoming from origin/main (1)");
+    pump_for_label(&mut h, "Outgoing to origin/main (1)");
+    settle(&mut h);
+
+    // The commit is listed under the branch, on top of wherever else it appears.
+    let listed = h.query_all_by_label("from elsewhere").count();
+    assert!(listed >= 1);
+    click(&mut h, "Collapse main");
+    assert!(h.query_by_label("Incoming from origin/main (1)").is_none());
+    assert_eq!(h.query_all_by_label("from elsewhere").count(), listed - 1);
+    click(&mut h, "Expand main");
+    pump_for_label(&mut h, "Incoming from origin/main (1)");
+
+    // Pulling from there clears it.
+    click(&mut h, "Pull");
+    wait_for(&mut h, "pull", || r.f.root.join("theirs.txt").exists());
+    let t = Instant::now();
+    while h.query_by_label("Incoming from origin/main (1)").is_some() {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(15), "still shown as incoming");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    no_errors(&h);
+}

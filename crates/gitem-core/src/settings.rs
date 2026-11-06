@@ -123,10 +123,13 @@ pub struct Settings {
 }
 
 /// Commit graph columns: a saved arrangement.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GraphLayout {
     pub columns: Vec<String>,
     pub hidden: Vec<String>,
+    /// Widths the user has set, by column.
+    #[serde(default)]
+    pub widths: std::collections::HashMap<String, f32>,
 }
 
 impl Default for Settings {

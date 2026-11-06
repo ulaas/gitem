@@ -106,6 +106,16 @@ impl Palette {
         }
     }
 
+    /// Commits to pull: the same green wherever they appear.
+    pub fn incoming(&self) -> Color32 {
+        self.series[2]
+    }
+
+    /// Commits to push: the same orange wherever they appear.
+    pub fn outgoing(&self) -> Color32 {
+        self.series[1]
+    }
+
     /// Lane or entity colour, fixed by index.
     pub fn lane(&self, i: u16) -> Color32 {
         self.series[i as usize % self.series.len()]

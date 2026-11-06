@@ -1,6 +1,6 @@
 //! Left sidebar: trees of commits, branches, remotes, tags, stashes, worktrees,
 //! contributors, submodules, and repository files.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use egui::{RichText, Sense, Ui, pos2, vec2};
 use gitem_core::model::*;
@@ -27,15 +27,32 @@ pub struct Sidebar {
     files_gen: Option<u64>,
     contributors: Task<Vec<Contributor>>,
     contributors_gen: Option<u64>,
+    /// Commits a branch is missing from its upstream, and the reverse, by branch.
+    tracking: HashMap<String, Tracking>,
+    /// Branches opened or closed by hand. Otherwise, ones with incoming commits start open.
+    expanded: HashMap<String, bool>,
+}
+
+#[derive(Default)]
+struct Tracking {
+    refs_gen: Option<u64>,
+    incoming: Task<Vec<Commit>>,
+    outgoing: Task<Vec<Commit>>,
 }
 
 const ROW: f32 = 22.0;
+/// How many incoming or outgoing commits a branch lists.
+const TRACKING_LIMIT: usize = 50;
 
 impl Sidebar {
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         self.commits.poll();
         self.files.poll();
         self.contributors.poll();
+        for t in self.tracking.values_mut() {
+            t.incoming.poll();
+            t.outgoing.poll();
+        }
         ui.add_space(2.0);
         ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter branches, tags, files…").desired_width(f32::INFINITY));
         ui.add_space(2.0);
@@ -98,24 +115,32 @@ impl Sidebar {
         });
     }
 
-    fn branch_row(&self, ui: &mut Ui, cx: &mut Cx, b: &Branch, label: &str) {
+    fn branch_row(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch, label: &str) {
         let p = cx.pal.clone();
         let (rect, resp) = row(ui, ROW, b.is_current, &p);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
         let text_color = if b.is_current { p.text } else { p.dim };
-        ui.painter().circle(pos2(rect.left() + 10.0, rect.center().y), 3.5, if b.is_current { p.accent } else { p.panel }, egui::Stroke::new(1.0, if b.is_current { p.accent } else { p.faint }), );
+        let can_expand = !b.is_remote && !b.upstream_gone && b.upstream.is_some() && (b.ahead > 0 || b.behind > 0);
+        let open = can_expand && self.expanded.get(&b.name).copied().unwrap_or(b.behind > 0);
+        if can_expand {
+            let hit = egui::Rect::from_min_size(rect.min, vec2(16.0, ROW));
+            let caret = ui.interact(hit, resp.id.with("expand"), Sense::click());
+            let name = format!("{} {label}", if open { "Collapse" } else { "Expand" });
+            caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+            let glyph = if open { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
+            ui.painter().text(hit.center(), egui::Align2::CENTER_CENTER, glyph, prop(11.0), if caret.hovered() { p.text } else { p.faint });
+            if caret.clicked() {
+                self.expanded.insert(b.name.clone(), !open);
+            }
+        }
+        ui.painter().circle(pos2(rect.left() + 21.0, rect.center().y), 3.5, if b.is_current { p.accent } else { p.panel }, egui::Stroke::new(1.0, if b.is_current { p.accent } else { p.faint }), );
         let mut right = rect.right() - 4.0;
-        let track = match (b.ahead, b.behind) {
-            (0, 0) => String::new(),
-            (a, 0) => format!("↑{a}"),
-            (0, x) => format!("↓{x}"),
-            (a, x) => format!("↑{a}↓{x}"),
-        };
-        if !track.is_empty() {
-            let g = ui.painter().layout_no_wrap(track, mono(10.5), p.faint);
-            right -= g.size().x;
-            ui.painter().galley(pos2(right, rect.center().y - g.size().y / 2.0), g, p.faint);
-            right -= 4.0;
+        // Incoming comes last, at the edge, so it's the easiest to spot.
+        if b.behind > 0 {
+            right = count_pill(ui, right, rect.center().y, &format!("↓{}", b.behind), p.incoming(), &p);
+        }
+        if b.ahead > 0 {
+            right = count_pill(ui, right, rect.center().y, &format!("↑{}", b.ahead), p.outgoing(), &p);
         }
         if b.upstream_gone {
             let g = ui.painter().layout_no_wrap("gone".to_string(), prop(10.5), p.warn);
@@ -129,7 +154,7 @@ impl Sidebar {
             ui.painter().galley(pos2(right, rect.center().y - g.size().y / 2.0), g, p.series[6]);
             right -= 4.0;
         }
-        paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 20.0, rect.top()), pos2(right, rect.bottom())), label, prop(12.5), text_color);
+        paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), pos2(right, rect.bottom())), label, prop(12.5), text_color);
         let resp = resp.on_hover_text(format!("{}\n{}\n{} · {}", b.name, b.subject, b.author, gitem_core::util::relative_time(b.date, gitem_core::util::now_ts())));
         if resp.clicked() {
             cx.inspect(&b.sha);
@@ -142,6 +167,45 @@ impl Sidebar {
             }
         }
         resp.context_menu(|ui| menus::branch_menu(ui, cx, b));
+        if open {
+            self.tracking_lists(ui, cx, b);
+        }
+    }
+
+    /// What's on the upstream but not here, then what's here but not on the upstream.
+    fn tracking_lists(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch) {
+        let p = cx.pal.clone();
+        let Some(upstream) = b.upstream.clone() else { return };
+        let t = self.tracking.entry(b.name.clone()).or_default();
+        if t.refs_gen != Some(cx.data.refs_gen) {
+            t.refs_gen = Some(cx.data.refs_gen);
+            for (task, count, range) in [(&mut t.incoming, b.behind, format!("{}..{upstream}", b.name)), (&mut t.outgoing, b.ahead, format!("{upstream}..{}", b.name))] {
+                if count > 0 {
+                    let r = cx.repo.clone();
+                    task.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec![range], limit: TRACKING_LIMIT, ..Default::default() }));
+                } else {
+                    task.value = None;
+                }
+            }
+        }
+        if b.behind > 0 {
+            if tracking_heading(ui, crate::chrome::icon::ARROW_DOWN, &format!("Incoming from {upstream}"), b.behind, p.incoming(), b.is_current.then_some("Pull")) {
+                let mode = match cx.settings.pull_mode.as_str() {
+                    "ff-only" => ops::PullMode::FfOnly,
+                    "rebase" => ops::PullMode::Rebase,
+                    "merge" => ops::PullMode::Merge,
+                    _ => ops::PullMode::Default,
+                };
+                cx.run(ops::pull(mode, false));
+            }
+            tracking_commits(ui, cx, t.incoming.get(), b.behind);
+        }
+        if b.ahead > 0 {
+            if tracking_heading(ui, crate::chrome::icon::ARROW_UP, &format!("Outgoing to {upstream}"), b.ahead, p.outgoing(), b.is_current.then_some("Push")) {
+                cx.run(ops::push(&ops::PushOpts::default()));
+            }
+            tracking_commits(ui, cx, t.outgoing.get(), b.ahead);
+        }
     }
 
     fn remotes(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -362,5 +426,59 @@ impl Dir {
         for (name, path) in &self.files {
             file_entry(ui, cx, path, name);
         }
+    }
+}
+
+/// A small coloured count, right-aligned at `right`. Returns the space left of it.
+fn count_pill(ui: &Ui, right: f32, y: f32, text: &str, color: egui::Color32, p: &crate::theme::Palette) -> f32 {
+    let g = ui.painter().layout_no_wrap(text.to_string(), mono(10.5), if p.dark { color } else { p.on_accent });
+    let size = vec2(g.size().x + 8.0, 15.0);
+    let r = egui::Rect::from_min_size(pos2(right - size.x, y - size.y / 2.0), size);
+    ui.painter().rect_filled(r, 7.0, if p.dark { color.gamma_multiply(0.22) } else { color });
+    ui.painter().galley(pos2(r.left() + 4.0, y - g.size().y / 2.0), g, color);
+    r.left() - 3.0
+}
+
+/// Returns whether the action button was clicked.
+fn tracking_heading(ui: &mut Ui, glyph: &str, title: &str, count: u32, color: egui::Color32, action: Option<&str>) -> bool {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+    ui.painter().text(pos2(rect.left() + 21.0, rect.center().y), egui::Align2::CENTER_CENTER, glyph, prop(12.0), color);
+    let mut right = rect.right() - 4.0;
+    let mut clicked = false;
+    if let Some(label) = action {
+        let btn = egui::Rect::from_min_size(pos2(right - 42.0, rect.top() + 2.0), vec2(42.0, ROW - 4.0));
+        clicked = ui.put(btn, egui::Button::new(RichText::new(label).size(11.0))).clicked();
+        right = btn.left() - 4.0;
+    }
+    let text = format!("{title} ({count})");
+    let label = ui.interact(egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), pos2(right, rect.bottom())), ui.id().with(("tracking", title)), Sense::hover());
+    label.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+    paint_text(ui, label.rect, &text, prop(11.5), color);
+    label.on_hover_text(text.as_str());
+    clicked
+}
+
+fn tracking_commits(ui: &mut Ui, cx: &mut Cx, commits: Option<&Vec<Commit>>, total: u32) {
+    let p = cx.pal.clone();
+    let Some(list) = commits else {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+        paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), rect.max), "Loading…", prop(12.0), p.faint);
+        return;
+    };
+    for c in list {
+        let (rect, resp) = row(ui, ROW, false, &p);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, c.subject.as_str()));
+        paint_avatar(ui, pos2(rect.left() + 37.0, rect.center().y), 7.0, &c.author_name, &c.author_email, &p, cx.settings.gravatar);
+        paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(49.0, 0.0), rect.max), &c.subject, prop(12.5), p.text);
+        let resp = resp.on_hover_ui(|ui| commit_card(ui, &c.sha, &c.author_name, &c.author_email, c.author_time, &c.subject, &p, cx.settings.gravatar));
+        if resp.clicked() {
+            cx.inspect(&c.sha);
+        }
+        resp.context_menu(|ui| menus::commit_menu(ui, cx, c));
+    }
+    let more = total as usize - list.len().min(total as usize);
+    if more > 0 {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+        paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), rect.max), &format!("and {more} more"), prop(12.0), p.faint);
     }
 }
