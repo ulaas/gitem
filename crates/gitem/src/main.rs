@@ -51,7 +51,10 @@ fn tab_by_name(name: &str) -> Option<Tab> {
         "health" => Tab::Health(Box::default()),
         "treemap" => Tab::Treemap(Box::default()),
         "visual" => Tab::visual(""),
-        _ => return None,
+        _ => match name.strip_prefix("settings:") {
+            Some(page) => Tab::Settings(Box::new(gitem::views::settings::SettingsView::on_page(page))),
+            None => return None,
+        },
     })
 }
 

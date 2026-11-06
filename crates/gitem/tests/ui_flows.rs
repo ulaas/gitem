@@ -1418,3 +1418,53 @@ fn text_boxes_have_room_and_stay_inside_the_window() {
     }
     assert!(h.query_all_by_role(egui::accesskit::Role::TextInput).any(|i| i.rect().height() >= 24.0), "form fields too");
 }
+
+#[test]
+fn settings_pages_all_render_and_their_controls_change_settings() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Settings(Box::default()));
+    for page in ["Git", "Workflow", "Blame", "Hosting", "Issue trackers", "AI", "Agents and links", "Appearance"] {
+        pump_for_label(&mut h, page);
+        click(&mut h, page);
+        h.step();
+        no_errors(&h);
+    }
+
+    // Theme previews.
+    assert_eq!(h.state().settings.theme, gitem_core::settings::ThemeChoice::Dark);
+    click(&mut h, "Light theme");
+    h.step();
+    assert_eq!(h.state().settings.theme, gitem_core::settings::ThemeChoice::Light);
+
+    // A switch toggles from anywhere on its row, and back.
+    click(&mut h, "Workflow");
+    let before = h.state().settings.prune_on_fetch;
+    for expected in [!before, before] {
+        pump_for_label(&mut h, "Safety and speed");
+        // The row's caption has the same words, so ask for the switch itself.
+        h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Prune when fetching").click();
+        h.step();
+        h.step();
+        assert_eq!(h.state().settings.prune_on_fetch, expected);
+    }
+
+    // Segmented choices.
+    h.get_by_role_and_label(egui::accesskit::Role::RadioButton, "Rebase").click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().settings.pull_mode, "rebase");
+
+    // Lists grow and shrink.
+    click(&mut h, "Hosting");
+    click(&mut h, "Add server");
+    h.step();
+    assert_eq!(h.state().settings.custom_hosts.len(), 1);
+    pump_for_label(&mut h, "Remove server");
+    click(&mut h, "Remove server");
+    h.step();
+    assert!(h.state().settings.custom_hosts.is_empty());
+    no_errors(&h);
+}
