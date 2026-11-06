@@ -54,12 +54,19 @@ fn repo_here() -> Option<Repo> {
     found.or(Some(Repo { git, root: cwd.clone(), git_dir: cwd.join(".git"), common_dir: cwd.join(".git") }))
 }
 
+/// Reads a switch that only tests and visual checks use. Release builds ignore
+/// them: `GITEM_TEST_ACCEPT` would otherwise let a variable answer a password
+/// prompt or a merge window with nobody there.
+fn test_switch(name: &str) -> Option<std::ffi::OsString> {
+    if cfg!(debug_assertions) { std::env::var_os(name) } else { None }
+}
+
 impl HelperApp {
     pub fn new(mode: Mode) -> Self {
         let settings = Settings::load();
         let pal = Palette::for_settings(settings.theme, &settings.accent);
-        let shot = std::env::var_os("GITEM_SHOT").map(|p| (PathBuf::from(p), std::time::Instant::now(), false));
-        Self { mode, repo: repo_here(), data: RepoData::default(), settings, pal, themed: false, error: None, result: None, shot, accept: std::env::var("GITEM_TEST_ACCEPT").ok().map(|v| (v, 0)), #[cfg(windows)] styled_window: false }
+        let shot = test_switch("GITEM_SHOT").map(|p| (PathBuf::from(p), std::time::Instant::now(), false));
+        Self { mode, repo: repo_here(), data: RepoData::default(), settings, pal, themed: false, error: None, result: None, shot, accept: test_switch("GITEM_TEST_ACCEPT").map(|v| (v.to_string_lossy().into_owned(), 0)), #[cfg(windows)] styled_window: false }
     }
 
     fn auto_accept(&mut self, ctx: &egui::Context) {
@@ -284,4 +291,15 @@ pub fn mergetool(base: PathBuf, local: PathBuf, remote: PathBuf, merged: PathBuf
 
 pub fn difftool(a: String, b: String) -> i32 {
     run(Mode::Diff(Box::new(DiffView::new(DiffSource::Files(a, b), None))), "gitem: diff", [1200.0, 800.0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_builds_ignore_the_test_switches() {
+        // Any variable that's always set will do, because the name isn't what's checked.
+        assert_eq!(test_switch("PATH").is_some(), cfg!(debug_assertions));
+    }
 }
