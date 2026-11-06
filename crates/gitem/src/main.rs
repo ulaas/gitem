@@ -1,6 +1,7 @@
 // No console window on Windows in release builds.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -64,6 +65,12 @@ fn main() {
 }
 
 fn dispatch(args: &[String]) -> i32 {
+    // `ssh-keygen` is asking for the passphrase of the key it was started to make.
+    if let Some(passphrase) = std::env::var_os(gitem_core::cred::KEY_PASSPHRASE_VAR) {
+        // Not `println!`, which panics if there's nothing to write to.
+        let written = writeln!(std::io::stdout(), "{}", passphrase.to_string_lossy());
+        return if written.is_ok() { 0 } else { 1 };
+    }
     match args.first().map(String::as_str) {
         Some("--help" | "-h") => {
             println!("{USAGE}");

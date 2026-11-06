@@ -125,3 +125,32 @@ fn a_screenshot_stays_inside_the_config_folder() {
     assert!(config.path().join("app.ron").exists(), "eframe's state follows GITEM_CONFIG_DIR");
     assert!(!config.path().join("settings.json").exists(), "a screenshot doesn't save the session");
 }
+#[test]
+fn the_passphrase_helper_prints_its_value_to_ssh_keygen() {
+    // ssh-keygen passes the prompt as the only argument.
+    let o = Command::new(BIN).arg("Enter passphrase (empty for no passphrase): ").env(gitem_core::cred::KEY_PASSPHRASE_VAR, "fake passphrase").output().unwrap();
+    assert!(o.status.success());
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim_end(), "fake passphrase");
+}
+
+/// Real `ssh-keygen`, with the key in the scratch config folder. The full route: gitem
+/// starts it, it asks the real helper binary, and the key opens only with that passphrase.
+#[test]
+fn a_generated_key_really_has_the_passphrase() {
+    if Command::new("ssh-keygen").arg("-?").output().is_err() {
+        eprintln!("ssh-keygen isn't installed: skipping");
+        return;
+    }
+    let helper = std::path::Path::new(BIN);
+    let path = gitem_core::cred::ssh_generate("with_passphrase", "test key", "FAKE_PASSPHRASE_42", Some(helper)).unwrap();
+    let opens_with = |p: &str| Command::new("ssh-keygen").args(["-y", "-P", p, "-f", &path]).stdin(Stdio::null()).output().unwrap().status.success();
+    assert!(opens_with("FAKE_PASSPHRASE_42"));
+    assert!(!opens_with("wrong"));
+    assert!(!opens_with(""));
+
+    let open = gitem_core::cred::ssh_generate("no_passphrase", "test key", "", None).unwrap();
+    assert!(Command::new("ssh-keygen").args(["-y", "-P", "", "-f", &open]).stdin(Stdio::null()).output().unwrap().status.success());
+
+    assert!(gitem_core::cred::ssh_generate("../outside", "", "", None).is_err());
+    assert!(!gitem_core::cred::ssh_dir().parent().unwrap().join("outside").exists());
+}

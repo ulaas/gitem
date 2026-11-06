@@ -63,16 +63,16 @@ fn add_git_cred_form() -> FormDialog {
         })
 }
 
-fn generate_key_form() -> FormDialog {
+fn generate_key_form(helper: Option<std::path::PathBuf>) -> FormDialog {
     FormDialog::new("Generate SSH key", "Generate")
         .info("Creates an ed25519 key pair in your .ssh folder.")
         .text("name", "File name", "id_ed25519")
         .text("comment", "Comment", "")
         .hint("you@example.com")
         .password("pass", "Passphrase (leave blank for none)")
-        .on_submit(|v| {
+        .on_submit(move |v| {
             let name = v.opt("name").ok_or("A file name is required.")?;
-            let path = cred::ssh_generate(&name, &v.text("comment"), &v.text("pass")).map_err(|e| e.to_string())?;
+            let path = cred::ssh_generate(&name, &v.text("comment"), &v.text("pass"), helper.as_deref()).map_err(|e| e.to_string())?;
             Ok(vec![Action::Toast(format!("Created {path}"))])
         })
 }
@@ -187,7 +187,7 @@ impl CredentialsView {
         }
         ui.horizontal(|ui| {
             if ui.button("Generate key…").clicked() {
-                cx.form(generate_key_form());
+                cx.form(generate_key_form(cx.repo.git.helper.clone()));
                 self.ssh_loaded = false;
             }
             if ui.button("Refresh").clicked() {

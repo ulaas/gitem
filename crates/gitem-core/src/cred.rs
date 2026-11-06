@@ -434,8 +434,15 @@ pub fn list_ssh_keys() -> Vec<SshKey> {
 }
 
 fn run_tool(tool: &str, args: &[&str]) -> Result<String> {
+    run_tool_env(tool, args, &[])
+}
+
+fn run_tool_env(tool: &str, args: &[&str], env: &[(&str, String)]) -> Result<String> {
     let mut c = std::process::Command::new(tool);
     c.args(args).stdin(std::process::Stdio::null());
+    for (k, v) in env {
+        c.env(k, v);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -447,8 +454,35 @@ fn run_tool(tool: &str, args: &[&str]) -> Result<String> {
     if o.status.success() { Ok(s) } else { Err(Error::Other(s.trim().to_string())) }
 }
 
+/// Set on `ssh-keygen` for its askpass helper. When gitem starts with this set, it
+/// prints the value and exits. An environment variable stays out of the command line,
+/// which process listings and auditing tools can see.
+pub const KEY_PASSPHRASE_VAR: &str = "GITEM_SSH_KEY_PASSPHRASE";
+
+fn valid_key_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':'])
+}
+
+type KeygenPlan = (Vec<String>, Vec<(&'static str, String)>);
+
+/// The arguments and environment for `ssh-keygen`. Only `-N ""` goes on the command
+/// line. A real passphrase is asked for through the helper.
+fn keygen_plan(path: &str, comment: &str, passphrase: &str, helper: Option<&Path>) -> Result<KeygenPlan> {
+    let mut args: Vec<String> = ["-t", "ed25519", "-C", comment, "-f", path].iter().map(|s| s.to_string()).collect();
+    if passphrase.is_empty() {
+        args.extend(["-N".to_string(), String::new()]);
+        return Ok((args, Vec::new()));
+    }
+    let helper = helper.ok_or_else(|| Error::Other("A passphrase needs gitem itself to pass it on, and it couldn't be found.".to_string()))?;
+    Ok((args, vec![("SSH_ASKPASS", helper.to_string_lossy().into_owned()), ("SSH_ASKPASS_REQUIRE", "force".to_string()), (KEY_PASSPHRASE_VAR, passphrase.to_string())]))
+}
+
 /// Generate an ed25519 key with `ssh-keygen`; an empty passphrase means none.
-pub fn ssh_generate(name: &str, comment: &str, passphrase: &str) -> Result<String> {
+/// `helper` is the gitem binary, which hands a passphrase over.
+pub fn ssh_generate(name: &str, comment: &str, passphrase: &str, helper: Option<&Path>) -> Result<String> {
+    if !valid_key_name(name) {
+        return Err(Error::Other(format!("\"{name}\" isn't a file name. The key has to go in your .ssh folder.")));
+    }
     let dir = ssh_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(name);
@@ -456,7 +490,15 @@ pub fn ssh_generate(name: &str, comment: &str, passphrase: &str) -> Result<Strin
         return Err(Error::Other(format!("{} already exists", path.display())));
     }
     let p = path.to_string_lossy().into_owned();
-    run_tool("ssh-keygen", &["-t", "ed25519", "-C", comment, "-N", passphrase, "-f", &p])?;
+    let (args, env) = keygen_plan(&p, comment, passphrase, helper)?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_tool_env("ssh-keygen", &args, &env)?;
+    // An ssh-keygen too old for SSH_ASKPASS_REQUIRE reads nothing and makes an open key.
+    if !passphrase.is_empty() && run_tool("ssh-keygen", &["-y", "-P", "", "-f", &p]).is_ok() {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("pub"));
+        return Err(Error::Other("This ssh-keygen ignored the passphrase, so the key wasn't kept. OpenSSH 8.4 or newer is needed for a passphrase here.".to_string()));
+    }
     Ok(p)
 }
 
@@ -511,6 +553,35 @@ pub fn helper_main(op: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_passphrase_stays_off_the_command_line() {
+        let helper = Path::new("gitem.exe");
+        let (args, env) = keygen_plan("key", "me", "FAKE_PASSPHRASE", Some(helper)).unwrap();
+        assert!(!args.iter().any(|a| a.contains("FAKE_PASSPHRASE")), "{args:?}");
+        assert!(!args.iter().any(|a| a == "-N"), "`-N` would answer the prompt the helper is for");
+        assert!(env.contains(&(KEY_PASSPHRASE_VAR, "FAKE_PASSPHRASE".to_string())));
+        assert!(env.contains(&("SSH_ASKPASS_REQUIRE", "force".to_string())));
+        assert!(env.contains(&("SSH_ASKPASS", "gitem.exe".to_string())));
+        assert!(keygen_plan("key", "me", "FAKE_PASSPHRASE", None).is_err());
+    }
+
+    #[test]
+    fn no_passphrase_needs_no_helper() {
+        let (args, env) = keygen_plan("key", "me", "", None).unwrap();
+        assert_eq!(args[args.len() - 2..], ["-N".to_string(), String::new()]);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn a_key_name_cannot_leave_the_ssh_folder() {
+        for bad in ["", ".", "..", "../x", "..\\x", "a/b", "a\\b", "c:x"] {
+            assert!(!valid_key_name(bad), "{bad}");
+        }
+        for good in ["id_ed25519", "work.key", "..hidden"] {
+            assert!(valid_key_name(good), "{good}");
+        }
+    }
 
     #[test]
     fn helper_input() {
