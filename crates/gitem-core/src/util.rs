@@ -70,6 +70,31 @@ pub fn short_rev(s: &str) -> &str {
     if s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) { &s[..7] } else { s }
 }
 
+/// Replaces the credentials in any URL in `s` with `***`, for showing it on screen.
+/// Git itself still gets the real URL.
+pub fn mask_url_credentials(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("://") {
+        let (head, after) = rest.split_at(i + 3);
+        out.push_str(head);
+        let authority = &after[..after.find(['/', '?', '#', '"', '\'']).unwrap_or(after.len())];
+        let authority = authority.split_whitespace().next().unwrap_or("");
+        rest = after;
+        if let Some(at) = authority.rfind('@') {
+            let scheme = head[..i].rsplit(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
+            // `ssh://git@host` names an account and holds no secret. Elsewhere a lone
+            // name is often the token itself, as in `https://TOKEN@github.com`.
+            if !scheme.eq_ignore_ascii_case("ssh") || authority[..at].contains(':') {
+                out.push_str("***");
+                rest = &after[at..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Subsequence fuzzy scoring; `None` when `needle` does not match.
 pub fn fuzzy_score(needle: &str, hay: &str) -> Option<i32> {
     fuzzy_match(needle, hay).map(|m| m.0)
@@ -128,6 +153,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn url_credentials_are_masked_for_display() {
+        for (given, shown) in [
+            ("https://user:FAKETOKEN@host.invalid/o/r.git", "https://***@host.invalid/o/r.git"),
+            ("https://FAKETOKEN@host.invalid/o/r.git", "https://***@host.invalid/o/r.git"),
+            ("http://x-access-token:FAKE@127.0.0.1:1/x.git", "http://***@127.0.0.1:1/x.git"),
+            ("ssh://u:FAKE@host.invalid/x", "ssh://***@host.invalid/x"),
+            ("Clone https://a:FAKE@h.invalid/x into https://b:FAKE@i.invalid/y", "Clone https://***@h.invalid/x into https://***@i.invalid/y"),
+            ("--foo=https://a:FAKE@h.invalid/x", "--foo=https://***@h.invalid/x"),
+            // A user name alone in SSH isn't a secret, and these have no credentials.
+            ("ssh://git@host.invalid/x.git", "ssh://git@host.invalid/x.git"),
+            ("git@host.invalid:o/r.git", "git@host.invalid:o/r.git"),
+            ("https://host.invalid/o/r@v1", "https://host.invalid/o/r@v1"),
+            ("file:///c:/a@b/c", "file:///c:/a@b/c"),
+            ("plain text with an @ sign", "plain text with an @ sign"),
+        ] {
+            assert_eq!(mask_url_credentials(given), shown);
+        }
+    }
     #[test]
     fn relative() {
         assert_eq!(relative_time(0, 30), "just now");

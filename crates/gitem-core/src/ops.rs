@@ -70,7 +70,7 @@ impl GitOp {
 
     /// Plain-text summary of the commands, shown in confirmation dialogs.
     pub fn preview(&self) -> String {
-        self.steps.iter().map(|s| format!("git {}", s.args.join(" "))).collect::<Vec<_>>().join("\n")
+        crate::util::mask_url_credentials(&self.steps.iter().map(|s| format!("git {}", s.args.join(" "))).collect::<Vec<_>>().join("\n"))
     }
 
     /// Run all steps in order, stopping on the first hard failure.
@@ -705,7 +705,7 @@ pub fn clone_repo(url: &str, dest: &str, depth: Option<u32>, recursive: bool, br
     a.push("--".into());
     a.push(url.to_string());
     a.push(dest.to_string());
-    GitOp::new(format!("Clone {url}")).step_v(a).net()
+    GitOp::new(format!("Clone {}", crate::util::mask_url_credentials(url))).step_v(a).net()
 }
 
 pub fn init_repo(path: &str, initial_branch: Option<&str>) -> GitOp {

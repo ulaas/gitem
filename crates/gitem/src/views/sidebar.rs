@@ -274,7 +274,7 @@ impl Sidebar {
                         self.branch_row(ui, cx, b, b.name.strip_prefix(&prefix).unwrap_or(&b.name));
                     }
                 });
-                header.header_response.on_hover_text(&r.fetch_url).context_menu(|ui| {
+                header.header_response.on_hover_text(gitem_core::util::mask_url_credentials(&r.fetch_url)).context_menu(|ui| {
                     if ui.button("Fetch").clicked() {
                         cx.run(ops::fetch(&ops::FetchOpts { remote: Some(r.name.clone()), prune: cx.settings.prune_on_fetch, ..Default::default() }));
                         ui.close();
@@ -289,6 +289,9 @@ impl Sidebar {
                     }
                     if ui.button("Copy URL").clicked() {
                         cx.copy(r.fetch_url.clone());
+                        if gitem_core::util::mask_url_credentials(&r.fetch_url) != r.fetch_url {
+                            cx.toast("Copied, with the password or token in this URL.");
+                        }
                         ui.close();
                     }
                     if let Some(f) = gitem_core::forge::identify(&r.fetch_url, &cx.settings.custom_hosts)

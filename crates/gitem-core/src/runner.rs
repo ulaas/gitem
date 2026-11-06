@@ -382,9 +382,10 @@ fn works(p: &Path) -> bool {
 }
 
 fn display_arg(a: &str) -> String {
+    let a = crate::util::mask_url_credentials(a);
     if a.chars().any(|c| c.is_whitespace() || c == '"') {
         format!("\"{}\"", a.replace('"', "\\\""))
     } else {
-        a.to_string()
+        a
     }
 }

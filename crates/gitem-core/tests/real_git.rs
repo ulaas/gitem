@@ -1147,3 +1147,18 @@ fn tests_never_see_the_machines_git_config() {
     let scratch = std::env::temp_dir();
     assert!(gitem_core::settings::config_dir().starts_with(scratch), "settings are in the scratch folder");
 }
+#[test]
+fn tokens_in_urls_stay_out_of_titles_previews_and_the_console() {
+    let f = Fx::new();
+    let url = "http://user:FAKETOKEN@127.0.0.1:1/x.git";
+    let dest = f.repo.root.join("cloned").to_string_lossy().replace('\\', "/");
+    let op = ops::clone_repo(url, &dest, None, false, None);
+    assert!(!op.title.contains("FAKETOKEN"), "{}", op.title);
+    assert!(!op.preview().contains("FAKETOKEN"), "{}", op.preview());
+    assert!(op.steps[0].args.iter().any(|a| a == url), "git still gets the real URL");
+    assert!(!f.try_run(op), "nothing listens on port 1");
+    let log = f.repo.git.log.lock().unwrap();
+    let entry = log.iter().rev().find(|e| e.command.contains("clone")).expect("the clone is in the console");
+    assert!(!entry.command.contains("FAKETOKEN"), "{}", entry.command);
+    assert!(entry.command.contains("127.0.0.1:1"), "{}", entry.command);
+}
