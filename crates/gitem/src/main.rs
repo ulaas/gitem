@@ -8,6 +8,8 @@ use gitem::{app, standalone, views::Tab};
 
 const USAGE: &str = "gitem [repository-path ...]
 
+  --version       print the version and the commit this was built from
+
 Helper modes, used by git:
   --credential-helper get|store|erase
   --edit-file FILE
@@ -62,6 +64,10 @@ fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("--help" | "-h") => {
             println!("{USAGE}");
+            0
+        }
+        Some("--version" | "-V") => {
+            println!("gitem {}", gitem::app::version_line());
             0
         }
         Some("--credential-helper") => gitem_core::cred::helper_main(args.get(1).map(String::as_str).unwrap_or("")),
@@ -152,7 +158,7 @@ fn run_app(args: &[String]) -> i32 {
             p => paths.push(PathBuf::from(p)),
         }
     }
-    let options = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_title("gitem").with_inner_size(size).with_min_inner_size([800.0, 500.0]), ..Default::default() };
+    let options = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_title("gitem").with_inner_size(size).with_min_inner_size([800.0, 500.0]).with_decorations(false).with_icon(std::sync::Arc::new(gitem::chrome::logo_icon(64))), persist_window: shot.is_none(), ..Default::default() };
     let result = eframe::run_native(
         "gitem",
         options,

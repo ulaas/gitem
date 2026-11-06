@@ -270,7 +270,8 @@ impl MergeView {
         let pal = cx.pal.clone();
         let unresolved = doc.unresolved_count();
         let total = doc.conflict_count();
-        ui.horizontal(|ui| {
+        // Wraps so Save stays reachable in a narrow panel.
+        ui.horizontal_wrapped(|ui| {
             if unresolved == 0 {
                 chip(ui, &format!("✔ All {total} conflict(s) resolved"), pal.good);
             } else {

@@ -1108,14 +1108,14 @@ fn toolbar_fetches_pulls_and_pushes() {
     settle(&mut h);
 
     r.commit_elsewhere("new.txt", "from elsewhere");
-    click(&mut h, "⟳ Fetch");
-    click(&mut h, "↓ Pull 1");
+    click(&mut h, "Fetch");
+    click(&mut h, "Pull 1");
     wait_for(&mut h, "pull", || r.f.root.join("new.txt").exists());
     no_errors(&h);
 
     r.f.write("mine.txt", "mine\n");
     r.f.commit("from here");
-    click(&mut h, "↑ Push 1");
+    click(&mut h, "Push 1");
     wait_for(&mut h, "push", || r.remote_tip() == r.f.git(&["rev-parse", "HEAD"]).trim());
     no_errors(&h);
 }
@@ -1129,7 +1129,7 @@ fn a_rejected_push_shows_git_s_reason() {
     let tip = r.remote_tip();
     let mut h = harness(&r.f);
     settle(&mut h);
-    click(&mut h, "↑ Push 1");
+    click(&mut h, "Push 1");
     pump_for_label(&mut h, "Something went wrong");
     assert_eq!(r.remote_tip(), tip);
     assert!(r.f.git(&["log", "-1", "--format=%s"]).contains("from here"), "local work is untouched");
@@ -1143,7 +1143,7 @@ fn a_pull_conflict_opens_into_the_merge_workflow() {
     r.f.commit("from here");
     let mut h = harness(&r.f);
     settle(&mut h);
-    click(&mut h, "⟳ Fetch");
+    click(&mut h, "Fetch");
     let ctx = h.ctx.clone();
     h.state_mut().apply_action(&ctx, Action::Run(ops::pull(ops::PullMode::Merge, false)));
     pump_for_label(&mut h, "Something went wrong");
@@ -1180,4 +1180,77 @@ fn a_failed_clone_opens_nothing_and_says_so() {
     h.state_mut().apply_action(&ctx, Action::RunGlobal { op, open_after: Some(dest) });
     pump_for_label(&mut h, "Something went wrong");
     assert_eq!(h.state().repos.len(), 1);
+}
+
+#[test]
+fn the_rail_opens_every_view_and_marks_the_one_in_front() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let mut items: Vec<&gitem::chrome::RailItem> = gitem::chrome::rail_top().into_iter().flatten().collect();
+    items.extend(gitem::chrome::rail_bottom());
+    let ctx = h.ctx.clone();
+    for item in items {
+        // Some of these names are also tab titles, so the rail's is found by position.
+        let before = h.state().repos[0].dock.iter_all_tabs().filter(|(_, t)| (item.is)(t)).count();
+        h.state_mut().apply_action(&ctx, Action::OpenTab((item.make)()));
+        h.step();
+        h.step();
+        assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| (item.is)(t)), "{} didn't open (had {before})", item.name);
+    }
+    no_errors(&h);
+}
+
+#[test]
+fn settings_and_about_are_reachable_from_the_titlebar() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    click(&mut h, "About");
+    pump_for_label(&mut h, "Commit date");
+    pump_for_label(&mut h, env!("CARGO_PKG_VERSION"));
+    click(&mut h, "Close");
+    // Windows fade out, so this takes a moment.
+    let t = Instant::now();
+    while h.query_by_label("Commit date").is_some() {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(5), "the About box didn't close");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(!h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Settings(_))));
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::OpenSettings);
+    h.step();
+    h.step();
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Settings(_))));
+}
+
+#[test]
+fn settings_work_with_no_repository_open() {
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, gitem_core::settings::Settings::default());
+    app.git = Ok(real_git());
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5);
+    let mut h = builder.build_ui_state(|ui, app: &mut GitemApp| app.frame(ui), app);
+    h.step();
+    assert!(h.query_by_label("Open folder…").is_some());
+    click(&mut h, "Settings");
+    h.step();
+    assert!(h.query_by_label("Open folder…").is_none(), "settings replace the welcome page");
+    click(&mut h, "Settings");
+    h.step();
+    assert!(h.query_by_label("Open folder…").is_some(), "the same button goes back");
+}
+
+#[test]
+fn toolbar_icons_have_names() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    for name in ["Refresh", "Stash", "Details", "Sidebar", "Minimize window", "Maximize window", "Close window", "Command palette"] {
+        pump_for_label(&mut h, name);
+    }
 }

@@ -16,6 +16,10 @@ use crate::theme::Palette;
 use crate::views::Tab;
 
 pub enum Action {
+    /// Show the About box.
+    About,
+    /// Open settings, with or without a repository.
+    OpenSettings,
     /// Run a write op on this repo's queue.
     Run(GitOp),
     /// Ask first, then run.

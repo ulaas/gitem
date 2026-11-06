@@ -1,6 +1,7 @@
 //! gitem's UI, as a library so tests can drive it headlessly.
 pub mod action;
 pub mod app;
+pub mod chrome;
 pub mod data;
 pub mod forms;
 pub mod i18n;

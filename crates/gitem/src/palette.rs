@@ -54,6 +54,8 @@ pub fn commands() -> Vec<Item> {
     view!("Agent Sessions", Tab::Agents(Box::default()));
     view!("Review Changes", Tab::Review(Box::default()));
 
+    v.push(item("View", "About gitem", |cx| cx.out.push(crate::action::Action::About)));
+
     v.push(item("Git", "Fetch…", |cx| {
         let r = cx.data.remotes().iter().map(|x| x.name.clone()).collect();
         cx.form(forms::fetch_form(r, cx.settings.prune_on_fetch));

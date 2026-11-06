@@ -1,5 +1,5 @@
-//! Left sidebar: navigation to views, plus trees of commits, branches, remotes,
-//! tags, stashes, worktrees, contributors, submodules, and repository files.
+//! Left sidebar: trees of commits, branches, remotes, tags, stashes, worktrees,
+//! contributors, submodules, and repository files.
 use std::collections::BTreeMap;
 
 use egui::{RichText, Sense, Ui, pos2, vec2};
@@ -36,8 +36,7 @@ impl Sidebar {
         self.commits.poll();
         self.files.poll();
         self.contributors.poll();
-        self.nav(ui, cx);
-        ui.separator();
+        ui.add_space(2.0);
         ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter branches, tags, files…").desired_width(f32::INFINITY));
         ui.add_space(2.0);
         egui::ScrollArea::vertical().id_salt("sidebar").auto_shrink([false, false]).show(ui, |ui| {
@@ -51,41 +50,6 @@ impl Sidebar {
             self.contributor_list(ui, cx);
             self.submodules(ui, cx);
             self.file_tree(ui, cx);
-        });
-    }
-
-    fn nav(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-            let items: Vec<(&str, fn() -> Tab, &str)> = vec![
-                ("Home", Tab::home, "Overview and start work"),
-                ("Graph", Tab::graph, "Commit graph"),
-                ("Changes", Tab::changes, "Stage and commit"),
-                ("Launchpad", || Tab::Launchpad(Box::default()), "Pull requests and issues"),
-                ("Search", || Tab::Search(Box::default()), "Search and compare"),
-                ("Worktrees", || Tab::Worktrees(Box::default()), "Manage worktrees"),
-                ("Contributors", || Tab::Contributors(Box::default()), "People and activity"),
-                ("Visual", || Tab::visual(""), "Visual history of the repository, a folder, or a file"),
-                ("Treemap", || Tab::Treemap(Box::default()), "Files by size or recent activity"),
-                ("Health", || Tab::Health(Box::default()), "How well this repository is tuned"),
-                ("Agents", || Tab::Agents(Box::default()), "Coding-agent sessions in these worktrees"),
-                ("Review", || Tab::Review(Box::default()), "Review changes with a checklist and notes"),
-                ("Reflog", || Tab::Reflog(Box::default()), "Recover lost work"),
-                ("Rebase", || Tab::rebase(None), "Interactive rebase"),
-                ("Bisect", || Tab::Bisect(Box::default()), "Find a regression"),
-                ("Patches", || Tab::Patches(Box::default()), "Saved patches"),
-                ("Composer", || Tab::Composer(Box::default()), "Split work into commits"),
-                ("Tools", || Tab::Tools(Box::default()), "Submodules, hooks, LFS, clean"),
-                ("Config", || Tab::Config(Box::default()), "Git configuration"),
-                ("Credentials", || Tab::Credentials(Box::default()), "Tokens and SSH keys"),
-                ("Console", || Tab::Console(Box::default()), "Command log"),
-                ("Settings", || Tab::Settings(Box::default()), "Preferences"),
-            ];
-            for (label, make, tip) in items {
-                if ui.small_button(crate::i18n::t(label)).on_hover_text(tip).clicked() {
-                    cx.open(make());
-                }
-            }
         });
     }
 

@@ -19,6 +19,8 @@ use crate::forms::{self, FormDialog};
 use crate::palette::PaletteState;
 use crate::theme::{self, Palette};
 use crate::views::inspect::InspectPanel;
+use crate::chrome;
+use egui::{Color32, Sense};
 use crate::views::sidebar::Sidebar;
 use crate::views::{Tab, mergeview};
 use crate::widgets::*;
@@ -66,6 +68,7 @@ pub struct RepoTab {
     show_inspect: bool,
     sidebar: Sidebar,
     show_sidebar: bool,
+    show_rail: bool,
     queue: VecDeque<(GitOp, Option<PathBuf>)>,
     running: Option<Running>,
     last_auto_fetch: Instant,
@@ -97,6 +100,7 @@ impl RepoTab {
             show_inspect: true,
             sidebar: Sidebar::default(),
             show_sidebar: true,
+            show_rail: true,
             queue: VecDeque::new(),
             running: None,
             last_auto_fetch: Instant::now(),
@@ -274,6 +278,25 @@ pub struct GitemApp {
     pub shot_tabs: Vec<Tab>,
     pub shot_inspect: Option<String>,
     persist: bool,
+    about_open: bool,
+    #[cfg(windows)]
+    styled_window: bool,
+    /// Settings shown with no repository open.
+    no_repo_settings: Option<Box<NoRepoSettings>>,
+}
+
+struct NoRepoSettings {
+    repo: Repo,
+    data: RepoData,
+    view: crate::views::settings::SettingsView,
+}
+
+/// Version, commit, and whether the build had uncommitted changes.
+pub fn version_line() -> String {
+    let sha = env!("GITEM_BUILD_SHA");
+    let commit = if sha.is_empty() { "unknown commit" } else { sha };
+    let dirty = if env!("GITEM_BUILD_DIRTY").is_empty() { "" } else { ", with uncommitted changes" };
+    format!("{} ({commit}{dirty})", env!("CARGO_PKG_VERSION"))
 }
 
 impl GitemApp {
@@ -315,6 +338,10 @@ impl GitemApp {
             shot_tabs: Vec::new(),
             shot_inspect: None,
             persist: false,
+            about_open: false,
+            #[cfg(windows)]
+            styled_window: false,
+            no_repo_settings: None,
         }
     }
 
@@ -460,6 +487,14 @@ impl GitemApp {
                     self.apply_action(ctx, Action::OpenTab(Tab::file(f, d.commit.clone(), d.line)));
                 }
             }
+            Action::About => self.about_open = true,
+            Action::OpenSettings => {
+                if self.repos.is_empty() {
+                    self.toggle_no_repo_settings();
+                } else {
+                    self.apply_action(ctx, Action::OpenTab(Tab::Settings(Box::default())));
+                }
+            }
             Action::RunGlobal { op, open_after } => self.global_queue.push_back((op, open_after)),
             Action::Refresh => {
                 if let Some(r) = self.repos.get_mut(self.active) {
@@ -496,6 +531,7 @@ impl GitemApp {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     let on = !(r.show_sidebar || r.show_inspect);
                     r.show_sidebar = on;
+                    r.show_rail = on;
                     r.show_inspect = on;
                 }
             }
@@ -508,21 +544,28 @@ impl GitemApp {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut Ui, out: &mut Vec<Action>) {
+    fn title_bar(&mut self, ui: &mut Ui, out: &mut Vec<Action>) {
         let p = self.pal.clone();
+        chrome::drag_region(ui);
+        ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("gitem").strong().color(p.accent));
-            ui.add_space(6.0);
+            ui.add_space(9.0);
+            let (rect, logo) = ui.allocate_exact_size(egui::vec2(20.0, chrome::TITLE_BAR_HEIGHT), Sense::click());
+            chrome::paint_logo(ui.painter(), egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0)));
+            logo.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "About gitem"));
+            if logo.on_hover_text("About gitem").clicked() {
+                out.push(Action::About);
+            }
+            ui.add_space(8.0);
             let mut close = None;
-            for (i, r) in self.repos.iter().enumerate() {
+            let (repos, active) = (&self.repos, &mut self.active);
+            for (i, r) in repos.iter().enumerate() {
                 let dirty = r.data.status.get().is_some_and(|s| !s.entries.is_empty());
-                let name = if dirty { format!("{} •", r.repo.name()) } else { r.repo.name() };
-                let resp = ui.selectable_label(i == self.active, name).on_hover_text(r.repo.root.display().to_string());
-                if resp.clicked() {
-                    self.active = i;
-                }
-                if resp.middle_clicked() {
+                let (resp, closing) = chrome::repo_tab(ui, &r.repo.name(), dirty, i == *active, &r.repo.root.display().to_string(), &p);
+                if closing || resp.middle_clicked() {
                     close = Some(i);
+                } else if resp.clicked() {
+                    *active = i;
                 }
                 resp.context_menu(|ui| {
                     if ui.button("Close repository").clicked() {
@@ -536,13 +579,103 @@ impl GitemApp {
                 self.active = self.active.min(self.repos.len().saturating_sub(1));
                 self.settings_dirty = true;
             }
-            ui.menu_button("+", |ui| self.open_menu(ui, out));
+            ui.add_space(2.0);
+            ui.scope(|ui| {
+                ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                ui.menu_button(chrome::icon::PLUS, |ui| self.open_menu(ui, out)).response.on_hover_text("Open a repository");
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Ctrl+P").on_hover_text("Command palette").clicked() {
+                chrome::window_controls(ui, &p);
+                ui.add_space(6.0);
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if chrome::icon_button(ui, chrome::icon::INFO, "About", "Version and build", self.about_open, &p).clicked() {
+                    out.push(Action::About);
+                }
+                if chrome::icon_button(ui, chrome::icon::GEAR_SIX, crate::i18n::t("Settings"), "Preferences", self.no_repo_settings.is_some(), &p).clicked() {
+                    out.push(Action::OpenSettings);
+                }
+                if chrome::icon_button(ui, chrome::icon::LIST_MAGNIFYING_GLASS, "Command palette", "Run any command (Ctrl+P)", self.palette.is_some(), &p).clicked() {
                     self.palette = Some(PaletteState::new());
                 }
             });
         });
+    }
+
+    fn toggle_no_repo_settings(&mut self) {
+        if self.no_repo_settings.take().is_some() {
+            return;
+        }
+        let git = self.git.clone().unwrap_or_else(|_| GitExe { path: "git not found".into(), source: gitem_core::runner::GitSource::System, log: Default::default(), helper: None });
+        let root = PathBuf::from(".");
+        self.no_repo_settings = Some(Box::new(NoRepoSettings { repo: Repo { git, git_dir: root.clone(), common_dir: root.clone(), root }, data: RepoData::default(), view: Default::default() }));
+    }
+
+    fn about(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
+        if !self.about_open {
+            return;
+        }
+        let p = self.pal.clone();
+        let mut open = true;
+        let mut dismiss = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let git = self.git.as_ref().map(|g| g.version()).unwrap_or_else(|e| e.clone());
+        egui::Window::new("About gitem").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).default_width(340.0).show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 52.0), Sense::hover());
+                chrome::paint_logo(ui.painter(), rect);
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("gitem").size(20.0).strong());
+                    ui.label(RichText::new("A visual Git client").color(p.dim));
+                });
+            });
+            ui.add_space(10.0);
+            egui::Grid::new("about-grid").num_columns(2).spacing(egui::vec2(14.0, 6.0)).show(ui, |ui| {
+                let key = |ui: &mut Ui, t: &str| {
+                    ui.label(RichText::new(t).color(p.dim));
+                };
+                key(ui, "Version");
+                ui.label(env!("CARGO_PKG_VERSION"));
+                ui.end_row();
+                key(ui, "Commit");
+                let sha = env!("GITEM_BUILD_SHA");
+                if sha.is_empty() {
+                    ui.label("Unknown");
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(sha).monospace());
+                        if chrome::icon_button(ui, chrome::icon::COPY, "Copy commit", "", false, &p).clicked() {
+                            out.push(Action::Copy(sha.to_string()));
+                        }
+                    });
+                }
+                ui.end_row();
+                if !env!("GITEM_BUILD_DATE").is_empty() {
+                    key(ui, "Commit date");
+                    ui.label(env!("GITEM_BUILD_DATE"));
+                    ui.end_row();
+                }
+                key(ui, "Git");
+                ui.label(git.trim());
+                ui.end_row();
+            });
+            if !env!("GITEM_BUILD_DIRTY").is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Built with uncommitted changes, so this commit doesn't fully describe it.").small().color(p.warn));
+            }
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if ui.button("Close").clicked() {
+                    dismiss = true;
+                }
+            });
+        });
+        self.about_open = open && !dismiss;
+    }
+
+    fn toolbar(&mut self, ui: &mut Ui, out: &mut Vec<Action>) {
+        let p = self.pal.clone();
         let Some(tab) = self.repos.get_mut(self.active) else { return };
         ui.horizontal(|ui| {
             let (branch, ahead, behind, upstream, has_status) = match tab.data.status.get() {
@@ -551,7 +684,7 @@ impl GitemApp {
             };
             let label = branch.clone().unwrap_or_else(|| if has_status { "detached HEAD".into() } else { "…".into() });
             let names: Vec<Branch> = tab.data.local_branches().cloned().collect();
-            ui.menu_button(format!("⎇ {label} ▾"), |ui| {
+            ui.menu_button(format!("{}  {label}  {}", chrome::icon::GIT_BRANCH, chrome::icon::CARET_DOWN), |ui| {
                 if ui.button("+ New branch…").clicked() {
                     out.push(Action::Form(forms::new_branch(None)));
                     ui.close();
@@ -571,11 +704,11 @@ impl GitemApp {
             ui.separator();
             let prune = self.settings.prune_on_fetch;
             let remotes: Vec<String> = tab.data.remotes().iter().map(|r| r.name.clone()).collect();
-            if ui.button("⟳ Fetch").on_hover_text("Fetch all remotes").clicked() {
+            if chrome::icon_text_button(ui, chrome::icon::CLOUD_ARROW_DOWN, "Fetch", "Fetch all remotes", &p).clicked() {
                 out.push(Action::Run(ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() })));
             }
-            let pull_label = if behind > 0 { format!("↓ Pull {behind}") } else { "↓ Pull".to_string() };
-            if ui.button(pull_label).clicked() {
+            let pull_label = if behind > 0 { format!("Pull {behind}") } else { "Pull".to_string() };
+            if chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_DOWN, &pull_label, "", &p).clicked() {
                 let mode = match self.settings.pull_mode.as_str() {
                     "ff-only" => ops::PullMode::FfOnly,
                     "rebase" => ops::PullMode::Rebase,
@@ -584,30 +717,30 @@ impl GitemApp {
                 };
                 out.push(Action::Run(ops::pull(mode, false)));
             }
-            if ui.small_button("▾").on_hover_text("Pull options").clicked() {
+            if ui.small_button(chrome::icon::CARET_DOWN).on_hover_text("Pull options").clicked() {
                 out.push(Action::Form(forms::pull_form()));
             }
-            let push_label = if upstream.is_none() && branch.is_some() { "↑ Publish".to_string() } else if ahead > 0 { format!("↑ Push {ahead}") } else { "↑ Push".to_string() };
-            if ui.button(push_label).clicked() {
+            let push_label = if upstream.is_none() && branch.is_some() { "Publish".to_string() } else if ahead > 0 { format!("Push {ahead}") } else { "Push".to_string() };
+            if chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_UP, &push_label, "", &p).clicked() {
                 if upstream.is_some() {
                     out.push(Action::Run(ops::push(&ops::PushOpts::default())));
                 } else {
                     out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), false)));
                 }
             }
-            if ui.small_button("▾").on_hover_text("Push options").clicked() {
+            if ui.small_button(chrome::icon::CARET_DOWN).on_hover_text("Push options").clicked() {
                 out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), upstream.is_some())));
             }
             ui.separator();
-            if ui.button(crate::i18n::t("Stash")).on_hover_text("Stash changes").clicked() {
+            if chrome::icon_button(ui, chrome::icon::ARCHIVE, crate::i18n::t("Stash"), "Stash changes", false, &p).clicked() {
                 out.push(Action::Form(forms::stash_form(Vec::new())));
             }
-            if ui.button(crate::i18n::t("Refresh")).on_hover_text("F5").clicked() {
+            if chrome::icon_button(ui, chrome::icon::ARROWS_CLOCKWISE, crate::i18n::t("Refresh"), "Reload this repository (F5)", false, &p).clicked() {
                 out.push(Action::Refresh);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.selectable_label(tab.show_inspect, crate::i18n::t("Details")).clicked().then(|| tab.show_inspect = !tab.show_inspect);
-                ui.selectable_label(tab.show_sidebar, crate::i18n::t("Sidebar")).clicked().then(|| tab.show_sidebar = !tab.show_sidebar);
+                chrome::icon_button(ui, chrome::icon::ARTICLE, crate::i18n::t("Details"), "Show the selected commit's details", tab.show_inspect, &p).clicked().then(|| tab.show_inspect = !tab.show_inspect);
+                chrome::icon_button(ui, chrome::icon::SIDEBAR_SIMPLE, crate::i18n::t("Sidebar"), "Show branches, tags, and files (Ctrl+B)", tab.show_sidebar, &p).clicked().then(|| tab.show_sidebar = !tab.show_sidebar);
             });
         });
     }
@@ -643,7 +776,10 @@ impl GitemApp {
         let p = self.pal.clone();
         ui.add_space(50.0);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("gitem").size(30.0).strong().color(p.accent));
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 64.0), Sense::hover());
+            chrome::paint_logo(ui.painter(), rect);
+            ui.add_space(4.0);
+            ui.label(RichText::new("gitem").size(30.0).strong());
             ui.label(RichText::new("See your repository's history and everything around it").color(p.dim));
             ui.add_space(14.0);
             if let Err(e) = &self.git {
@@ -774,9 +910,6 @@ impl GitemApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Console").clicked() {
-                    out.push(Action::OpenTab(Tab::Console(Box::default())));
-                }
                 if let Some(s) = tab.data.status.get() {
                     let (st, un, c) = (s.entries.iter().filter(|e| e.is_staged()).count(), s.entries.iter().filter(|e| e.is_unstaged()).count(), s.conflicts().count());
                     if st + un + c > 0 && ui.small_button(format!("{st} staged, {un} changed{}", if c > 0 { format!(", {c} conflicts") } else { String::new() })).clicked() {
@@ -882,6 +1015,7 @@ impl GitemApp {
             && let Some(r) = self.repos.get_mut(self.active) {
                 let on = !(r.show_sidebar || r.show_inspect);
                 r.show_sidebar = on;
+                r.show_rail = on;
                 r.show_inspect = on;
             }
         let (palette, refresh, sidebar, changes, graph) = ctx.input(|i| {
@@ -1013,10 +1147,28 @@ impl GitemApp {
         self.shortcuts(&ctx, &mut out);
 
         let bar_frame = egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::symmetric(8, 4));
-        egui::Panel::top("top-bar").frame(bar_frame).show(ui, |ui| self.top_bar(ui, &mut out));
+        egui::Panel::top("title-bar").frame(egui::Frame::new().fill(self.pal.bg)).resizable(false).exact_size(chrome::TITLE_BAR_HEIGHT).show_separator_line(false).show(ui, |ui| self.title_bar(ui, &mut out));
         egui::Panel::bottom("status-bar").frame(bar_frame).show(ui, |ui| self.status_bar(ui, &mut out));
-
         let pal = self.pal.clone();
+        if let Some(tab) = self.repos.get_mut(self.active)
+            && tab.show_rail
+        {
+            let name_of = |t: &Tab| chrome::rail_top().into_iter().flatten().chain(chrome::rail_bottom()).find(|i| (i.is)(t)).map(|i| i.name);
+            // Until a pane has been clicked nothing has focus, so use the first one.
+            let focused = match tab.dock.find_active_focused() {
+                Some((_, t)) => name_of(t),
+                None => tab.dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).and_then(name_of),
+            };
+            egui::Panel::left("rail").frame(egui::Frame::new().fill(pal.bg)).resizable(false).exact_size(chrome::RAIL_WIDTH).show(ui, |ui| {
+                if let Some(t) = chrome::rail(ui, &|i| focused == Some(i.name), &pal) {
+                    out.push(Action::OpenTab(t));
+                }
+            });
+        }
+        if !self.repos.is_empty() {
+            egui::Panel::top("top-bar").frame(bar_frame).show_separator_line(false).show(ui, |ui| self.toolbar(ui, &mut out));
+        }
+
         if let Some(tab) = self.repos.get_mut(self.active) {
             let RepoTab { repo, data, dock, inspect, show_inspect, sidebar, show_sidebar, .. } = tab;
             if let Some(s) = data.status.get()
@@ -1055,10 +1207,21 @@ impl GitemApp {
             }
         } else {
             self.palette = None;
-            egui::CentralPanel::default().show(ui, |ui| self.welcome(ui, &mut out));
+            if let Some(s) = &mut self.no_repo_settings {
+                let settings = &self.settings;
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let NoRepoSettings { repo, data, view } = &mut **s;
+                    let mut cx = Cx { repo, data, settings, pal: &pal, out: &mut out };
+                    view.ui(ui, &mut cx);
+                });
+            } else {
+                egui::CentralPanel::default().show(ui, |ui| self.welcome(ui, &mut out));
+            }
         }
 
         self.dialogs(&ctx, &mut out);
+        self.about(&ctx, &mut out);
+        chrome::window_edges(&ctx, &pal);
         for a in out {
             self.apply_action(&ctx, a);
         }
@@ -1069,7 +1232,13 @@ impl GitemApp {
 }
 
 impl eframe::App for GitemApp {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if !std::mem::replace(&mut self.styled_window, true) {
+            chrome::native_window_style(frame);
+        }
+        #[cfg(not(windows))]
+        let _ = frame;
         self.frame(ui);
     }
 

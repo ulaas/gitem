@@ -55,6 +55,7 @@ gitem looks for git in this order:
 | Agents | A board of Claude Code and Codex sessions in this repository's worktrees, with resume, archive, and a file activity treemap; start a session in any worktree |
 | Review | Sessions with a file checklist, comment threads, AI findings, a reading-order suggestion, and handing open notes to an agent |
 | Auto-rebase | Rebase with AI conflict resolution that pauses when the model is unsure, with one-click undo |
+| Window | The app draws its own titlebar and an icon rail of views with tooltips, so it looks the same on every platform; an About box shows the commit a build came from (also `gitem --version`) |
 | Modes | Zen mode (`Ctrl+Shift+Z`) hides the side panels; dockable tabs replace detachable views |
 | Terminal links | Not applicable. A Git console shows every command gitem runs and lets you run your own |
 
@@ -159,5 +160,6 @@ Tests create temporary repositories and briefly store a uniquely named test cred
 
 - Remote operations never run against a hosting service or over HTTPS, and SSH remotes and passphrase prompts aren't exercised.
 - Hosting, issue-tracker, and AI requests go to the local mock, so they prove gitem's side of each exchange against sample responses, not that a real service accepts them. Try these with your own accounts before relying on them.
+- Moving and resizing the custom window were checked by hand-style mouse input on Windows only, not in the test suite. On other platforms window corners stay square, and cancelling kills only git itself, not what it started.
 - Native file-picker dialogs aren't automated. Every picker also has a text field.
 - Copilot CLI and OpenCode reading is tested against sample data. No real Copilot session was available, and the real OpenCode database had no tool calls in it.

@@ -138,6 +138,8 @@ pub fn install_fonts(ctx: &egui::Context) {
     #[cfg(all(unix, not(target_os = "macos")))]
     const CANDIDATES: &[&str] = &["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"];
     let mut fonts = egui::FontDefinitions::default();
+    // Icons come first: they're the same on every platform.
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     for path in CANDIDATES {
         if let Ok(bytes) = std::fs::read(path) {
             let name = format!("system:{path}");
