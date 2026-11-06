@@ -15,6 +15,10 @@ use gitem::views::Tab;
 use gitem_core::repo::DiffSource;
 use gitem_core::{GitExe, LogQuery, ops};
 
+/// Only for noticing that something hangs, so a slow machine must never reach it.
+/// A loaded runner can make these tests ten times slower than usual.
+const PATIENCE: Duration = Duration::from_secs(180);
+
 struct Fx {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -85,7 +89,7 @@ fn pump(h: &mut Harness<GitemApp>, cond: impl Fn(&GitemApp) -> bool, what: &str)
             h.step();
             return;
         }
-        assert!(t.elapsed() < Duration::from_secs(25), "timed out waiting for {what}");
+        assert!(t.elapsed() < PATIENCE, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(15));
     }
 }
@@ -117,7 +121,7 @@ fn wait_until_quiet(h: &mut Harness<GitemApp>) {
     while quiet_frames < 5 {
         h.step();
         quiet_frames = if quiet(h) { quiet_frames + 1 } else { 0 };
-        assert!(t.elapsed() < Duration::from_secs(60), "background work never finished");
+        assert!(t.elapsed() < PATIENCE, "background work never finished");
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -142,7 +146,7 @@ fn pump_for_label(h: &mut Harness<GitemApp>, label: &str) {
     let t = Instant::now();
     while h.query_by_label(label).is_none() {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(25), "no widget labelled {label:?}");
+        assert!(t.elapsed() < PATIENCE, "no widget labelled {label:?}");
         std::thread::sleep(Duration::from_millis(15));
     }
 }
@@ -264,7 +268,7 @@ fn commit_through_the_changes_view() {
     let t0 = Instant::now();
     while f.subjects()[0] != "Add c file" {
         h.step();
-        assert!(t0.elapsed() < Duration::from_secs(20), "commit never landed: {:?}", f.subjects());
+        assert!(t0.elapsed() < PATIENCE, "commit never landed: {:?}", f.subjects());
         std::thread::sleep(Duration::from_millis(15));
     }
     assert_eq!(f.git(&["status", "--short"]), "");
@@ -275,7 +279,7 @@ fn wait_for(h: &mut Harness<GitemApp>, what: &str, cond: impl Fn() -> bool) {
     let t = Instant::now();
     while !cond() {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out: {what}");
+        assert!(t.elapsed() < PATIENCE, "timed out: {what}");
         std::thread::sleep(Duration::from_millis(15));
     }
     h.step();
@@ -296,7 +300,7 @@ fn stage_a_hunk_from_the_diff_view() {
     let t = Instant::now();
     while h.query_all_by_label("Stage hunk").count() < 2 {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(15));
+        assert!(t.elapsed() < PATIENCE);
     }
     h.query_all_by_label("Stage hunk").next().unwrap().click();
     h.step();
@@ -696,7 +700,7 @@ fn merge_tab_reloads_when_the_conflict_changes_and_refuses_stale_saves() {
     let t = Instant::now();
     while h.query_by_label("Take your commit").is_none() {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(20), "tab did not reload for the new conflict");
+        assert!(t.elapsed() < PATIENCE, "tab did not reload for the new conflict");
         std::thread::sleep(Duration::from_millis(15));
     }
     click(&mut h, "Take your commit");
@@ -1080,7 +1084,7 @@ fn health_view_enables_and_undoes_an_option() {
     let t = Instant::now();
     while h.query_all_by_label("Enable").count() < 6 {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(15));
+        assert!(t.elapsed() < PATIENCE);
     }
     // The second item is the untracked cache.
     h.query_all_by_label("Enable").nth(1).unwrap().click();
@@ -1486,7 +1490,7 @@ fn the_sidebar_shows_incoming_and_outgoing_commits_on_a_branch() {
     let t = Instant::now();
     while h.query_by_label("Incoming from origin/main (1)").is_some() {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(15), "still shown as incoming");
+        assert!(t.elapsed() < PATIENCE, "still shown as incoming");
         std::thread::sleep(Duration::from_millis(15));
     }
     no_errors(&h);
@@ -1527,7 +1531,7 @@ fn sidebar_sections_are_tall_toggle_and_keep_their_actions_on_the_header() {
     let t = Instant::now();
     while h.query_by_label("listed-branch").is_some() {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(5), "the section didn't close");
+        assert!(t.elapsed() < PATIENCE, "the section didn't close");
         std::thread::sleep(Duration::from_millis(15));
     }
     click(&mut h, "New branch");
@@ -1672,7 +1676,7 @@ fn opening_a_file_runs_a_launcher_script_with_a_path_containing_spaces() {
     assert!(errors.is_empty(), "{errors:?}");
     let t = Instant::now();
     while !marker.exists() {
-        assert!(t.elapsed() < Duration::from_secs(10), "the script didn't run");
+        assert!(t.elapsed() < PATIENCE, "the script didn't run");
         std::thread::sleep(Duration::from_millis(20));
     }
     std::thread::sleep(Duration::from_millis(100));
@@ -1921,7 +1925,7 @@ fn the_commit_graph_loads_more_from_a_bar_and_then_says_nothing() {
     let t = Instant::now();
     while graph_loaded(&h) > 0 {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(20), "the bar stayed");
+        assert!(t.elapsed() < PATIENCE, "the bar stayed");
         std::thread::sleep(Duration::from_millis(15));
     }
     no_errors(&h);
@@ -1944,7 +1948,7 @@ fn the_sidebar_commits_section_loads_more() {
     let t = Instant::now();
     while h.query_by_label("Load 100 more").is_some() {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(20), "the button stayed");
+        assert!(t.elapsed() < PATIENCE, "the button stayed");
         std::thread::sleep(Duration::from_millis(15));
     }
     no_errors(&h);

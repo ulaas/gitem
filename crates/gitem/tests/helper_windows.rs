@@ -12,6 +12,10 @@ use gitem::standalone::{HelperApp, Mode};
 use gitem::views::mergeview::{MergeSource, MergeView};
 use gitem::views::rebase::RebaseView;
 
+/// Only for noticing that something hangs, so a slow machine must never reach it.
+/// A loaded runner can make these tests ten times slower than usual.
+const PATIENCE: Duration = Duration::from_secs(180);
+
 fn harness<'a>(mode: Mode) -> Harness<'a, HelperApp> {
     let app = HelperApp::new(mode);
     Harness::builder().with_size(vec2(1000.0, 700.0)).with_max_steps(5).build_ui_state(|ui, app: &mut HelperApp| app.frame(ui), app)
@@ -21,7 +25,7 @@ fn find(h: &mut Harness<HelperApp>, label: &str) {
     let t = Instant::now();
     while h.query_by_label(label).is_none() {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(20), "no widget labelled {label:?}");
+        assert!(t.elapsed() < PATIENCE, "no widget labelled {label:?}");
         std::thread::sleep(Duration::from_millis(10));
     }
     for _ in 0..3 {
