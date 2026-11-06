@@ -22,11 +22,17 @@ pub fn dir() -> PathBuf {
     config_dir().join("patches")
 }
 
-pub fn save(meta: &PatchMeta, content: &str) -> std::io::Result<()> {
+/// Bytes, because a patch of files in other encodings must keep theirs.
+pub fn save(meta: &PatchMeta, content: &[u8]) -> std::io::Result<()> {
     let d = dir();
     std::fs::create_dir_all(&d)?;
-    std::fs::write(d.join(format!("{}.patch", meta.id)), content)?;
-    std::fs::write(d.join(format!("{}.json", meta.id)), serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?)
+    crate::util::write_atomic(&d.join(format!("{}.patch", meta.id)), content)?;
+    save_meta(meta)
+}
+
+/// Updates a patch's details and leaves the patch itself alone.
+pub fn save_meta(meta: &PatchMeta) -> std::io::Result<()> {
+    crate::util::write_atomic(&dir().join(format!("{}.json", meta.id)), &serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?)
 }
 
 pub fn list() -> Vec<PatchMeta> {
@@ -45,8 +51,8 @@ pub fn patch_path(id: &str) -> PathBuf {
     dir().join(format!("{id}.patch"))
 }
 
-pub fn content(id: &str) -> std::io::Result<String> {
-    std::fs::read_to_string(patch_path(id))
+pub fn content(id: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(patch_path(id))
 }
 
 pub fn delete(id: &str) -> std::io::Result<()> {

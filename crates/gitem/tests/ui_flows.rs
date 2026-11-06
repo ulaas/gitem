@@ -1724,6 +1724,75 @@ fn an_edit_in_a_settings_tab_keeps_what_changed_elsewhere() {
     assert_eq!(s.favorite_branches, vec!["main"]);
 }
 
+fn saved_patch_for_test(id: &str, content: &[u8]) {
+    let meta = gitem_core::patches::PatchMeta { id: id.to_string(), title: format!("Patch {id}"), description: String::new(), repo: "r".into(), created: 1, base: String::new(), gist_url: String::new() };
+    gitem_core::patches::save(&meta, content).unwrap();
+}
+
+/// There's no getting a patch back, and one click used to delete it.
+#[test]
+fn deleting_a_patch_asks_first() {
+    let f = Fx::new();
+    sample_history(&f);
+    saved_patch_for_test("delete-me", b"some patch\n");
+    let path = gitem_core::patches::patch_path("delete-me");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Patches(Box::new(gitem::views::patches::PatchesView::showing("delete-me"))));
+    click(&mut h, "Delete…");
+    pump_for_label(&mut h, "Delete it");
+    assert!(path.exists(), "still there before answering");
+    click(&mut h, "Keep it");
+    assert!(path.exists());
+    click(&mut h, "Delete…");
+    click(&mut h, "Delete it");
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_patch_with_other_encodings_can_not_be_copied_as_text() {
+    use egui_kittest::kittest::NodeT;
+    let f = Fx::new();
+    sample_history(&f);
+    saved_patch_for_test("latin1", b"+caf\xe9\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Patches(Box::new(gitem::views::patches::PatchesView::showing("latin1"))));
+    pump_for_label(&mut h, "Copy");
+    assert!(h.get_by_label("Copy").accesskit_node().is_disabled());
+    gitem_core::patches::delete("latin1").unwrap();
+}
+
+/// Trimming the pasted text took off a hunk's last line when that was a blank context line.
+#[test]
+fn a_pasted_patch_ending_in_a_blank_context_line_applies() {
+    let f = Fx::new();
+    f.write("f.txt", "one\ntwo\n\n");
+    f.commit("base");
+    f.write("f.txt", "ONE\ntwo\n\n");
+    let patch = f.git(&["diff"]);
+    assert!(patch.ends_with("\n \n"), "the case being tested: {patch:?}");
+    f.git(&["checkout", "--", "f.txt"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Form(gitem::palette::apply_copied_patch_form()));
+    let input = egui::accesskit::Role::MultilineTextInput;
+    pump_for_role(&mut h, input);
+    for _ in 0..3 {
+        h.step();
+    }
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text(&patch);
+    h.step();
+    h.step();
+    click(&mut h, "Apply");
+    wait_for(&mut h, "the patch to apply", || std::fs::read_to_string(f.root.join("f.txt")).unwrap() == "ONE\ntwo\n\n");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
 const CLOSE_TITLE: &str = "Close with work not saved?";
 
 fn close_commands(h: &Harness<GitemApp>) -> Vec<egui::ViewportCommand> {

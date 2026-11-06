@@ -169,16 +169,8 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Show", "Unstaged Diff", |cx| cx.diff(DiffSource::Unstaged, None)));
     v.push(item("Show", "All Changes vs HEAD", |cx| cx.diff(DiffSource::WorkingVsHead, None)));
     v.push(item("Git", "Undo Last Commit", |cx| cx.run(ops::undo_commit())));
-    v.push(item("Git", "Apply Copied Patch…", |cx| {
-        cx.form(forms::FormDialog::new("Apply copied patch", "Apply").multiline("patch", "Paste the patch", "").check("three", "Three-way merge on failure", true).on_submit(|v| {
-            let t = v.text("patch");
-            if t.trim().is_empty() {
-                return Err("Paste a patch first.".to_string());
-            }
-            Ok(vec![Action::Run(ops::apply_patch_text(&format!("{}\n", t.trim_end()), v.on("three")))])
-        }));
-    }));
-    v.push(item("Git", "Copy Working Changes as Patch", |cx| match cx.repo.diff_text(&DiffSource::WorkingVsHead) {
+    v.push(item("Git", "Apply Copied Patch…", |cx| cx.form(apply_copied_patch_form())));
+    v.push(item("Git", "Copy Working Changes as Patch", |cx| match cx.repo.patch_text(&DiffSource::WorkingVsHead) {
         Ok(p) => cx.copy(p),
         Err(e) => cx.error(e.to_string()),
     }));
@@ -226,6 +218,21 @@ pub fn commands() -> Vec<Item> {
     v.push(item("App", "Open Terminal Here", |cx| cx.out.push(Action::OpenTerminal(cx.repo.root.clone(), None))));
     v.push(item("App", "Refresh", |cx| cx.out.push(Action::Refresh)));
     v
+}
+
+/// Whitespace is the patch's own, and a blank context line at the end is a line of it,
+/// so nothing is trimmed. A patch only has to end in a newline.
+pub fn apply_copied_patch_form() -> forms::FormDialog {
+    forms::FormDialog::new("Apply copied patch", "Apply").multiline("patch", "Paste the patch", "").check("three", "Three-way merge on failure", true).on_submit(|v| {
+        let mut t = v.text("patch");
+        if t.trim().is_empty() {
+            return Err("Paste a patch first.".to_string());
+        }
+        if !t.ends_with('\n') {
+            t.push('\n');
+        }
+        Ok(vec![Action::Run(ops::apply_patch_text(&t, v.on("three")))])
+    })
 }
 
 fn pick_ref(title: &str, refs: Vec<String>, then: fn(String) -> forms::FormDialog) -> forms::FormDialog {

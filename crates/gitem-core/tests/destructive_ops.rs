@@ -180,6 +180,151 @@ fn unstage_all_works_before_the_first_commit() {
 
 // ---- stashes -----------------------------------------------------------------------
 
+/// All the kinds of change at once, committed base first.
+fn every_kind_of_change(f: &Fx) -> Vec<(&'static str, Vec<u8>)> {
+    std::fs::write(f.root.join("text.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(f.root.join("latin1.txt"), b"caf\xe9\nline\n").unwrap();
+    std::fs::write(f.root.join("data.bin"), [0u8, 1, 2, 3, 255, 0, 7]).unwrap();
+    f.q(&["add", "."]);
+    f.q(&["commit", "-qm", "base"]);
+    let edits: Vec<(&'static str, Vec<u8>)> = vec![
+        ("text.txt", b"one\nchanged\n".to_vec()),
+        ("latin1.txt", b"caf\xe9\nchang\xe9\n".to_vec()),
+        ("data.bin", vec![9, 0, 8, 0, 7, 255]),
+        ("new-untracked.txt", b"brand new\n".to_vec()),
+        ("new-binary.bin", vec![1, 0, 2, 0, 3]),
+    ];
+    for (name, bytes) in &edits {
+        std::fs::write(f.root.join(name), bytes).unwrap();
+    }
+    edits
+}
+
+fn saved_patch(f: &Fx, bytes: &[u8]) -> String {
+    let file = f.beside("saved.patch");
+    std::fs::write(&file, bytes).unwrap();
+    path_str(&file)
+}
+
+/// A saved patch is what someone trusts when they discard their work. It used to leave out
+/// untracked files, and any binary or non-UTF-8 change stopped the whole of it applying.
+#[test]
+fn a_saved_patch_of_all_changes_brings_all_of_them_back() {
+    let f = Fx::new();
+    let edits = every_kind_of_change(&f);
+    let before_index = f.q(&["diff", "--cached", "--name-only"]);
+    let patch = f.repo.patch_bytes(&gitem_core::repo::DiffSource::WorkingVsHead).unwrap();
+    assert_eq!(f.q(&["diff", "--cached", "--name-only"]), before_index, "making it leaves the index alone");
+    assert!(f.q(&["status", "--short"]).contains("?? new-untracked.txt"), "and the file stays untracked");
+    let file = saved_patch(&f, &patch);
+
+    f.q(&["reset", "-q", "--hard"]);
+    f.q(&["clean", "-qfd"]);
+    assert!(!f.exists("new-untracked.txt"));
+    f.run(ops::apply_patch_file(&file, true, false));
+    for (name, bytes) in &edits {
+        assert_eq!(std::fs::read(f.root.join(name)).unwrap(), *bytes, "{name}");
+    }
+}
+
+#[test]
+fn a_saved_patch_of_staged_changes_carries_binary_files() {
+    let f = Fx::new();
+    let edits = every_kind_of_change(&f);
+    f.q(&["add", "data.bin", "new-binary.bin", "latin1.txt"]);
+    let patch = f.repo.patch_bytes(&gitem_core::repo::DiffSource::Staged).unwrap();
+    let file = saved_patch(&f, &patch);
+    f.q(&["reset", "-q", "--hard"]);
+    f.q(&["clean", "-qfd"]);
+    f.run(ops::apply_patch_file(&file, false, false));
+    for (name, bytes) in edits.iter().filter(|(n, _)| ["data.bin", "new-binary.bin", "latin1.txt"].contains(n)) {
+        assert_eq!(std::fs::read(f.root.join(name)).unwrap(), *bytes, "{name}");
+    }
+    assert_eq!(f.read("text.txt"), "one\ntwo\n", "it wasn't staged, so it isn't in the patch");
+}
+
+#[test]
+fn a_commit_copied_as_a_patch_carries_binary_files() {
+    let f = Fx::new();
+    let _ = every_kind_of_change(&f);
+    f.q(&["add", "."]);
+    f.q(&["commit", "-qm", "the change"]);
+    let sha = f.q(&["rev-parse", "HEAD"]);
+    let wanted = std::fs::read(f.root.join("data.bin")).unwrap();
+    let patch = f.repo.patch_bytes(&gitem_core::repo::DiffSource::Commit(sha)).unwrap();
+    let file = saved_patch(&f, &patch);
+    f.q(&["reset", "-q", "--hard", "HEAD~1"]);
+    f.run(ops::apply_patch_file(&file, false, false));
+    assert_eq!(std::fs::read(f.root.join("data.bin")).unwrap(), wanted);
+}
+
+/// The clipboard can't carry these, so it says so instead of copying something else.
+#[test]
+fn a_patch_as_text_refuses_bytes_it_cannot_keep() {
+    let f = Fx::new();
+    let _ = every_kind_of_change(&f);
+    assert!(f.repo.patch_text(&gitem_core::repo::DiffSource::WorkingVsHead).is_err());
+    f.q(&["checkout", "--", "latin1.txt"]);
+    let text = f.repo.patch_text(&gitem_core::repo::DiffSource::WorkingVsHead).unwrap();
+    assert!(text.contains("GIT binary patch") && text.contains("new-untracked.txt"), "{text}");
+}
+
+/// Plain apply goes first, so an edit elsewhere in the file is no obstacle and nothing is
+/// staged. `--3way` from the start used to refuse this: "does not match index".
+#[test]
+fn applying_a_patch_works_around_an_unrelated_local_edit_and_stages_nothing() {
+    let f = Fx::new();
+    let lines: Vec<String> = (1..=20).map(|n| format!("line {n}\n")).collect();
+    f.write("big.txt", &lines.concat());
+    f.q(&["add", "."]);
+    f.q(&["commit", "-qm", "base"]);
+    f.write("big.txt", &lines.concat().replace("line 16\n", "line 16 patched\n"));
+    let file = saved_patch(&f, &f.repo.patch_bytes(&gitem_core::repo::DiffSource::Unstaged).unwrap());
+    f.q(&["checkout", "--", "big.txt"]);
+    f.write("big.txt", &lines.concat().replace("line 1\n", "line 1 local\n"));
+
+    let op = ops::apply_patch_file(&file, true, false);
+    let out = op.run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap();
+    assert_eq!(op.outcome_note(&out), None, "no fallback needed, so nothing extra to say");
+    let now = f.read("big.txt");
+    assert!(now.contains("line 1 local\n") && now.contains("line 16 patched\n"), "{now}");
+    assert_eq!(f.q(&["diff", "--cached", "--name-only"]), "", "nothing is staged");
+}
+
+#[test]
+fn a_patch_that_needs_a_three_way_merge_gets_one_and_says_so() {
+    let f = Fx::new();
+    let lines: Vec<String> = (1..=10).map(|n| format!("line {n}\n")).collect();
+    f.write("f.txt", &lines.concat());
+    f.q(&["add", "."]);
+    f.q(&["commit", "-qm", "base"]);
+    f.write("f.txt", &lines.concat().replace("line 5\n", "line 5 patched\n"));
+    let file = saved_patch(&f, &f.repo.patch_bytes(&gitem_core::repo::DiffSource::Unstaged).unwrap());
+    f.q(&["checkout", "--", "f.txt"]);
+    // Inside the patch's context, so plain apply can't, but apart enough to merge.
+    f.write("f.txt", &lines.concat().replace("line 3\n", "line 3 moved on\n"));
+    f.q(&["add", "."]);
+    f.q(&["commit", "-qm", "moved on"]);
+
+    let op = ops::apply_patch_file(&file, true, false);
+    let out = op.run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap();
+    assert!(op.outcome_note(&out).is_some_and(|n| n.contains("three-way")));
+    let now = f.read("f.txt");
+    assert!(now.contains("line 3 moved on\n") && now.contains("line 5 patched\n"), "{now}");
+}
+
+#[test]
+fn a_patch_that_can_not_apply_at_all_changes_nothing() {
+    let f = Fx::new();
+    f.write("f.txt", "one\n");
+    f.q(&["add", "."]);
+    f.q(&["commit", "-qm", "base"]);
+    let file = saved_patch(&f, b"diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-something else\n+new\n");
+    assert!(f.fails(ops::apply_patch_file(&file, true, false)));
+    assert_eq!(f.read("f.txt"), "one\n");
+    assert_eq!(f.q(&["status", "--short"]), "");
+}
+
 fn plan(groups: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
     groups.iter().map(|(m, f)| (m.to_string(), f.iter().map(|s| s.to_string()).collect())).collect()
 }

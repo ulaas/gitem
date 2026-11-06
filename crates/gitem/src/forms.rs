@@ -829,7 +829,7 @@ mod tests {
     #[test]
     fn patch_note_bisect_and_other_forms() {
         check("submodule", add_submodule(), &[("url", "u"), ("path", "p")], "submodule add -- u p");
-        check("patch, three-way by default", apply_patch_form(), &[("file", "f")], "apply --whitespace=nowarn --3way f");
+        check("patch, three-way if plain fails", apply_patch_form(), &[("file", "f")], "apply --whitespace=nowarn f && apply --whitespace=nowarn --3way f");
         check("patch", apply_patch_form(), &[("file", "f"), ("three", "0")], "apply --whitespace=nowarn f");
         check("email patch", apply_patch_form(), &[("file", "f"), ("am", "1")], "am --3way f");
         check("export", format_patch_form(s("a..b")), &[("dir", "/o")], "format-patch -o /o a..b");

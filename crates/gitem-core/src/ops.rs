@@ -221,16 +221,19 @@ pub fn apply_patch(title: &str, patch: String, cached: bool, reverse: bool) -> G
     GitOp::new(title).step_v(a).stdin(patch)
 }
 
+const THREE_WAY_NOTE: &str = "It didn't apply as it stood, so a three-way merge was used, and its changes are staged.";
+
+/// With `three_way`, only as a fallback: `--3way` from the start refuses files with
+/// unrelated local edits, and stages what it applies. Plain `git apply` is all or nothing,
+/// so a failed first try leaves nothing for the second to trip over.
 pub fn apply_patch_file(path: &str, three_way: bool, index: bool) -> GitOp {
     let mut a = v(&["apply", "--whitespace=nowarn"]);
-    if three_way {
-        a.push("--3way".into());
-    }
     if index && !three_way {
         a.push("--index".into());
     }
     a.push(path.to_string());
-    GitOp::new("Apply patch").step_v(a)
+    let op = GitOp::new("Apply patch").step_v(a);
+    if three_way { op.or_else(v(&["apply", "--whitespace=nowarn", "--3way", path]), THREE_WAY_NOTE) } else { op }
 }
 
 pub fn am_patch_file(path: &str) -> GitOp {
@@ -1019,18 +1022,15 @@ pub fn reword_head(message: &str) -> GitOp {
     GitOp::new("Reword commit").step(&["commit", "--amend", "--only", "--cleanup=whitespace", "-F", "-"]).stdin(message.as_bytes().to_vec())
 }
 
+/// See [`apply_patch_file`] for how `three_way` works.
 pub fn apply_patch_text(patch: &str, three_way: bool) -> GitOp {
-    let mut a = v(&["apply", "--whitespace=nowarn"]);
-    if three_way {
-        a.push("--3way".into());
-    }
-    a.push("-".into());
-    GitOp::new("Apply patch").step_v(a).stdin(patch.as_bytes().to_vec())
+    let op = GitOp::new("Apply patch").step(&["apply", "--whitespace=nowarn", "-"]).stdin(patch.as_bytes().to_vec());
+    if three_way { op.or_else(v(&["apply", "--whitespace=nowarn", "--3way", "-"]), THREE_WAY_NOTE).stdin(patch.as_bytes().to_vec()) } else { op }
 }
 
 /// Apply a patch in another worktree of this repository.
-pub fn apply_patch_in(worktree: &str, patch: &str) -> GitOp {
-    GitOp::new(format!("Copy changes to {worktree}")).step(&["-C", worktree, "apply", "--3way", "--whitespace=nowarn", "-"]).stdin(patch.as_bytes().to_vec())
+pub fn apply_patch_in(worktree: &str, patch: &[u8]) -> GitOp {
+    GitOp::new(format!("Copy changes to {worktree}")).step(&["-C", worktree, "apply", "--3way", "--whitespace=nowarn", "-"]).stdin(patch.to_vec())
 }
 
 /// Stashes are shared between worktrees, so any of them can apply one.

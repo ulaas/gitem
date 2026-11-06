@@ -891,7 +891,7 @@ fn parity_commands_undo_reword_fixups_and_copies() {
     let d = tempfile::tempdir().unwrap();
     let wt = d.path().join("w").to_string_lossy().replace('\\', "/");
     f.run(ops::worktree_add(&wt, None, Some("other"), None, false));
-    f.run(ops::apply_patch_in(&wt, &patch));
+    f.run(ops::apply_patch_in(&wt, patch.as_bytes()));
     assert_eq!(std::fs::read_to_string(format!("{wt}/a.txt")).unwrap(), "changed\n");
     f.repo.git.run(Some(Path::new(&wt)), &["reset", "-q", "--hard"]).unwrap();
     f.run(ops::stash_push(&ops::StashOpts { message: "s".into(), ..Default::default() }));

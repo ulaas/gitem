@@ -139,7 +139,7 @@ pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
         cx.copy(d.to_url());
     }
     if item(ui, "Copy as patch") {
-        match cx.repo.diff_text(&DiffSource::Commit(sha.clone())) {
+        match cx.repo.patch_text(&DiffSource::Commit(sha.clone())) {
             Ok(p) => cx.copy(p),
             Err(e) => cx.error(e.to_string()),
         }
@@ -440,8 +440,8 @@ pub fn worktree_menu(ui: &mut Ui, cx: &mut Cx, w: &Worktree) {
             cx.out.push(Action::GraphFocus(b));
         }
     if !w.is_current && item(ui, "Copy my changes here") {
-        match cx.repo.diff_text(&DiffSource::WorkingVsHead) {
-            Ok(p) if p.trim().is_empty() => cx.toast("There are no tracked changes to copy."),
+        match cx.repo.patch_bytes(&DiffSource::WorkingVsHead) {
+            Ok(p) if p.iter().all(u8::is_ascii_whitespace) => cx.toast("There are no changes to copy."),
             Ok(p) => cx.run(ops::apply_patch_in(&path, &p)),
             Err(e) => cx.error(e.to_string()),
         }

@@ -536,6 +536,67 @@ impl Repo {
         Ok(self.run_v(&args)?.text())
     }
 
+    /// The changes as a patch that applies back exactly: binary files included, bytes as
+    /// they are whatever the encoding, and for working changes, new untracked files too.
+    /// That's what someone expects to get back after discarding their work.
+    pub fn patch_bytes(&self, src: &DiffSource) -> Result<Vec<u8>> {
+        let flags = ["--binary".to_string(), "--full-index".to_string()];
+        let mut args: Vec<String> = match src {
+            DiffSource::Staged => vec!["diff".into(), "--cached".into()],
+            DiffSource::Unstaged => vec!["diff".into()],
+            DiffSource::WorkingVsHead => vec!["diff".into()],
+            DiffSource::Commit(s) => vec!["show".into(), "--format=".into(), "-m".into(), "--first-parent".into()].into_iter().chain(flags.iter().cloned()).chain([s.clone()]).collect(),
+            DiffSource::Range(a, b) => vec!["diff".into(), format!("{a}..{b}")],
+            DiffSource::MergeBase(a, b) => vec!["diff".into(), format!("{a}...{b}")],
+            DiffSource::WorkingVs(r) => vec!["diff".into(), r.clone()],
+            _ => return Err(Error::Other("unsupported diff source".into())),
+        };
+        if !matches!(src, DiffSource::Commit(_)) {
+            args.extend(flags);
+        }
+        if *src == DiffSource::WorkingVsHead {
+            args.push("HEAD".into());
+            return self.diff_with_untracked(&args);
+        }
+        Ok(self.run_v(&args)?.stdout)
+    }
+
+    /// As text, for the clipboard, which can't carry arbitrary bytes. An error rather than
+    /// a patch with its bytes changed, which would apply wrongly or not at all.
+    pub fn patch_text(&self, src: &DiffSource) -> Result<String> {
+        String::from_utf8(self.patch_bytes(src)?).map_err(|_| Error::Other("These changes include text that isn't UTF-8, which the clipboard can't carry exactly. Save them as a patch in the Patches view instead.".into()))
+    }
+
+    /// Runs a diff that also sees untracked files, by marking them as intended to be added
+    /// in a copy of the index. The real index isn't touched.
+    fn diff_with_untracked(&self, args: &[String]) -> Result<Vec<u8>> {
+        let untracked: Vec<String> = self.status()?.entries.into_iter().filter(|e| e.worktree == FileStatus::Untracked).map(|e| e.path).collect();
+        if untracked.is_empty() {
+            return Ok(self.run_v(args)?.stdout);
+        }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("gitem-patch-index-{}-{n}", std::process::id()));
+        let result = (|| -> Result<Vec<u8>> {
+            match std::fs::copy(self.git_dir.join("index"), &tmp) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::Other(format!("Could not copy the index: {e}"))),
+            }
+            let env = vec![("GIT_INDEX_FILE".to_string(), tmp.to_string_lossy().into_owned()), ("GIT_LITERAL_PATHSPECS".to_string(), "1".to_string())];
+            let mut names = Vec::new();
+            for p in &untracked {
+                names.extend_from_slice(p.as_bytes());
+                names.push(0);
+            }
+            let add = ["add", "--intent-to-add", "--pathspec-from-file=-", "--pathspec-file-nul"].map(String::from);
+            self.git.run_opts(Some(&self.root), &add, &RunOpts { stdin: Some(names), env: env.clone(), ..Default::default() }, &mut |_| {})?.into_result()?;
+            Ok(self.git.run_opts(Some(&self.root), args, &RunOpts { env, ..Default::default() }, &mut |_| {})?.into_result()?.stdout)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result
+    }
+
     // ---- blame -------------------------------------------------------------
 
     pub fn blame(&self, path: &str, rev: Option<&str>, opts: BlameOpts) -> Result<Vec<BlameLine>> {
