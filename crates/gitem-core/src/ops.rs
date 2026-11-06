@@ -932,9 +932,10 @@ pub fn squash_fixups(base: &str) -> GitOp {
     GitOp::new("Squash fixups").step(&["rebase", "--interactive", "--autosquash", "--autostash", base]).env("GIT_SEQUENCE_EDITOR", "true").env("GIT_EDITOR", "true")
 }
 
-/// Change the message of the current commit.
+/// Change the message of the current commit. `--only` with no paths keeps what is
+/// staged out of it, so a message edit can't change the commit's content.
 pub fn reword_head(message: &str) -> GitOp {
-    GitOp::new("Reword commit").step(&["commit", "--amend", "--cleanup=whitespace", "-F", "-"]).stdin(message.as_bytes().to_vec())
+    GitOp::new("Reword commit").step(&["commit", "--amend", "--only", "--cleanup=whitespace", "-F", "-"]).stdin(message.as_bytes().to_vec())
 }
 
 pub fn apply_patch_text(patch: &str, three_way: bool) -> GitOp {

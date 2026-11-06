@@ -1202,6 +1202,20 @@ fn unstaging_during_a_cherry_pick_keeps_it_going() {
 }
 
 #[test]
+fn rewording_head_leaves_what_is_staged_out_of_the_commit() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit_all("first");
+    f.write("staged.txt", "not for this commit\n");
+    f.run(ops::stage_paths(&["staged.txt".to_string()]));
+    f.run(ops::reword_head("reworded"));
+    assert_eq!(f.subjects(), ["reworded"]);
+    let files = f.repo.git.run(Some(&f.repo.root), &["show", "--format=", "--name-only", "HEAD"]).unwrap().text();
+    assert_eq!(files.trim(), "a.txt");
+    assert_eq!(staged_paths(&f), ["staged.txt"]);
+}
+
+#[test]
 fn tokens_in_urls_stay_out_of_titles_previews_and_the_console() {
     let f = Fx::new();
     let url = "http://user:FAKETOKEN@127.0.0.1:1/x.git";
