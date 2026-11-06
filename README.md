@@ -13,6 +13,8 @@ With no path, gitem restores the repositories from your last session.
 
 ### Which git is used
 
+gitem needs **git 2.38 or newer**, and warns at startup if it finds an older one. Most things still work below that, but merge conflict checks (`merge-tree --write-tree`) and updating dependent branches in a rebase (`rebase --update-refs`) need 2.38.
+
 gitem looks for git in this order:
 
 1. The path set in **Settings > General**.
@@ -162,6 +164,11 @@ Write operations are data (`ops.rs`), so every mutation can be logged, confirmed
 - **HTTP client tests:** the hosting, issue-tracker, and AI clients make real requests to a mock server on localhost.
 - **Headless UI tests** that click real widgets, right-click for context menus, drag refs, and drive the helper windows, then verify the result with git or on disk.
 - **Helper tests** that have real git invoke the built binary.
+- **Property tests** (`crates/gitem-core/tests/properties.rs`) of partial patches through real `git apply`, the merge engine, and the parsers. Case counts are small by default: set `PROPTEST_CASES` for a longer hunt.
+- **Performance tests** that fail if parsing stops scaling linearly (`crates/gitem-core/tests/perf.rs`), if a frame gets slow, or if an idle window starts running git, with very large histories, diffs, files, ref lists and statuses. The harness doesn't paint, so these don't measure drawing.
+- **Lifecycle tests** (`crates/gitem/tests/lifecycle.rs`) of real startup, exit, the saved session, and old, new and broken settings files.
+
+Tests ignored with a bug's ID, such as `#[ignore = "VC-6, Phase 3"]`, show a known bug and fail until it's fixed.
 
 Opt-in tests have real git open the real windows, including the password prompt, which answer by themselves through `GITEM_TEST_ACCEPT`: `cargo test -p gitem --test real_git_windows --test http_auth --test helper_modes -- --ignored --test-threads=1`. Debug builds read that variable and `GITEM_SHOT`; release builds ignore them.
 

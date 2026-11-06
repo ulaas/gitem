@@ -433,13 +433,17 @@ fn interactive_rebase_through_the_real_sequence_editor_helper() {
     let rebase = gitem::views::rebase::RebaseView::new(Some(base));
     h.state_mut().repos[0].open_tab(Tab::Rebase(Box::new(rebase)));
     pump_for_label(&mut h, "Rebase 3 commit(s)");
-    // Edit the plan directly: drop "two", which the view would do via its combo box.
-    for (_, t) in h.state_mut().repos[0].dock.iter_all_tabs_mut() {
-        if let Tab::Rebase(r) = t {
-            r.items[1].action = gitem_core::rebase::RebaseAction::Drop;
-        }
+    // Drop "two", the second row, through its action box. Rows list oldest first.
+    let action_boxes = || egui_kittest::kittest::by().role(egui::accesskit::Role::ComboBox).value("pick");
+    let t = Instant::now();
+    while h.query_all(action_boxes()).count() < 3 {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the plan never showed");
     }
+    let box_y = h.get_by_label("two").rect().center().y;
+    h.query_all(action_boxes()).find(|n| (n.rect().center().y - box_y).abs() < 14.0).expect("the row of \"two\" has an action box").click();
     h.step();
+    click_last(&mut h, "drop");
     click(&mut h, "Rebase 3 commit(s)");
     wait_for(&mut h, "rebase done", || f.subjects().len() == 3);
     assert_eq!(f.subjects(), vec!["three", "one", "base"]);
@@ -601,9 +605,42 @@ fn log_query_helpers_used_by_views_work() {
 }
 
 
-/// Not part of the normal run: `cargo test --release -- --ignored large_history`.
+/// The middle of `n` frames with the window idle, in milliseconds. The harness doesn't
+/// paint, so this is the view's own work, and the middle ignores a busy moment.
+fn median_frame_ms(h: &mut Harness<GitemApp>, n: usize) -> f64 {
+    let mut times: Vec<f64> = (0..n)
+        .map(|_| {
+            let t = Instant::now();
+            h.step();
+            t.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
+    times.sort_by(f64::total_cmp);
+    times[n / 2]
+}
+
+/// What a frame may cost with a very large repository open: most of one 60 Hz frame,
+/// when these take under a millisecond on an idle machine. That leaves room for a
+/// test run with every core busy, and is still far below anything a person would miss
+/// only if the view's work stays proportional to what's on screen.
+const FRAME_BOUND_MS: f64 = 12.0;
+
+/// Git commands run so far, so a test can see the idle window starts none.
+fn commands_so_far(f: &Fx) -> usize {
+    f.git.log.lock().unwrap().len()
+}
+
+fn assert_quiet_and_quick(h: &mut Harness<GitemApp>, f: &Fx, what: &str) {
+    wait_until_quiet(h);
+    let before = commands_so_far(f);
+    let frame = median_frame_ms(h, 120);
+    eprintln!("{what}: {frame:.2} ms per frame");
+    assert!(frame < FRAME_BOUND_MS, "{what}: {frame:.1} ms per frame");
+    let ran = commands_so_far(f).saturating_sub(before);
+    assert!(ran <= 2, "{what}: {ran} git commands in 120 idle frames, which should cost none");
+}
+
 #[test]
-#[ignore]
 fn large_history_stays_responsive() {
     let f = Fx::new();
     let n = 30_000;
@@ -637,18 +674,16 @@ fn large_history_stays_responsive() {
         },
         app,
     );
-    settle(&mut h);
-    let loaded = |a: &GitemApp| a.repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Graph(g) = t { Some(g.loaded_commits()) } else { None }).unwrap_or(0);
+    // Timed from the very first frame, which opens the repository. Settling first
+    // would absorb the load and report nothing.
+    let loaded = |a: &GitemApp| a.repos.first().and_then(|r| r.dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Graph(g) = t { Some(g.loaded_commits()) } else { None })).unwrap_or(0);
     let load_start = Instant::now();
     pump(&mut h, |a| loaded(a) == n as usize, "the commits to load");
-    eprintln!("loaded {} commits in {:.2} s", loaded(h.state()), load_start.elapsed().as_secs_f32());
-    let t = Instant::now();
-    for _ in 0..120 {
-        h.step();
-    }
-    let per_frame = t.elapsed().as_secs_f32() * 1000.0 / 120.0;
-    eprintln!("graph with {n} commits: {per_frame:.1} ms per frame");
-    assert!(per_frame < 40.0, "{per_frame} ms per frame");
+    let load = load_start.elapsed();
+    eprintln!("loaded {} commits in {load:?}", loaded(h.state()));
+    assert!(load < Duration::from_secs(20), "{n} commits took {load:?} to load");
+    settle(&mut h);
+    assert_quiet_and_quick(&mut h, &f, "graph of 30,000 commits");
 }
 
 #[test]
@@ -3011,4 +3046,148 @@ fn unstage_hunk_takes_only_that_hunk_out_of_the_index() {
     assert_eq!(on_disk(&f), edited);
     wait_until_quiet(&mut h);
     no_errors(&h);
+}
+
+#[test]
+fn a_huge_diff_costs_a_frame_no_more_than_a_small_one() {
+    let f = Fx::new();
+    let base: String = (0..60_000).map(|i| format!("line {i}\n")).collect();
+    f.write("big.txt", &base);
+    f.commit("base");
+    f.write("big.txt", &base.replace('l', "L"));
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("big.txt".into())));
+    pump_for_label(&mut h, "Stage hunk");
+    assert_quiet_and_quick(&mut h, &f, "diff of 120,000 lines");
+}
+
+#[test]
+fn a_big_blame_costs_a_frame_no_more_than_a_small_one() {
+    let f = Fx::new();
+    let text: String = (0..30_000).map(|i| format!("line {i}\n")).collect();
+    f.write("big.txt", &text);
+    f.commit("base");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("big.txt", None, None));
+    pump_for_label(&mut h, "Blame");
+    assert_quiet_and_quick(&mut h, &f, "file of 30,000 lines");
+}
+
+/// The sidebar's lists aren't virtualised: 40 ms per frame at 5,000 branches and 5,000 tags.
+#[test]
+#[ignore = "PF-36, Phase 5"]
+fn many_refs_cost_a_frame_no_more_than_a_few() {
+    let f = Fx::new();
+    many_commits(&f, 200);
+    let shas = f.git(&["rev-list", "HEAD"]);
+    let shas: Vec<&str> = shas.lines().collect();
+    let refs: String = (0..5_000).map(|i| { let sha = shas[i % shas.len()]; format!("create refs/heads/topic/branch-{i} {sha}\ncreate refs/tags/t{i} {sha}\n") }).collect();
+    let op = ops::GitOp::new("refs").step(&["update-ref", "--stdin"]).stdin(refs.into_bytes());
+    op.run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert_quiet_and_quick(&mut h, &f, "graph and sidebar with 10,000 refs");
+}
+
+/// The list isn't virtualised: 18 ms per frame at 5,000 files on a desktop.
+#[test]
+#[ignore = "PF-5, Phase 5"]
+fn a_huge_status_costs_a_frame_no_more_than_a_small_one() {
+    let f = Fx::new();
+    sample_history(&f);
+    // Untracked files, one level down so `git status` lists each.
+    std::fs::create_dir(f.root.join("many")).unwrap();
+    for i in 0..5_000 {
+        std::fs::write(f.root.join(format!("many/file{i}.txt")), "x").unwrap();
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_any(&mut h, "many/file0.txt");
+    assert_quiet_and_quick(&mut h, &f, "Changes with 5,000 files");
+}
+
+fn fake_git(dir: &Path, version_line: &str) -> PathBuf {
+    #[cfg(windows)]
+    let (name, text) = ("git.cmd", format!("@echo {version_line}\r\n"));
+    #[cfg(not(windows))]
+    let (name, text) = ("git", format!("#!/bin/sh\necho '{version_line}'\n"));
+    let p = dir.join(name);
+    std::fs::write(&p, text).unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p
+}
+
+fn app_with_git(path: &Path) -> Harness<'static, GitemApp> {
+    let ctx = egui::Context::default();
+    let settings = gitem_core::settings::Settings { git_path: path.to_string_lossy().into_owned(), ..Default::default() };
+    let app = GitemApp::with_settings(&ctx, settings);
+    Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5).build_ui_state(|ui, app: &mut GitemApp| app.frame(ui), app)
+}
+
+#[test]
+fn an_old_git_is_warned_about_once_at_startup() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = app_with_git(&fake_git(d.path(), "git version 2.30.1.windows.1"));
+    pump_for_label(&mut h, "Your git is older than gitem needs");
+    pump_for_any(&mut h, "This is git 2.30. gitem needs 2.38 or newer. Merge checks and updating dependent branches during a rebase will fail, and other commands may too.");
+    for _ in 0..3 {
+        h.step();
+    }
+    click(&mut h, "Dismiss");
+    assert!(h.query_by_label("Your git is older than gitem needs").is_none());
+}
+
+#[test]
+fn a_current_git_gets_no_warning() {
+    let d = tempfile::tempdir().unwrap();
+    let mut h = app_with_git(&fake_git(d.path(), "git version 2.38.0"));
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(h.query_by_label("Your git is older than gitem needs").is_none());
+}
+
+#[test]
+fn the_git_this_machine_has_gets_no_warning() {
+    let f = Fx::new();
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert!(h.query_by_label("Your git is older than gitem needs").is_none());
+}
+
+#[test]
+fn a_rebase_row_is_reordered_by_its_handle_and_selected_by_a_click() {
+    let f = Fx::new();
+    f.write("base", "b\n");
+    f.commit("base");
+    let base = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    for (n, m) in [("x", "one"), ("y", "two"), ("z", "three")] {
+        f.write(n, "1\n");
+        f.commit(m);
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Rebase(Box::new(gitem::views::rebase::RebaseView::new(Some(base)))));
+    pump_for_label(&mut h, "Rebase 3 commit(s)");
+    pump_for_label(&mut h, "three");
+    // Oldest first. Drag the handle of "three" above "one".
+    let order = |h: &Harness<GitemApp>| h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Rebase(r) = t { Some(r.items.iter().map(|i| i.text.clone()).collect::<Vec<_>>()) } else { None }).unwrap();
+    assert_eq!(order(&h), ["one", "two", "three"]);
+    let handle = h.query_all_by_value("⠿").last().expect("each row has a handle").rect().center();
+    let target = h.get_by_label("one").rect().center() - vec2(0.0, 12.0);
+    pointer_drag(&mut h, handle, egui::pos2(handle.x, target.y));
+    assert_eq!(order(&h), ["three", "one", "two"]);
+    // The keyboard acts on the row last clicked.
+    click(&mut h, "two");
+    h.key_press(egui::Key::D);
+    h.step();
+    let dropped = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Rebase(r) = t { r.items.iter().find(|i| i.text == "two").map(|i| i.action) } else { None });
+    assert_eq!(dropped, Some(gitem_core::rebase::RebaseAction::Drop));
 }

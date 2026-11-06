@@ -1,0 +1,45 @@
+# The tests left out of the normal run, because they open windows or take a long time.
+# Tests ignored with a bug's ID are not run here: they fail until that bug is fixed.
+name: Opt-in tests
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Real git opening the real windows
+        run: cargo test -p gitem --locked --test real_git_windows --test http_auth --test helper_modes -- --ignored --test-threads=1
+
+  properties:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux libraries
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: Property tests with many more cases
+        run: cargo test -p gitem-core --locked --test properties
+        env:
+          PROPTEST_CASES: "1000"
+
+  busy-machine:
+    # Takes minutes with every core busy, so it runs weekly and on its own.
+    if: github.event.schedule == '' || github.run_number % 7 == 0
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Reads keep their output on a busy machine
+        run: cargo test -p gitem-core --locked --test real_git -- --ignored reads_keep_their_output_on_a_busy_machine
