@@ -1,5 +1,7 @@
 //! Runs the real gitem binary in the modes git itself invokes, with real git as
 //! the caller. Temp repositories only; no remote is contacted.
+gitem_testenv::isolate!();
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 

@@ -1,5 +1,7 @@
 //! Fetch, pull, push and clone actually run, against a bare repository in a temp
 //! folder. Nothing here leaves the machine.
+gitem_testenv::isolate!();
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

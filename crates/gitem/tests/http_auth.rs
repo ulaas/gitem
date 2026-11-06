@@ -1,6 +1,8 @@
 //! Real git authenticating over HTTP through gitem's credential helper and askpass
 //! window. The server is `git http-backend` behind a small Basic-auth bridge on
 //! 127.0.0.1, serving a bare repository in a temp folder.
+gitem_testenv::isolate!();
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

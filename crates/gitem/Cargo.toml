@@ -29,4 +29,5 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [dev-dependencies]
 egui_kittest = { version = "0.36" }
+gitem-testenv = { path = "../gitem-testenv" }
 tempfile = "3"

@@ -1,5 +1,7 @@
 //! Drives the small windows git opens: password prompt, message editor, rebase
 //! editor, and the standalone merge and diff tools.
+gitem_testenv::isolate!();
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

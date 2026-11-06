@@ -1,5 +1,7 @@
 //! Headless end-to-end tests: drive the real UI by clicking widgets, then verify
 //! the outcome with git itself. Temp repositories only; remotes are local bare repos.
+gitem_testenv::isolate!();
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 

@@ -1,5 +1,7 @@
 //! End-to-end tests against the real git binary, in throwaway temp repositories
 //! only. Fetch, pull, push and clone are in `remotes.rs`.
+gitem_testenv::isolate!();
+
 use std::path::Path;
 
 use gitem_core::diff::{PatchMode, build_patch};
@@ -1131,4 +1133,17 @@ fn reads_keep_their_output_on_a_busy_machine() {
     stop.store(true, Ordering::Relaxed);
     burners.into_iter().for_each(|b| b.join().unwrap());
     assert_eq!(wrong, 0, "reads came back empty or wrong");
+}
+
+/// Asks git itself where its config comes from.
+#[test]
+fn tests_never_see_the_machines_git_config() {
+    let git = GitExe::discover(None).unwrap();
+    let scopes = git.run(None, &["config", "--list", "--show-scope", "--name-only"]).unwrap().text();
+    assert!(!scopes.lines().any(|l| l.starts_with("system")), "{scopes}");
+    let global = git.run(None, &["config", "--global", "--list", "--show-origin"]).unwrap().text();
+    assert!(global.contains("pull.rebase=false"), "{global}");
+    assert_eq!(global.lines().count(), 1, "only the test's own config: {global}");
+    let scratch = std::env::temp_dir();
+    assert!(gitem_core::settings::config_dir().starts_with(scratch), "settings are in the scratch folder");
 }

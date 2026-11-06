@@ -1445,6 +1445,7 @@ dependencies = [
  "egui_dock",
  "egui_kittest",
  "gitem-core",
+ "gitem-testenv",
  "image",
  "notify",
  "raw-window-handle",
@@ -1463,6 +1464,7 @@ version = "0.5.2"
 dependencies = [
  "chrono",
  "directories",
+ "gitem-testenv",
  "md5",
  "regex",
  "rusqlite",
@@ -1474,6 +1476,10 @@ dependencies = [
  "ureq",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "gitem-testenv"
+version = "0.5.2"
 
 [[package]]
 name = "gl_generator"

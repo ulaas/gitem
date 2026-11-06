@@ -1,6 +1,8 @@
 //! Runs the hosting, issue-tracker, and AI clients over real HTTP against a mock
 //! server on localhost: real requests, sockets, and parsing. No external service
 //! is contacted, so this checks our side of the protocol, not the providers'.
+gitem_testenv::isolate!();
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};

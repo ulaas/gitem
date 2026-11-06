@@ -20,4 +20,5 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Threading"] }
 
 [dev-dependencies]
+gitem-testenv = { path = "../gitem-testenv" }
 tempfile = "3"

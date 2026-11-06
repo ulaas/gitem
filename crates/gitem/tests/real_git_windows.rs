@@ -2,6 +2,8 @@
 //! GITEM_TEST_ACCEPT. Windows flash on screen, so these are opt-in:
 //! `cargo test -p gitem --test real_git_windows -- --ignored --test-threads=1`
 //! Temp repositories only.
+gitem_testenv::isolate!();
+
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};

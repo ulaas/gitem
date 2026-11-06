@@ -4,6 +4,9 @@
 //! there is no libgit2. Read queries live in [`repo`], write operations are
 //! described as data in [`ops`] so the UI can log, confirm and replay them.
 
+#[cfg(test)]
+gitem_testenv::isolate!();
+
 pub mod agents;
 pub mod ai;
 pub mod autorebase;

@@ -1,4 +1,7 @@
 //! gitem's UI, as a library so tests can drive it headlessly.
+#[cfg(test)]
+gitem_testenv::isolate!();
+
 pub mod action;
 pub mod app;
 pub mod chrome;
