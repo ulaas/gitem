@@ -88,9 +88,15 @@ unsafe extern "C" {
     fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
 }
 
+/// A git a background task started can still be running, and on Windows a file it
+/// has open can't be removed. It ends soon after, so this tries a few times.
 extern "C" fn remove_scratch() {
-    if let Some(dir) = SCRATCH.get() {
-        let _ = std::fs::remove_dir_all(dir);
+    let Some(dir) = SCRATCH.get() else { return };
+    for _ in 0..20 {
+        if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
