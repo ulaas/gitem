@@ -500,7 +500,7 @@ impl DiffView {
                 rows.push((hi, Some(li)));
             }
         }
-        let max_chars = f.hunks.iter().flat_map(|h| &h.lines).map(|l| l.text.len()).max().unwrap_or(0);
+        let max_chars = f.hunks.iter().flat_map(|h| &h.lines).map(|l| l.text.len().min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
         let char_w = ui.fonts_mut(|fx| fx.glyph_width(&mono(font), 'm'));
         let width = ((max_chars as f32 * char_w) + gutter + 24.0).max(ui.available_width() - 10.0);
         let mut sa = egui::ScrollArea::both().id_salt(("unified", self.selected_file)).auto_shrink([false, false]);

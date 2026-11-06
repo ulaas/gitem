@@ -328,7 +328,30 @@ pub fn tree_file_row(ui: &mut Ui, change: &FileChange, name: &str, depth: usize,
     resp
 }
 
-/// Build a line of code with syntax colours and intra-line change backgrounds.
+/// The most of one line that is drawn. All of a line's text goes into the frame, however
+/// little of it shows, at 80 bytes of vertex data per character. egui-wgpu doubles its
+/// buffer as soon as a frame grows, and the limit is 256 MiB, so a frame over 128 MiB
+/// can crash the app. This keeps a 4K screen of long lines on both sides of a diff,
+/// about 230 of them, under that.
+pub const MAX_SHOWN_LINE_BYTES: usize = 5_000;
+
+/// Characters a line takes on screen, for sizing the column it's in.
+pub fn shown_chars(text: &str) -> usize {
+    if text.len() > MAX_SHOWN_LINE_BYTES {
+        util::prefix(text, MAX_SHOWN_LINE_BYTES).chars().count() + truncation_marker(text.len()).chars().count()
+    } else {
+        text.chars().count()
+    }
+}
+
+fn truncation_marker(len: usize) -> String {
+    format!("  \u{2026} line truncated: showing {} of {} bytes", grouped(MAX_SHOWN_LINE_BYTES), grouped(len))
+}
+
+/// Build a line of code with syntax colours and intra-line change backgrounds. Spans and
+/// word ranges must be in order and not overlap, as `syntax` and `word_diff` make them.
+/// This runs every frame, so it walks them once. It only affects what's drawn: saving,
+/// staging, copying and Find all use the whole line.
 pub fn code_job(text: &str, size: f32, base: Color32, spans: Option<&Spans>, words: Option<&[(usize, usize)]>, word_bg: Color32) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
@@ -337,30 +360,36 @@ pub fn code_job(text: &str, size: f32, base: Color32, spans: Option<&Spans>, wor
         job.append(" ", 0.0, TextFormat { font_id: font, color: base, ..Default::default() });
         return job;
     }
-    // Merge all span boundaries.
-    let mut cuts: Vec<usize> = vec![0, text.len()];
-    if let Some(s) = spans {
-        for (a, b, _) in s {
-            cuts.push((*a).min(text.len()));
-            cuts.push((*b).min(text.len()));
-        }
+    let shown = util::prefix(text, MAX_SHOWN_LINE_BYTES);
+    let spans: &[(usize, usize, Color32)] = spans.map_or(&[], |s| s.as_slice());
+    let words = words.unwrap_or(&[]);
+    // Merge all boundaries within the part that's drawn.
+    let mut cuts: Vec<usize> = vec![0, shown.len()];
+    for (a, b, _) in spans.iter().take_while(|s| s.0 < shown.len()) {
+        cuts.extend([*a, (*b).min(shown.len())]);
     }
-    if let Some(w) = words {
-        for (a, b) in w {
-            cuts.push((*a).min(text.len()));
-            cuts.push((*b).min(text.len()));
-        }
+    for (a, b) in words.iter().take_while(|w| w.0 < shown.len()) {
+        cuts.extend([*a, (*b).min(shown.len())]);
     }
+    cuts.retain(|c| shown.is_char_boundary(*c));
     cuts.sort_unstable();
     cuts.dedup();
+    let (mut span, mut word) = (0, 0);
     for pair in cuts.windows(2) {
         let (a, b) = (pair[0], pair[1]);
-        if !text.is_char_boundary(a) || !text.is_char_boundary(b) {
-            continue;
+        while spans.get(span).is_some_and(|s| s.1 <= a) {
+            span += 1;
         }
-        let color = spans.and_then(|s| s.iter().find(|(x, y, _)| *x <= a && b <= *y)).map(|x| x.2).unwrap_or(base);
-        let bg = if words.is_some_and(|w| w.iter().any(|(x, y)| *x <= a && b <= *y)) { word_bg } else { Color32::TRANSPARENT };
-        job.append(&text[a..b], 0.0, TextFormat { font_id: font.clone(), color, background: bg, ..Default::default() });
+        while words.get(word).is_some_and(|w| w.1 <= a) {
+            word += 1;
+        }
+        let color = spans.get(span).filter(|s| s.0 <= a && b <= s.1).map_or(base, |s| s.2);
+        let background = if words.get(word).is_some_and(|w| w.0 <= a && b <= w.1) { word_bg } else { Color32::TRANSPARENT };
+        job.append(&shown[a..b], 0.0, TextFormat { font_id: font.clone(), color, background, ..Default::default() });
+    }
+    if shown.len() < text.len() {
+        // A warning colour would mean a theme lookup here. Dimmed text reads as a note.
+        job.append(&truncation_marker(text.len()), 0.0, TextFormat { font_id: font, color: base.gamma_multiply(0.6), italics: true, ..Default::default() });
     }
     job
 }
@@ -439,4 +468,72 @@ pub fn linked_text(ui: &mut Ui, text: &str, links: &[gitem_core::forge::LinkSpan
             ui.label(RichText::new(&text[pos..]).color(color));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORD_BG: Color32 = Color32::from_rgb(1, 2, 3);
+
+    fn parts(job: &LayoutJob) -> Vec<(String, Color32, Color32)> {
+        job.sections.iter().map(|s| (job.text[s.byte_range.start.0..s.byte_range.end.0].to_string(), s.format.color, s.format.background)).collect()
+    }
+
+    #[test]
+    fn colours_and_word_backgrounds_land_on_the_right_text() {
+        let (red, blue) = (Color32::RED, Color32::BLUE);
+        let spans: Spans = vec![(0, 3, red), (3, 4, Color32::WHITE), (4, 9, blue)];
+        let job = code_job("foo bar baz", 13.0, Color32::GRAY, Some(&spans), Some(&[(1, 2), (5, 7)]), WORD_BG);
+        let none = Color32::TRANSPARENT;
+        assert_eq!(parts(&job), [
+            ("f".to_string(), red, none),
+            ("o".to_string(), red, WORD_BG),
+            ("o".to_string(), red, none),
+            (" ".to_string(), Color32::WHITE, none),
+            ("b".to_string(), blue, none),
+            ("ar".to_string(), blue, WORD_BG),
+            (" b".to_string(), blue, none),
+            ("az".to_string(), Color32::GRAY, none),
+        ]);
+    }
+
+    #[test]
+    fn a_range_ending_inside_a_character_loses_no_text() {
+        let spans: Spans = vec![(0, 2, Color32::RED), (2, 4, Color32::BLUE)];
+        assert_eq!(code_job("a\u{e9}\u{e9}", 13.0, Color32::GRAY, Some(&spans), None, WORD_BG).text, "a\u{e9}\u{e9}");
+    }
+
+    #[test]
+    fn a_short_line_is_left_alone() {
+        let line = "x".repeat(MAX_SHOWN_LINE_BYTES);
+        let job = code_job(&line, 13.0, Color32::GRAY, None, None, WORD_BG);
+        assert_eq!(job.text, line);
+        assert_eq!(shown_chars(&line), MAX_SHOWN_LINE_BYTES);
+    }
+
+    #[test]
+    fn a_long_line_is_cut_on_a_character_with_a_marker() {
+        for unit in ["x", "\u{e9}", "\u{20ac}", "\u{1f600}"] {
+            let line = unit.repeat(MAX_SHOWN_LINE_BYTES + 1);
+            let job = code_job(&line, 13.0, Color32::GRAY, None, None, WORD_BG);
+            let (kept, marker) = job.text.split_once("  \u{2026} ").expect("a marker");
+            assert!(kept.len() <= MAX_SHOWN_LINE_BYTES && kept.len() + unit.len() > MAX_SHOWN_LINE_BYTES, "{unit}: {}", kept.len());
+            assert!(kept.chars().all(|c| c.to_string() == unit));
+            assert!(marker.starts_with("line truncated"), "{marker}");
+            assert_eq!(shown_chars(&line), job.text.chars().count());
+        }
+    }
+
+    #[test]
+    fn ranges_past_the_cut_are_dropped_and_one_across_it_is_clipped() {
+        let line = "x".repeat(MAX_SHOWN_LINE_BYTES * 2);
+        let spans: Spans = vec![(0, 10, Color32::RED), (10, MAX_SHOWN_LINE_BYTES + 5, Color32::BLUE), (MAX_SHOWN_LINE_BYTES + 5, line.len(), Color32::GREEN)];
+        let job = code_job(&line, 13.0, Color32::GRAY, Some(&spans), Some(&[(MAX_SHOWN_LINE_BYTES + 1, line.len())]), WORD_BG);
+        let got = parts(&job);
+        assert_eq!(got.len(), 3, "two colours and the marker");
+        assert_eq!((got[0].0.len(), got[0].1), (10, Color32::RED));
+        assert_eq!((got[1].0.len(), got[1].1, got[1].2), (MAX_SHOWN_LINE_BYTES - 10, Color32::BLUE, Color32::TRANSPARENT));
+        assert!(got[2].0.contains("line truncated"));
+    }
 }

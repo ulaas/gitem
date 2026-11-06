@@ -2133,6 +2133,74 @@ fn arrow_keys_work_in_the_graph_with_uncommitted_changes() {
     assert_eq!(selected_in_graph(&h), [sha_of(&f, "second")], "going up stops at the newest commit");
 }
 
+/// Text the last frame painted: where it starts, where it's clipped, what it says.
+fn painted_text(h: &Harness<GitemApp>) -> Vec<(egui::Pos2, egui::Rect, String)> {
+    h.output().shapes.iter().filter_map(|c| if let egui::Shape::Text(t) = &c.shape { Some((t.pos, c.clip_rect, t.galley.job.text.clone())) } else { None }).collect()
+}
+
+/// What the last frame sends to the GPU. egui-wgpu asks for double the buffer as soon
+/// as a frame grows, and the limit is 256 MiB, so a frame over 128 MiB can crash the app.
+fn vertex_bytes(h: &Harness<GitemApp>) -> usize {
+    let shapes = h.output().shapes.clone();
+    let meshes = h.ctx.tessellate(shapes, 1.0);
+    meshes.iter().map(|m| if let egui::epaint::Primitive::Mesh(m) = &m.primitive { m.vertices.len() * std::mem::size_of::<egui::epaint::Vertex>() } else { 0 }).sum()
+}
+
+const GPU_SAFE_BYTES: usize = 128 * 1024 * 1024;
+
+fn assert_long_line_is_cut(h: &Harness<GitemApp>, what: &str) {
+    let bytes = vertex_bytes(h);
+    assert!(bytes < GPU_SAFE_BYTES, "{what}: {} MiB of vertices", bytes / 1024 / 1024);
+    assert!(painted_text(h).iter().any(|(_, _, t)| t.contains("line truncated")), "{what}: no marker says the line is cut");
+}
+
+#[test]
+fn a_very_long_line_is_cut_in_the_file_and_diff_views_but_stays_whole_in_git() {
+    let f = Fx::new();
+    let old = "a".repeat(4_000_000);
+    let new = "b".repeat(4_000_000);
+    f.write("long.txt", &format!("{old}\n"));
+    f.commit("long line");
+    f.write("long.txt", &format!("{new}\n"));
+    let mut h = harness(&f);
+    settle(&mut h);
+
+    h.state_mut().repos[0].open_tab(Tab::file("long.txt", None, None));
+    wait_until_quiet(&mut h);
+    assert_long_line_is_cut(&h, "file view");
+
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("long.txt".into())));
+    pump_for_label(&mut h, "Stage hunk");
+    wait_until_quiet(&mut h);
+    assert_long_line_is_cut(&h, "side by side");
+    click(&mut h, "Unified");
+    assert_long_line_is_cut(&h, "unified");
+
+    // Only the display is cut: staging takes the real line.
+    click(&mut h, "Stage hunk");
+    wait_for(&mut h, "the hunk to be staged", || f.git(&["diff", "--cached", "--name-only"]).contains("long.txt"));
+    assert_eq!(f.git(&["show", ":long.txt"]).trim_end(), new);
+    assert_eq!(std::fs::read_to_string(f.root.join("long.txt")).unwrap().trim_end(), new);
+    no_errors(&h);
+}
+
+#[test]
+fn a_screen_full_of_long_lines_stays_within_the_gpu_buffer() {
+    let f = Fx::new();
+    let body = |c: &str| (0..200).map(|i| format!("{i}{}\n", c.repeat(200_000))).collect::<String>();
+    f.write("many.txt", &body("a"));
+    f.commit("many long lines");
+    f.write("many.txt", &body("b"));
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.set_size(vec2(3840.0, 2160.0));
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("many.txt".into())));
+    pump_for_label(&mut h, "Stage hunk");
+    wait_until_quiet(&mut h);
+    let bytes = vertex_bytes(&h);
+    assert!(bytes < GPU_SAFE_BYTES, "{} MiB of vertices", bytes / 1024 / 1024);
+}
+
 fn merge_with_staged_files(f: &Fx) {
     f.write("auto.txt", "base\n");
     f.write("c.txt", "top\nmiddle\nbottom\n");

@@ -415,7 +415,7 @@ impl FileView {
             }
             rows.push(Row::Line(i));
         }
-        let max_chars = d.lines.iter().map(|l| l.len()).max().unwrap_or(0);
+        let max_chars = d.lines.iter().map(|l| l.len().min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
         let width = (text_x + max_chars as f32 * char_w + 320.0).max(ui.available_width() - 8.0);
         let mut sa = egui::ScrollArea::both().id_salt(("file", &self.path)).auto_shrink([false, false]);
         if let Some(t) = self.scroll_to.take() {
