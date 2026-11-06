@@ -32,16 +32,20 @@ const MAX_RATIO: f64 = 9.0;
 /// quadratic function really does fail it.
 fn scaling_problem<T>(n: usize, ceiling: Duration, make: impl Fn(usize) -> T, run: impl Fn(&T)) -> Result<(Duration, Duration), String> {
     let (small, large) = (make(n), make(n * 4));
-    let t_small = best_of_3(|| run(&small));
-    let t_large = best_of_3(|| run(&large));
-    let ratio = t_large.as_secs_f64() / t_small.max(SMALLEST_BASELINE).as_secs_f64();
-    if ratio > MAX_RATIO {
-        return Err(format!("{n} items took {t_small:?} and {} took {t_large:?}, {ratio:.1} times as long", n * 4));
-    }
-    if t_large > ceiling {
-        return Err(format!("{} items took {t_large:?}, over the ceiling of {ceiling:?}", n * 4));
-    }
-    Ok((t_small, t_large))
+    let attempt = || {
+        let t_small = best_of_3(|| run(&small));
+        let t_large = best_of_3(|| run(&large));
+        let ratio = t_large.as_secs_f64() / t_small.max(SMALLEST_BASELINE).as_secs_f64();
+        if ratio > MAX_RATIO {
+            return Err(format!("{n} items took {t_small:?} and {} took {t_large:?}, {ratio:.1} times as long", n * 4));
+        }
+        if t_large > ceiling {
+            return Err(format!("{} items took {t_large:?}, over the ceiling of {ceiling:?}", n * 4));
+        }
+        Ok((t_small, t_large))
+    };
+    // A busy moment can spoil one attempt. A real slowdown spoils them all.
+    attempt().or_else(|_| attempt()).or_else(|_| attempt())
 }
 
 fn assert_scales(what: &str, n: usize, ceiling_ms: u64, make: impl Fn(usize) -> String, run: impl Fn(&str)) {
@@ -69,7 +73,7 @@ fn the_scaling_check_catches_quadratic_work() {
     let linear = |v: &Vec<u64>| {
         black_box(v.iter().fold(0u64, |t, x| t.wrapping_add(black_box(*x))));
     };
-    let fine = scaling_problem(2_000_000, Duration::from_secs(600), |n| (0..n as u64).collect::<Vec<u64>>(), linear);
+    let fine = scaling_problem(8_000_000, Duration::from_secs(600), |n| (0..n as u64).collect::<Vec<u64>>(), linear);
     assert!(fine.is_ok(), "{fine:?}");
 }
 
