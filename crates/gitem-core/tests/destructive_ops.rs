@@ -180,6 +180,54 @@ fn unstage_all_works_before_the_first_commit() {
 
 // ---- stashes -----------------------------------------------------------------------
 
+fn plan(groups: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+    groups.iter().map(|(m, f)| (m.to_string(), f.iter().map(|s| s.to_string()).collect())).collect()
+}
+
+#[test]
+fn composing_works_on_a_branch_with_no_commits_yet() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.write("[b].txt", "b\n");
+    f.run(ops::compose_commits(&plan(&[("first", &["a.txt"]), ("second", &["[b].txt"])])));
+    assert_eq!(f.q(&["log", "--format=%s"]), "second\nfirst");
+    assert_eq!(f.q(&["show", "--format=", "--name-only", "HEAD"]), "[b].txt", "a name with glob characters stays literal");
+    assert_eq!(f.repo.messages_since("").unwrap(), vec!["first", "second"]);
+}
+
+#[test]
+fn composing_commits_a_deleted_file_and_keeps_other_staging() {
+    let f = Fx::new();
+    f.write("gone.txt", "x\n");
+    f.write("other.txt", "x\n");
+    f.q(&["add", "."]);
+    f.q(&["commit", "-qm", "base"]);
+    let base = f.q(&["rev-parse", "HEAD"]);
+    std::fs::remove_file(f.root.join("gone.txt")).unwrap();
+    f.write("other.txt", "staged\n");
+    f.q(&["add", "other.txt"]);
+    f.run(ops::compose_commits(&plan(&[("drop it", &["gone.txt"])])));
+    assert_eq!(f.q(&["show", "--format=", "--name-status", "HEAD"]), "D\tgone.txt");
+    assert_eq!(f.q(&["diff", "--cached", "--name-only"]), "other.txt");
+    assert_eq!(f.repo.messages_since(&base).unwrap(), vec!["drop it"]);
+}
+
+/// A failure leaves later groups uncommitted and nothing lost.
+#[test]
+fn a_failed_commit_stops_the_rest_of_the_plan() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.q(&["add", "."]);
+    f.q(&["commit", "-qm", "base"]);
+    f.write("b.txt", "b\n");
+    f.write("c.txt", "c\n");
+    // A group with nothing changed in it makes `commit` fail, as a hook would.
+    assert!(f.fails(ops::compose_commits(&plan(&[("nothing here", &["a.txt"]), ("never", &["b.txt"])]))));
+    assert_eq!(f.q(&["log", "--format=%s"]), "base");
+    assert_eq!(f.read("b.txt"), "b\n");
+    assert!(f.q(&["status", "--short"]).contains("?? b.txt"), "the later group wasn't touched");
+}
+
 #[test]
 fn stash_drop_removes_only_the_one_named() {
     let f = Fx::new();

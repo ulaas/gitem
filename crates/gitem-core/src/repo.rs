@@ -155,6 +155,8 @@ impl Repo {
             st.op = if g.join("rebase-merge/interactive").exists() { RepoOp::RebaseInteractive } else { RepoOp::Rebase };
             st.op_progress = num("rebase-merge/msgnum").zip(num("rebase-merge/end"));
             st.op_target = read("rebase-merge/onto").map(|s| crate::util::prefix(&s, 8).to_string());
+            // With no pick under way the rebase is waiting on you, as at an edit step.
+            st.op_allows_commits = !g.join("CHERRY_PICK_HEAD").exists() && !g.join("MERGE_HEAD").exists();
         } else if g.join("rebase-apply").is_dir() {
             st.op = if g.join("rebase-apply/applying").exists() { RepoOp::Am } else { RepoOp::Rebase };
             st.op_progress = num("rebase-apply/next").zip(num("rebase-apply/last"));
@@ -176,6 +178,14 @@ impl Repo {
     pub fn unmerged_signature(&self, path: &str) -> String {
         let args: Vec<String> = ["ls-files", "-u", "--", path].iter().map(|s| s.to_string()).collect();
         self.run_literal(&args).map(|o| o.text()).unwrap_or_default()
+    }
+
+    /// Full messages of the commits on HEAD after `since`, oldest first. An empty `since`
+    /// means all of them, for a branch that had no commits.
+    pub fn messages_since(&self, since: &str) -> Result<Vec<String>> {
+        let range = if since.is_empty() { "HEAD".to_string() } else { format!("{since}..HEAD") };
+        let out = self.run(&["log", "--reverse", "--format=%B%x00", &range])?.text();
+        Ok(out.split('\0').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect())
     }
 
     /// Message git prepared for the in-progress merge/revert/cherry-pick.

@@ -2757,6 +2757,185 @@ fn unstage_all_during_a_merge_keeps_the_merge() {
     no_errors(&h);
 }
 
+fn open_composer(h: &mut Harness<GitemApp>) {
+    settle(h);
+    h.state_mut().repos[0].open_tab(Tab::Composer(Box::default()));
+    pump_for_label(h, "New commit");
+}
+
+/// Plans `path` as a new commit with this message, by the same clicks as a user.
+fn plan_commit(h: &mut Harness<GitemApp>, path_index: usize, message: &str) {
+    pump_for_any(h, "Add ▾");
+    click_nth(h, "Add ▾", path_index);
+    pump_for_any(h, "New commit");
+    // The toolbar's button comes first and the one in the menu after it.
+    let n = h.query_all_by_label("New commit").count();
+    click_nth(h, "New commit", n - 1);
+    let input = egui::accesskit::Role::MultilineTextInput;
+    pump_for_role(h, input);
+    let last = h.query_all_by_role(input).count() - 1;
+    h.query_all_by_role(input).nth(last).unwrap().focus();
+    h.step();
+    h.query_all_by_role(input).nth(last).unwrap().type_text(message);
+    h.step();
+    h.step();
+}
+
+fn composer_plan_len(h: &Harness<GitemApp>) -> Option<String> {
+    h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Composer(c) = t { c.unsaved() } else { None })
+}
+
+#[test]
+fn the_composer_makes_one_commit_per_group_with_only_its_files() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("one.txt", "1\n");
+    f.write("two.txt", "2\n");
+    f.write("left.txt", "not in the plan\n");
+    let mut h = harness(&f);
+    open_composer(&mut h);
+    plan_commit(&mut h, 0, "Add left aside"); // left.txt sorts first
+    plan_commit(&mut h, 0, "Add one");
+    click(&mut h, "Create 2 commit(s)");
+    wait_for(&mut h, "both commits", || f.subjects().first().is_some_and(|s| s == "Add one"));
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(f.git(&["show", "--format=", "--name-only", "HEAD"]).trim(), "one.txt");
+    assert_eq!(f.git(&["show", "--format=", "--name-only", "HEAD~1"]).trim(), "left.txt");
+    assert!(f.git(&["status", "--short"]).contains("?? two.txt"), "not in the plan, not touched");
+    assert_eq!(composer_plan_len(&h), None, "the plan is done");
+}
+
+/// The plan used to be cleared on the click, so a refusal lost every message.
+#[test]
+fn a_rejected_composer_commit_keeps_what_has_not_landed() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("one.txt", "1\n");
+    f.write("two.txt", "2\n");
+    let hook = f.root.join(".git/hooks/commit-msg");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\nif grep -q refused \"$1\"; then echo no >&2; exit 1; fi\n").unwrap();
+    let mut h = harness(&f);
+    open_composer(&mut h);
+    plan_commit(&mut h, 0, "fine one");
+    plan_commit(&mut h, 0, "refused two");
+    click(&mut h, "Create 2 commit(s)");
+    pump_for_label(&mut h, "Something went wrong");
+    wait_until_quiet(&mut h);
+    assert_eq!(f.subjects()[0], "fine one", "the first landed");
+    assert_eq!(composer_plan_len(&h).as_deref(), Some("Commit Composer: a plan of 1 commit(s)"), "the second is still planned");
+
+    // Fix the hook's objection and go again, with the message intact.
+    std::fs::remove_file(&hook).unwrap();
+    click(&mut h, "Dismiss");
+    click(&mut h, "Create 1 commit(s)");
+    wait_for(&mut h, "the second commit", || f.subjects()[0] == "refused two");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(f.git(&["show", "--format=", "--name-only", "HEAD"]).trim(), "two.txt");
+}
+
+/// Line-level staging used to be flattened with no word about it.
+#[test]
+fn the_composer_asks_before_committing_a_partly_staged_file_whole() {
+    let f = Fx::new();
+    f.write("f.txt", "one\n");
+    f.commit("base");
+    f.write("f.txt", "one\ntwo\n");
+    f.git(&["add", "f.txt"]);
+    f.write("f.txt", "one\ntwo\nleft unstaged\n");
+    let mut h = harness(&f);
+    open_composer(&mut h);
+    plan_commit(&mut h, 0, "the plan");
+    click(&mut h, "Create 1 commit(s)");
+    pump_for_label(&mut h, "Commit the whole files");
+    assert_no_op_started(&mut h, "nothing is committed before answering");
+    click(&mut h, "Go back");
+    assert!(h.query_by_label("Commit the whole files").is_none());
+    assert_eq!(f.subjects()[0], "base");
+    assert_eq!(f.git(&["show", ":f.txt"]), "one\ntwo\n", "the staging is as it was");
+    click(&mut h, "Create 1 commit(s)");
+    click(&mut h, "Commit the whole files");
+    wait_for(&mut h, "the commit", || f.subjects()[0] == "the plan");
+    assert_eq!(f.git(&["show", "HEAD:f.txt"]), "one\ntwo\nleft unstaged\n");
+}
+
+/// With no partly staged file in the plan, staging elsewhere is left alone and nothing asks.
+#[test]
+fn the_composer_leaves_other_staged_files_staged() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.write("b.txt", "b\n");
+    f.commit("base");
+    f.write("a.txt", "a2\n");
+    f.git(&["add", "a.txt"]);
+    f.write("a.txt", "a2\nunstaged\n");
+    f.write("b.txt", "b2\n");
+    f.git(&["add", "b.txt"]);
+    let mut h = harness(&f);
+    open_composer(&mut h);
+    // Files sort by path, so b.txt is the second. Remove a.txt's confirm from the picture.
+    plan_commit(&mut h, 1, "just b");
+    click(&mut h, "Create 1 commit(s)");
+    wait_for(&mut h, "the commit", || f.subjects()[0] == "just b");
+    wait_until_quiet(&mut h);
+    assert_eq!(f.git(&["show", "--format=", "--name-only", "HEAD"]).trim(), "b.txt");
+    assert_eq!(f.git(&["show", ":a.txt"]), "a2\n", "a.txt's staged part is still staged");
+    assert_eq!(std::fs::read_to_string(f.root.join("a.txt")).unwrap(), "a2\nunstaged\n");
+}
+
+/// A file briefly leaving the status used to leave its group for good.
+#[test]
+fn a_planned_file_that_goes_clean_for_a_moment_stays_in_the_plan() {
+    let f = Fx::new();
+    f.write("f.txt", "one\n");
+    f.commit("base");
+    f.write("f.txt", "edited\n");
+    let mut h = harness(&f);
+    open_composer(&mut h);
+    plan_commit(&mut h, 0, "keep me");
+    f.write("f.txt", "one\n");
+    pump_for_label(&mut h, "no changes now");
+    f.write("f.txt", "edited\n");
+    let t = Instant::now();
+    while h.query_by_label("no changes now").is_some() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the file never came back");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    click(&mut h, "Create 1 commit(s)");
+    wait_for(&mut h, "the commit", || f.subjects()[0] == "keep me");
+}
+
+/// Splitting a commit at an edit stop is the reason to compose during a rebase.
+#[test]
+fn the_composer_can_split_a_commit_at_a_rebase_edit_stop() {
+    let f = Fx::new();
+    f.write("base.txt", "b\n");
+    f.commit("base");
+    f.write("one.txt", "1\n");
+    f.write("two.txt", "2\n");
+    f.commit("too big");
+    f.write("after.txt", "a\n");
+    f.commit("after");
+    let edit = gitem_core::runner::RunOpts { env: vec![("GIT_SEQUENCE_EDITOR".into(), "sed -i 1s/^pick/edit/".into())], ..Default::default() };
+    let o = f.git.run_opts(Some(&f.root), &["rebase".to_string(), "-i".to_string(), "HEAD~2".to_string()], &edit, &mut |_| {}).unwrap();
+    assert!(o.ok(), "{}", o.stderr);
+    f.git(&["reset", "-q", "HEAD~1"]);
+    let mut h = harness(&f);
+    open_composer(&mut h);
+    plan_commit(&mut h, 0, "just one");
+    plan_commit(&mut h, 0, "just two");
+    assert!(h.query_by_label_contains("is in progress").is_none(), "this is the allowed case");
+    click(&mut h, "Create 2 commit(s)");
+    wait_for(&mut h, "both commits", || f.subjects()[0] == "just two");
+    wait_until_quiet(&mut h);
+    click(&mut h, "Continue");
+    wait_for(&mut h, "the rebase to finish", || !f.root.join(".git/rebase-merge").exists());
+    assert_eq!(f.subjects(), vec!["after", "just two", "just one", "base"]);
+}
+
 #[test]
 fn the_composer_refuses_to_commit_during_a_merge() {
     let f = Fx::new();
@@ -3208,7 +3387,7 @@ fn click_line(h: &mut Harness<GitemApp>, button: &str, hunk: usize, row: f32) {
 
 fn pump_for_role(h: &mut Harness<GitemApp>, role: egui::accesskit::Role) {
     let t = Instant::now();
-    while h.query_by_role(role).is_none() {
+    while h.query_all_by_role(role).next().is_none() {
         h.step();
         assert!(t.elapsed() < PATIENCE, "no widget with the role {role:?}");
         std::thread::sleep(Duration::from_millis(15));

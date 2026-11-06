@@ -233,6 +233,9 @@ pub struct RepoStatus {
     pub op_progress: Option<(u32, u32)>,
     /// What is being merged/picked, for display.
     pub op_target: Option<String>,
+    /// The operation is waiting on the user and ordinary commits are part of it, as at a
+    /// rebase edit step. Conflicts still come first.
+    pub op_allows_commits: bool,
 }
 
 impl RepoStatus {

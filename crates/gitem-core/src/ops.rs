@@ -278,6 +278,25 @@ pub fn commit(o: &CommitOpts) -> GitOp {
     GitOp::new(if o.amend { "Amend commit" } else { "Commit" }).step_v(a).stdin(o.message.clone().into_bytes())
 }
 
+/// A series of commits, each of exactly its own files. `commit --only` leaves anything
+/// else staged as it is, so nothing needs unstaging first. `add` comes before it because
+/// `--only` needs paths git knows, and a new file isn't one yet. The names go over stdin,
+/// since a large plan can hold more than fit on a command line. All one op, so nothing
+/// queued can land in the middle, and a failure stops whatever is left.
+pub fn compose_commits(plan: &[(String, Vec<String>)]) -> GitOp {
+    let mut op = GitOp::new(format!("Create {} commit(s)", plan.len()));
+    for (message, files) in plan {
+        let mut names = Vec::new();
+        for f in files {
+            names.extend_from_slice(f.as_bytes());
+            names.push(0);
+        }
+        op = op.step(&["add", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(names.clone());
+        op = op.step(&["commit", "--cleanup=whitespace", "-m", message, "--only", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(names);
+    }
+    op.literal()
+}
+
 pub fn fixup_commit(sha: &str) -> GitOp {
     GitOp::new(format!("Fixup {}", short(sha))).step(&["commit", "--fixup", sha])
 }
