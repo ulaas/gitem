@@ -36,7 +36,7 @@ fn commit(d: &Path, file: &str, text: &str, msg: &str) {
 }
 
 #[test]
-#[ignore]
+#[ignore = "opens a window; run with --ignored --test-threads=1"]
 fn git_commit_uses_the_message_window() {
     let d = repo();
     std::fs::write(d.path().join("a"), "1\n").unwrap();
@@ -47,7 +47,7 @@ fn git_commit_uses_the_message_window() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "opens a window; run with --ignored --test-threads=1"]
 fn git_rebase_uses_the_rebase_window() {
     let d = repo();
     commit(d.path(), "a", "1\n", "base");
@@ -59,7 +59,7 @@ fn git_rebase_uses_the_rebase_window() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "opens a window; run with --ignored --test-threads=1"]
 fn git_asks_the_password_window() {
     // No helper configured, so git asks through GIT_ASKPASS. Nothing is contacted.
     let d = repo();
@@ -82,7 +82,7 @@ fn git_asks_the_password_window() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "opens a window; run with --ignored --test-threads=1"]
 fn git_mergetool_uses_the_merge_window() {
     let d = repo();
     commit(d.path(), "c", "top\n", "base");
@@ -103,13 +103,15 @@ fn git_mergetool_uses_the_merge_window() {
     assert!(!git(d.path(), &["status", "--short"]).contains("UU"));
 }
 
+/// The window exits with an error unless the diff it loaded holds the text asked for.
 #[test]
-#[ignore]
+#[ignore = "opens a window; run with --ignored --test-threads=1"]
 fn git_difftool_uses_the_diff_window() {
     let d = repo();
-    commit(d.path(), "a", "1\n", "base");
-    std::fs::write(d.path().join("a"), "2\n").unwrap();
+    commit(d.path(), "a", "old line\n", "base");
+    std::fs::write(d.path().join("a"), "new line\n").unwrap();
     let cmd = format!("\"{}\" --difftool \"$LOCAL\" \"$REMOTE\"", bin());
-    let s = Command::new("git").args(["-c", &format!("difftool.gitem.cmd={cmd}"), "difftool", "--tool=gitem", "--no-prompt"]).current_dir(d.path()).env("GITEM_TEST_ACCEPT", "close").status().unwrap();
-    assert!(s.success());
+    let run = |asked: &str| Command::new("git").args(["-c", &format!("difftool.gitem.cmd={cmd}"), "-c", "difftool.trustExitCode=true", "difftool", "--tool=gitem", "--no-prompt"]).current_dir(d.path()).env("GITEM_TEST_ACCEPT", asked).status().unwrap();
+    assert!(run("old line\nnew line").success(), "the window shows both sides of the change");
+    assert!(!run("not in this diff").success(), "the check can fail");
 }

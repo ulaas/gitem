@@ -110,6 +110,7 @@ impl HelperApp {
             return;
         }
         let value = value.clone();
+        let waited = *frames;
         match &mut self.mode {
             Mode::Askpass { .. } => self.result = Some((0, Some(value))),
             Mode::Editor { path, text } => {
@@ -124,7 +125,14 @@ impl HelperApp {
                 let ok = v.todo_file.as_ref().is_some_and(|p| std::fs::write(p, body).is_ok());
                 self.result = Some((if ok { 0 } else { 1 }, None));
             }
-            Mode::Diff(_) => self.result = Some((0, None)),
+            // Answers only once the diff has loaded, and fails unless it holds the text
+            // asked for, so a test can tell a real diff from an empty window.
+            Mode::Diff(v) => match v.loaded_changes() {
+                Some(Ok(lines)) => self.result = Some((if lines.contains(&value) { 0 } else { 1 }, None)),
+                Some(Err(_)) => self.result = Some((1, None)),
+                None if waited > 20_000 => self.result = Some((1, None)),
+                None => {}
+            },
             Mode::Merge(_) => {}
         }
     }

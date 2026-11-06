@@ -259,8 +259,10 @@ impl RebaseView {
         for i in 0..self.items.len() {
             let selected = i == self.selected;
             let frame = egui::Frame::new().fill(if selected { p.selection } else { p.panel2 }).inner_margin(egui::Margin::symmetric(6, 3)).corner_radius(3.0);
-            let r = frame
-                .show(ui, |ui| {
+            // The row's click area has to be behind its contents. Added after them, it
+            // would take every click, and the action box and handle could never get one.
+            let row = ui.scope_builder(egui::UiBuilder::new().id_salt(("rb-row", i)).sense(egui::Sense::click()), |ui| {
+                frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let handle = ui.add(egui::Label::new(RichText::new("⠿").color(p.faint)).sense(egui::Sense::drag()));
                         if handle.drag_started() {
@@ -302,12 +304,12 @@ impl RebaseView {
                             }
                         });
                     });
-                })
-                .response;
-            if ui.interact(r.rect, ui.id().with(("rb-row", i)), egui::Sense::click()).clicked() {
+                });
+            });
+            if row.response.clicked() {
                 self.selected = i;
             }
-            rects.push(r.rect);
+            rects.push(row.response.rect);
             ui.add_space(1.0);
         }
         // Drop indicator and reorder.

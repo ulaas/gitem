@@ -114,6 +114,16 @@ impl DiffView {
         }
     }
 
+    /// The changed lines once loaded, or the reason it couldn't load. `None` while loading.
+    pub fn loaded_changes(&self) -> Option<Result<String, String>> {
+        if let Some(e) = &self.files.error {
+            return Some(Err(e.clone()));
+        }
+        let files = self.files.get()?;
+        let lines = files.iter().flat_map(|(f, _)| &f.hunks).flat_map(|h| &h.lines).filter(|l| matches!(l.kind, LineKind::Add | LineKind::Del));
+        Some(Ok(lines.map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")))
+    }
+
     pub fn key(&self) -> String {
         format!("diff:{:?}:{:?}", self.src, self.path)
     }
