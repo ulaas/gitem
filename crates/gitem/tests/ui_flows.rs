@@ -1211,14 +1211,12 @@ fn settings_and_about_are_reachable_from_the_titlebar() {
     click(&mut h, "About");
     pump_for_label(&mut h, "Commit date");
     pump_for_label(&mut h, env!("CARGO_PKG_VERSION"));
-    click(&mut h, "Close");
-    // Windows fade out, so this takes a moment.
-    let t = Instant::now();
-    while h.query_by_label("Commit date").is_some() {
+    // New windows spend their first frames measuring themselves.
+    for _ in 0..3 {
         h.step();
-        assert!(t.elapsed() < Duration::from_secs(5), "the About box didn't close");
-        std::thread::sleep(Duration::from_millis(15));
     }
+    click(&mut h, "Close");
+    assert!(h.query_by_label("Commit date").is_none(), "the About box stays open");
     assert!(!h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Settings(_))));
     let ctx = h.ctx.clone();
     h.state_mut().apply_action(&ctx, Action::OpenSettings);
