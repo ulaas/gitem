@@ -96,11 +96,11 @@ impl Palette {
             ThemeChoice::Dark => Self::dark(),
             ThemeChoice::Light => Self::light(),
             ThemeChoice::Midnight => Self::midnight(),
-            ThemeChoice::Black => Self::dark_family([0x000000, 0x0b0b0c, 0x161618, 0x202023, 0x2b2b2f], [0x28282c, 0x38383d, 0x47474d], [0xececec, 0xaeaeae, 0x848484], 0x4c95ec),
-            ThemeChoice::Slate => Self::dark_family([0x1a2029, 0x202733, 0x2a3341, 0x323c4c, 0x3a4555], [0x3a465b, 0x485671, 0x576583], [0xe4e8ef, 0xaab3c2, 0x8c96a8], 0x5aa2f0),
-            ThemeChoice::Forest => Self::dark_family([0x141c18, 0x1a241f, 0x24302a, 0x2c3a33, 0x33443b], [0x35473e, 0x43584d, 0x50675a], [0xe3ebe6, 0xa6b5ab, 0x84958b], 0x3fbf8a),
-            ThemeChoice::Plum => Self::dark_family([0x1c1722, 0x241d2b, 0x2f2738, 0x382f43, 0x40364c], [0x41364e, 0x504361, 0x5e4f71], [0xebe6f0, 0xb3a9bf, 0x93899f], 0xb083f0),
-            ThemeChoice::Mocha => Self::dark_family([0x1e1815, 0x26201c, 0x322a25, 0x3b322c, 0x453a33], [0x473c35, 0x584b42, 0x67584e], [0xefe8e1, 0xbcb0a5, 0x998d82], 0xe0954a),
+            ThemeChoice::Black => Self::dark_family([0x000000, 0x0b0b0c, 0x161618, 0x202023, 0x2b2b2f], [0x28282c, 0x38383d, 0x47474d], [0xd0d0d0, 0xa6a6a6, 0x848484], 0x4c95ec),
+            ThemeChoice::Slate => Self::dark_family([0x1a2029, 0x202733, 0x2a3341, 0x323c4c, 0x3a4555], [0x3a465b, 0x485671, 0x576583], [0xcbd0d8, 0xa5aebc, 0x8c96a8], 0x5aa2f0),
+            ThemeChoice::Forest => Self::dark_family([0x141c18, 0x1a241f, 0x24302a, 0x2c3a33, 0x33443b], [0x35473e, 0x43584d, 0x50675a], [0xcad3cd, 0xa2b0a7, 0x84958b], 0x3fbf8a),
+            ThemeChoice::Plum => Self::dark_family([0x1c1722, 0x241d2b, 0x2f2738, 0x382f43, 0x40364c], [0x41364e, 0x504361, 0x5e4f71], [0xd2cdd8, 0xada3b9, 0x93899f], 0xb083f0),
+            ThemeChoice::Mocha => Self::dark_family([0x1e1815, 0x26201c, 0x322a25, 0x3b322c, 0x453a33], [0x473c35, 0x584b42, 0x67584e], [0xd6cfc8, 0xb5a99e, 0x998d82], 0xe0954a),
             ThemeChoice::Paper => Self::light_family([0xfbf7ee, 0xf3ecdf, 0xe9e0cf, 0xe2d8c5, 0xd3c8b3], [0xfffcf5, 0xf1e8d8, 0xb3a78f], [0x2b251b, 0x5c5345, 0x756b5a], 0xb4531c),
             ThemeChoice::Mist => Self::light_family([0xf5f8fb, 0xebf0f5, 0xdfe6ee, 0xd6dfe9, 0xc7d2de], [0xffffff, 0xe2edf8, 0xa9b7c6], [0x17212c, 0x465362, 0x63707c], 0x1f6fc4),
             ThemeChoice::Sage => Self::light_family([0xf5f8f3, 0xebf0e7, 0xdfe6da, 0xd5ddcf, 0xc5cfbd], [0xffffff, 0xe4eede, 0xa8b49d], [0x1b241a, 0x4a5546, 0x66715e], 0x1f7a4d),
@@ -121,7 +121,7 @@ impl Palette {
     /// Everything that follows the accent: selections, the status bar, and text on it.
     pub fn with_accent(self, accent: Color32) -> Self {
         let on_accent = [Color32::WHITE, hex(0x111318)].into_iter().find(|c| contrast(*c, accent) >= 4.5).unwrap_or(if contrast(Color32::WHITE, accent) > contrast(hex(0x111318), accent) { Color32::WHITE } else { hex(0x111318) });
-        let (selection, status) = if self.dark { (0.38, 0.24) } else { (0.24, 0.2) };
+        let (selection, status) = if self.dark { (0.3, 0.24) } else { (0.24, 0.2) };
         Self { accent, on_accent, selection: mix(self.bg, accent, selection), status_bg: mix(self.bg, accent, status), ..self }
     }
 
@@ -148,7 +148,7 @@ impl Palette {
             button_hover: hex(0x424b59),
             button_border: hex(0x4b5462),
             status_bg: hex(0x1b3454),
-            text: hex(0xe6e6e3),
+            text: hex(0xcdcecb),
             dim: hex(0xa8a9a3),
             faint: hex(0x7d7e79),
             accent: hex(0x2875d3),
