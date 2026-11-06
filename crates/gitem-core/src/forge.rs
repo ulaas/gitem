@@ -1357,9 +1357,10 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+        // Bytes, not a slice of `s`: what follows the `%` may be part of a longer character.
+        if b[i] == b'%' && i + 2 < b.len()
+            && let (Some(hi), Some(lo)) = ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16)) {
+                out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
             }
@@ -1391,6 +1392,16 @@ fn base64(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_broken_percent_escape_is_kept_as_text() {
+        assert_eq!(percent_decode("a%20b%C3%A9"), "a b\u{e9}");
+        for raw in ["%a\u{e9}", "%\u{e9}a", "%\u{20ac}", "%", "%a", "%zz", "%+1"] {
+            assert_eq!(percent_decode(raw), raw);
+        }
+        assert_eq!(DeepLink::parse("gitem://open?repo=%a\u{e9}").map(|d| d.repo).as_deref(), Some("%a\u{e9}"));
+        assert_eq!(parse_file_url("https://h.invalid/o/r/blob/main/%a\u{e9}.txt").map(|x| x.1).as_deref(), Some("%a\u{e9}.txt"));
+    }
 
     #[test]
     fn remote_url_forms() {
