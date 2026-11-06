@@ -23,9 +23,21 @@ pub struct LogEntry {
 pub type CommandLog = Arc<Mutex<VecDeque<LogEntry>>>;
 const LOG_CAP: usize = 2000;
 const LOG_OUTPUT_CAP: usize = 8192;
-/// How long to keep reading once git has exited. A process it left running, such
-/// as an ssh control master or a hook's background job, can hold the pipes open.
-const DRAIN_AFTER_EXIT: Duration = Duration::from_secs(1);
+/// A process git left running, such as an ssh control master or a hook's background
+/// job, can hold the pipes open after git exits, so reading can't wait for them to
+/// close forever. These limits count from the last data received, never from the exit:
+/// on a busy machine the reader may simply not have run yet (about 8 seconds was
+/// measured under heavy load), and cutting it off reports an empty answer as if git had
+/// said nothing.
+///
+/// Reads run no hooks and their output is the answer, so they wait a long time. Writes
+/// are what run hooks, and their output is only informational, so they don't. A
+/// successful command's stderr is only progress and warnings.
+const STDERR_QUIET_OK: Duration = Duration::from_secs(2);
+const STDERR_QUIET_FAILED: Duration = Duration::from_secs(10);
+const STDOUT_QUIET_READ: Duration = Duration::from_secs(30);
+const STDOUT_QUIET_WRITE: Duration = Duration::from_secs(3);
+const STDOUT_QUIET_CANCELLED: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 pub struct GitOutput {
@@ -258,9 +270,13 @@ impl GitExe {
         let mut line = Vec::new();
         let mut cancelled = false;
         let mut stop_reading_at: Option<Instant> = None;
+        let mut stderr_quiet = STDERR_QUIET_OK;
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(chunk) => {
+                    if stop_reading_at.is_some() {
+                        stop_reading_at = Some(Instant::now() + stderr_quiet);
+                    }
                     stderr_all.extend_from_slice(&chunk);
                     for b in chunk {
                         if b == b'\n' || b == b'\r' {
@@ -280,8 +296,12 @@ impl GitExe {
                 cancelled = true;
                 kill_tree(&mut child);
             }
-            if stop_reading_at.is_none() && matches!(child.try_wait(), Ok(Some(_))) {
-                stop_reading_at = Some(Instant::now() + DRAIN_AFTER_EXIT);
+            if stop_reading_at.is_none()
+                && let Ok(Some(status)) = child.try_wait()
+            {
+                // The message is the point of a failure, unless it was cancelled.
+                stderr_quiet = if status.success() || cancelled { STDERR_QUIET_OK } else { STDERR_QUIET_FAILED };
+                stop_reading_at = Some(Instant::now() + stderr_quiet);
             }
             if stop_reading_at.is_some_and(|t| Instant::now() >= t) {
                 break;
@@ -292,10 +312,23 @@ impl GitExe {
         }
         drop(err_t);
         let status = child.wait()?;
-        // Stdout may be held open the same way. Whatever arrived is kept.
-        let wait_until = Instant::now() + Duration::from_millis(200);
-        while !out_t.is_finished() && Instant::now() < wait_until {
+        // Stdout may be held open the same way. Normally the reader finishes at once.
+        let quiet = if cancelled {
+            STDOUT_QUIET_CANCELLED
+        } else if opts.is_write {
+            STDOUT_QUIET_WRITE
+        } else {
+            STDOUT_QUIET_READ
+        };
+        let mut seen = 0;
+        let mut last_data = Instant::now();
+        while !out_t.is_finished() && last_data.elapsed() < quiet {
             std::thread::sleep(Duration::from_millis(1));
+            let len = stdout_buf.lock().map_or(seen, |v| v.len());
+            if len != seen {
+                seen = len;
+                last_data = Instant::now();
+            }
         }
         let stdout = stdout_buf.lock().map(|v| v.clone()).unwrap_or_default();
         let code = status.code().unwrap_or(-1);

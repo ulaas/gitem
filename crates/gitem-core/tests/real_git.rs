@@ -1095,3 +1095,40 @@ fn mcp_server_answers_with_repository_facts() {
     assert!(text("no_such_tool", json!({})).1);
     assert_eq!(handle(&f.repo, &json!({"id":4,"method":"nope"})).unwrap()["error"]["code"], -32601);
 }
+
+/// Output must survive a machine too busy to schedule the reader promptly: an empty
+/// answer from git reads as "nothing there", which is far worse than a slow one.
+#[test]
+#[ignore = "burns every core for minutes; run with --ignored on its own"]
+fn reads_keep_their_output_on_a_busy_machine() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let f = Fx::new();
+    f.write("a.txt", "x
+");
+    let head = f.commit_all("first");
+    let stop = Arc::new(AtomicBool::new(false));
+    let cores = std::thread::available_parallelism().map_or(8, |n| n.get());
+    let burners: Vec<_> = (0..cores * 4)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut x = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_mul(31).wrapping_add(1);
+                    std::hint::black_box(x);
+                }
+            })
+        })
+        .collect();
+    let readers: Vec<_> = (0..cores)
+        .map(|_| {
+            let (repo, head) = (f.repo.clone(), head.clone());
+            std::thread::spawn(move || (0..25).filter(|_| repo.git.run(Some(&repo.root), &["rev-parse", "HEAD"]).unwrap().text().trim() != head).count())
+        })
+        .collect();
+    let wrong: usize = readers.into_iter().map(|r| r.join().unwrap()).sum();
+    stop.store(true, Ordering::Relaxed);
+    burners.into_iter().for_each(|b| b.join().unwrap());
+    assert_eq!(wrong, 0, "reads came back empty or wrong");
+}
