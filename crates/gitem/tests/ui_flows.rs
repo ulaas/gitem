@@ -2024,6 +2024,115 @@ fn local_and_remote_branches_open_to_their_latest_commits() {
     pump_for_label(&mut h, "Load 20 more");
     no_errors(&h);
 }
+
+fn selected_in_graph(h: &Harness<GitemApp>) -> Vec<String> {
+    h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Graph(g) = t { Some(g.selected().to_vec()) } else { None }).unwrap()
+}
+
+fn sha_of(f: &Fx, subject: &str) -> String {
+    f.git(&["log", "--all", "--format=%H", "--fixed-strings", "--grep", subject]).lines().next().unwrap().to_string()
+}
+
+#[test]
+fn shift_click_after_the_graph_got_shorter_does_not_panic() {
+    let f = Fx::new();
+    many_commits(&f, 30);
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "commit number 3");
+    h.get_by_label("commit number 3").click();
+    h.step();
+    h.step();
+    // Row 26, then history shrinks to 3 rows, as a reset or a filter would do it.
+    f.git(&["reset", "-q", "--hard", "HEAD~27"]);
+    let t = Instant::now();
+    while h.query_by_label("commit number 29").is_some() || h.query_by_label("commit number 0").is_none() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the graph never reloaded");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    h.step();
+    h.get_by_label("commit number 1").click_modifiers(egui::Modifiers::SHIFT);
+    h.step();
+    h.step();
+    // The anchor isn't on screen any more, so only the clicked row can be meant.
+    assert_eq!(selected_in_graph(&h), [sha_of(&f, "commit number 1")]);
+}
+
+#[test]
+fn shift_click_ranges_from_the_commit_clicked_even_after_rows_moved() {
+    let f = Fx::new();
+    many_commits(&f, 12);
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "commit number 8");
+    h.get_by_label("commit number 8").click();
+    h.step();
+    h.step();
+    // New commits push every row down, so a remembered row index now means another commit.
+    for i in 0..3 {
+        f.write("f.txt", &format!("new {i}\n"));
+        f.commit(&format!("newer {i}"));
+    }
+    pump_for_label(&mut h, "newer 2");
+    h.step();
+    h.get_by_label("commit number 6").click_modifiers(egui::Modifiers::SHIFT);
+    h.step();
+    h.step();
+    let want: Vec<String> = [8, 7, 6].iter().map(|n| sha_of(&f, &format!("commit number {n}"))).collect();
+    assert_eq!(selected_in_graph(&h), want);
+}
+
+/// Rows of the graph list have no inspector or menu around them.
+fn row_on_screen(h: &Harness<GitemApp>, label: &str) -> bool {
+    h.query_all_by_label(label).any(|n| {
+        let r = n.rect();
+        r.left() < 700.0 && r.top() >= 0.0 && r.bottom() <= 940.0
+    })
+}
+
+#[test]
+fn arrow_keys_keep_the_selected_graph_row_on_screen() {
+    let f = Fx::new();
+    many_commits(&f, 300);
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "commit number 299");
+    for row in 0..200 {
+        h.key_press(egui::Key::ArrowDown);
+        h.step();
+        h.step();
+        let label = format!("commit number {}", 299 - row);
+        assert!(row_on_screen(&h, &label), "row {row} is off screen");
+    }
+}
+
+#[test]
+fn arrow_keys_work_in_the_graph_with_uncommitted_changes() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("a.txt", "changed\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "Work in progress");
+    assert!(selected_in_graph(&h).is_empty());
+    h.key_press(egui::Key::J);
+    h.step();
+    h.step();
+    assert_eq!(selected_in_graph(&h), [sha_of(&f, "second")], "the first key picks the newest commit");
+    h.key_press(egui::Key::ArrowDown);
+    h.step();
+    h.step();
+    assert_eq!(selected_in_graph(&h), [sha_of(&f, "first")]);
+    h.key_press(egui::Key::K);
+    h.step();
+    h.step();
+    h.key_press(egui::Key::K);
+    h.step();
+    h.step();
+    assert_eq!(selected_in_graph(&h), [sha_of(&f, "second")], "going up stops at the newest commit");
+}
+
 fn merge_with_staged_files(f: &Fx) {
     f.write("auto.txt", "base\n");
     f.write("c.txt", "top\nmiddle\nbottom\n");

@@ -53,7 +53,8 @@ pub struct GraphView {
     limit: usize,
     filters: Filters,
     selected: Vec<String>,
-    last_clicked: Option<usize>,
+    /// Where a Shift+click range starts. A commit, not a row: rows move on every reload.
+    last_clicked: Option<String>,
     scroll_to: Option<usize>,
     query: String,
     matches: Task<HashSet<String>>,
@@ -174,6 +175,11 @@ impl GraphView {
             self.filters.hidden.push(name.to_string());
         }
         self.pending_reload = true;
+    }
+
+    /// The commits picked with click, Ctrl+click or Shift+click.
+    pub fn selected(&self) -> &[String] {
+        &self.selected
     }
 
     /// Commits currently laid out.
@@ -465,7 +471,7 @@ impl GraphView {
             Some(i) => {
                 self.scroll_to = Some(i);
                 self.selected = vec![sha.clone()];
-                self.last_clicked = Some(i);
+                self.last_clicked = Some(sha.clone());
                 cx.inspect(&sha);
             }
             None => cx.toast(format!("{name} isn't among the commits showing. A filter may be hiding it.")),
@@ -574,7 +580,8 @@ impl GraphView {
         let mut sa = egui::ScrollArea::vertical().id_salt("graph-rows").auto_shrink([false, false]).max_width(total_w - minimap_w);
         if let Some(target) = self.scroll_to.take() {
             let pos = visible.iter().position(|&v| v == target).unwrap_or(0);
-            sa = sa.vertical_scroll_offset(((pos as f32) * (ROW_H + ui.spacing().item_spacing.y) - area_h / 3.0).max(0.0));
+            // Rows sit edge to edge: the spacing set for them below is zero.
+            sa = sa.vertical_scroll_offset((pos as f32 * ROW_H - area_h / 3.0).max(0.0));
         }
         let mut clicked_row: Option<(usize, egui::Modifiers)> = None;
         let mut scroll_y = 0.0;
@@ -814,14 +821,18 @@ impl GraphView {
                 self.selected.push(sha.clone());
             }
         } else if mods.shift {
-            if let Some(a) = self.last_clicked {
-                let (lo, hi) = (a.min(i), a.max(i));
-                self.selected = (lo..=hi).map(|k| g.commits[k].sha.clone()).filter(|s| s != WIP).collect();
+            // The anchor may be gone: filtered out, or dropped by a reset or a rebase.
+            match self.last_clicked.as_ref().and_then(|s| g.index.get(s)) {
+                Some(&a) => {
+                    let (lo, hi) = (a.min(i), a.max(i));
+                    self.selected = (lo..=hi).map(|k| g.commits[k].sha.clone()).filter(|s| s != WIP).collect();
+                }
+                None => self.selected = vec![sha.clone()],
             }
         } else {
             self.selected = vec![sha.clone()];
         }
-        self.last_clicked = Some(i);
+        self.last_clicked = Some(sha.clone());
         cx.inspect(&sha);
     }
 
@@ -837,12 +848,14 @@ impl GraphView {
         let next = match cur {
             Some(c) if down => (c + 1).min(visible.len() - 1),
             Some(c) => c.saturating_sub(1),
-            None => 0,
+            // The first commit, which isn't the first row with uncommitted changes:
+            // the working-changes row can't be selected.
+            None => visible.iter().position(|i| g.commits[*i].sha != WIP).unwrap_or(0),
         };
         let i = visible[next];
         if g.commits[i].sha != WIP {
             self.selected = vec![g.commits[i].sha.clone()];
-            self.last_clicked = Some(i);
+            self.last_clicked = Some(g.commits[i].sha.clone());
             self.scroll_to = Some(i);
             cx.inspect(&g.commits[i].sha);
         }
