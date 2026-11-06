@@ -22,6 +22,9 @@ enum Mode {
     Unified,
 }
 
+/// Below this each half of a side-by-side diff has room for little but its line numbers.
+const MIN_SPLIT_WIDTH: f32 = 560.0;
+
 #[derive(Default)]
 struct Prepared {
     side: Vec<SideRow>,
@@ -29,6 +32,8 @@ struct Prepared {
     words: HashMap<(usize, usize), Vec<(usize, usize)>>,
     /// (hunk, line index) -> syntax colour spans.
     syntax: HashMap<(usize, usize), Spans>,
+    /// The widest line as drawn, in characters. Worked out once: there can be many lines.
+    max_chars: usize,
 }
 
 fn prepare(f: &FileDiff, dark: bool) -> Prepared {
@@ -53,7 +58,8 @@ fn prepare(f: &FileDiff, dark: bool) -> Prepared {
             syn.insert((hi, li), s);
         }
     }
-    Prepared { side, words, syntax: syn }
+    let max_chars = side.iter().flat_map(|r| [r.left.as_ref(), r.right.as_ref()]).flatten().map(|x| shown_chars(&x.1)).max().unwrap_or(0);
+    Prepared { side, words, syntax: syn, max_chars }
 }
 
 #[derive(Default)]
@@ -69,6 +75,8 @@ pub struct DiffView {
     files: Task<Vec<(FileDiff, Prepared)>>,
     loaded_status_gen: u64,
     mode: Mode,
+    /// How far the side-by-side text is scrolled sideways.
+    split_x: f32,
     opts: DiffOpts,
     full_file: bool,
     selected_file: usize,
@@ -91,6 +99,7 @@ impl DiffView {
             files: Task::default(),
             loaded_status_gen: u64::MAX,
             mode: Mode::Split,
+            split_x: 0.0,
             opts: DiffOpts::default(),
             full_file: false,
             selected_file: 0,
@@ -397,8 +406,8 @@ impl DiffView {
             return;
         }
         match self.mode {
-            Mode::Split => self.split(ui, cx, f, pr),
-            Mode::Unified => self.unified(ui, cx, f, pr),
+            Mode::Split if ui.available_width() >= MIN_SPLIT_WIDTH => self.split(ui, cx, f, pr),
+            _ => self.unified(ui, cx, f, pr),
         }
     }
 
@@ -412,7 +421,7 @@ impl DiffView {
 
     /// One side of a row. Returns true if the gutter was clicked.
     #[allow(clippy::too_many_arguments)]
-    fn draw_cell(&mut self, ui: &mut Ui, pal: &crate::theme::Palette, rect: Rect, no: Option<u32>, text: Option<&str>, kind: Option<LineKind>, key: Option<(usize, usize)>, pr: &Prepared, font: f32, gutter: f32, row_id: egui::Id) {
+    fn draw_cell(&mut self, ui: &mut Ui, pal: &crate::theme::Palette, rect: Rect, no: Option<u32>, text: Option<&str>, kind: Option<LineKind>, key: Option<(usize, usize)>, pr: &Prepared, font: f32, gutter: f32, scroll_x: f32, row_id: egui::Id) {
         let (bg, word_bg) = kind.map(|k| Self::line_colors(pal, k)).unwrap_or((pal.panel, Color32::TRANSPARENT));
         ui.painter().rect_filled(rect, 0.0, if kind.is_none() { pal.panel2 } else { bg });
         let selected = key.is_some_and(|k| self.selected_lines.contains(&k));
@@ -444,7 +453,7 @@ impl DiffView {
             let job = code_job(t, font, pal.text, spans, words, word_bg);
             let g = ui.painter().layout_job(job);
             let clip = Rect::from_min_max(pos2(rect.left() + gutter, rect.top()), rect.max).intersect(ui.clip_rect());
-            ui.painter().with_clip_rect(clip).galley(pos2(rect.left() + gutter + 4.0, rect.center().y - g.size().y / 2.0), g, pal.text);
+            ui.painter().with_clip_rect(clip).galley(pos2(rect.left() + gutter + 4.0 - scroll_x, rect.center().y - g.size().y / 2.0), g, pal.text);
         }
     }
 
@@ -454,14 +463,32 @@ impl DiffView {
         let row_h = (font * 1.45).ceil();
         let gutter = 52.0;
         let n = pr.side.len();
-        let mut sa = egui::ScrollArea::both().id_salt(("split", self.selected_file)).auto_shrink([false, false]);
+        let mut sa = egui::ScrollArea::vertical().id_salt(("split", self.selected_file)).auto_shrink([false, false]);
         if let Some(r) = self.scroll_to_row.take() {
             sa = sa.vertical_scroll_offset((r as f32 * row_h - 40.0).max(0.0));
         }
-        let max_chars = pr.side.iter().map(|r| r.left.as_ref().map_or(0, |x| x.1.len()).max(r.right.as_ref().map_or(0, |x| x.1.len()))).max().unwrap_or(0);
         let char_w = ui.fonts_mut(|fx| fx.glyph_width(&mono(font), 'm'));
         let avail = ui.available_width();
-        let half = ((max_chars as f32 * char_w) + gutter + 24.0).max((avail - 10.0) / 2.0);
+        // Each side keeps half the pane, however long a line is, so the new side never
+        // starts off screen. A long line scrolls within its half, both halves together.
+        let half = (avail - 10.0) / 2.0;
+        let max_x = (pr.max_chars as f32 * char_w + 24.0 - (half - gutter)).max(0.0);
+        self.split_x = self.split_x.clamp(0.0, max_x);
+        if max_x > 0.0 {
+            egui::Panel::bottom(ui.id().with(("split-x", self.selected_file))).resizable(false).show_separator_line(false).show(ui, |ui| {
+                let w = ui.available_width();
+                let out = egui::ScrollArea::horizontal().id_salt(("split-x-bar", self.selected_file)).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).horizontal_scroll_offset(self.split_x).show(ui, |ui| {
+                    ui.allocate_exact_size(vec2(w + max_x, 10.0), Sense::hover());
+                });
+                self.split_x = out.state.offset.x;
+            });
+        }
+        let area = ui.available_rect_before_wrap();
+        if ui.rect_contains_pointer(area) {
+            // Sideways wheel and Shift+wheel, which the vertical list leaves alone.
+            self.split_x = (self.split_x - ui.input(|i| i.smooth_scroll_delta.x)).clamp(0.0, max_x);
+        }
+        let scroll_x = self.split_x;
         ui.spacing_mut().item_spacing.y = 0.0;
         sa.show_rows(ui, row_h, n, |ui, range| {
             ui.set_min_width(half * 2.0);
@@ -481,8 +508,8 @@ impl DiffView {
                 let lrect = Rect::from_min_size(rect.min, vec2(half - 1.0, row_h));
                 let rrect = Rect::from_min_size(pos2(rect.left() + half + 1.0, rect.top()), vec2(half - 1.0, row_h));
                 let id = ui.id().with(("row", i));
-                self.draw_cell(ui, &pal, lrect, r.left.as_ref().map(|x| x.0), r.left.as_ref().map(|x| x.1.as_str()), r.left_kind, r.left_idx.map(|l| (r.hunk, l)), pr, font, gutter, id.with("l"));
-                self.draw_cell(ui, &pal, rrect, r.right.as_ref().map(|x| x.0), r.right.as_ref().map(|x| x.1.as_str()), r.right_kind, r.right_idx.map(|l| (r.hunk, l)), pr, font, gutter, id.with("r"));
+                self.draw_cell(ui, &pal, lrect, r.left.as_ref().map(|x| x.0), r.left.as_ref().map(|x| x.1.as_str()), r.left_kind, r.left_idx.map(|l| (r.hunk, l)), pr, font, gutter, scroll_x, id.with("l"));
+                self.draw_cell(ui, &pal, rrect, r.right.as_ref().map(|x| x.0), r.right.as_ref().map(|x| x.1.as_str()), r.right_kind, r.right_idx.map(|l| (r.hunk, l)), pr, font, gutter, scroll_x, id.with("r"));
             }
         });
     }
@@ -533,7 +560,7 @@ impl DiffView {
                     continue;
                 }
                 let id = ui.id().with(("urow", i));
-                self.draw_cell(ui, &pal, rect, None, Some(&l.text), Some(l.kind), Some((hi, li)), pr, font, gutter, id);
+                self.draw_cell(ui, &pal, rect, None, Some(&l.text), Some(l.kind), Some((hi, li)), pr, font, gutter, 0.0, id);
                 if let Some(n) = l.old_no {
                     ui.painter().text(pos2(rect.left() + 42.0, rect.center().y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
                 }

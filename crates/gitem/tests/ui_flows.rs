@@ -2201,6 +2201,42 @@ fn a_screen_full_of_long_lines_stays_within_the_gpu_buffer() {
     assert!(bytes < GPU_SAFE_BYTES, "{} MiB of vertices", bytes / 1024 / 1024);
 }
 
+#[test]
+fn one_long_line_leaves_the_new_side_of_a_side_by_side_diff_on_screen() {
+    let f = Fx::new();
+    f.write("f.txt", &format!("{}\nold short\n", "x".repeat(3000)));
+    f.commit("base");
+    f.write("f.txt", &format!("{}\nnew short\n", "y".repeat(3000)));
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("f.txt".into())));
+    pump_for_label(&mut h, "Stage hunk");
+    wait_until_quiet(&mut h);
+    let texts = painted_text(&h);
+    let at = |needle: &str| texts.iter().find(|(_, _, t)| t.contains(needle)).unwrap_or_else(|| panic!("{needle} isn't painted")).clone();
+    let (old, new) = (at("old short"), at("new short"));
+    assert_eq!(old.0.y, new.0.y, "the two sides of a change share a row");
+    assert!(old.0.x < new.0.x);
+    assert!(new.0.x < 1150.0, "the new side starts off screen, at x={}", new.0.x);
+    assert!(new.1.contains(new.0), "the new side is clipped away");
+
+    // Scrolling sideways moves both sides by the same amount, and stays inside each half.
+    let long = at("yyyy");
+    let row = long.1.center();
+    h.event(egui::Event::PointerMoved(row));
+    h.step();
+    h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(-400.0, 0.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+    for _ in 0..30 {
+        h.step();
+    }
+    let texts = painted_text(&h);
+    let moved = |needle: &str| texts.iter().find(|(_, _, t)| t.contains(needle)).unwrap().clone();
+    let (long2, x2) = (moved("yyyy"), moved("xxxx"));
+    assert!(long2.0.x < long.0.x, "the long line didn't scroll");
+    assert_eq!(long.0.x - long2.0.x, at("xxxx").0.x - x2.0.x);
+    assert_eq!(long2.1, long.1, "each side stays in its own half");
+}
+
 fn merge_with_staged_files(f: &Fx) {
     f.write("auto.txt", "base\n");
     f.write("c.txt", "top\nmiddle\nbottom\n");
