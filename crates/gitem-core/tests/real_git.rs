@@ -1,6 +1,5 @@
 //! End-to-end tests against the real git binary, in throwaway temp repositories
-//! only. Network operations (fetch/pull/push/clone from a URL) are deliberately
-//! not executed here; their argument construction is unit-tested in `ops`.
+//! only. Fetch, pull, push and clone are in `remotes.rs`.
 use std::path::Path;
 
 use gitem_core::diff::{PatchMode, build_patch};

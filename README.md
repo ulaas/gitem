@@ -74,7 +74,7 @@ This was compared against the GitLens README, Help Center, and changelog through
 
 **Partial:**
 
-- **Agent sessions** are read from Claude Code and Codex transcript files, so status is an estimate. You answer permission prompts in the agent, not in gitem. Copilot CLI and OpenCode aren't read yet.
+- **Agent sessions** are read from the files Claude Code, Codex, Copilot CLI, and OpenCode write, so status is an estimate. You answer permission prompts in the agent, not in gitem. Copilot's format is undocumented and OpenCode's has changed between releases, so both may need updating. OpenCode sessions show no branch, because it doesn't record one.
 - **Localization** is experimental, as in GitLens: Spanish, Turkish, and Simplified Chinese cover navigation, toolbars, and context menus. The rest is English.
 - **Suggested changes** only work on GitHub.
 
@@ -145,16 +145,19 @@ Write operations are data (`ops.rs`), so every mutation can be logged, confirmed
 
 - **Unit tests** for parsers, the merge engine, graph layout, patches, URL building, and API response parsing.
 - **Integration tests against real git**, in temporary repositories.
+- **Remote tests** that run real clone, fetch, pull, and push against a bare repository in a temp folder, covering rejected and forced pushes, conflicts, hooks, pruning, tags, and cancelling.
+- **HTTP authentication tests** that run real git against `git http-backend` behind a Basic-auth bridge on localhost, through gitem's credential helper.
 - **HTTP client tests:** the hosting, issue-tracker, and AI clients make real requests to a mock server on localhost.
 - **Headless UI tests** that click real widgets, right-click for context menus, drag refs, and drive the helper windows, then verify the result with git or on disk.
 - **Helper tests** that have real git invoke the built binary.
 
-Opt-in tests have real git open the real windows, which answer by themselves through `GITEM_TEST_ACCEPT`: `cargo test -p gitem --test real_git_windows -- --ignored --test-threads=1`.
+Opt-in tests have real git open the real windows, including the password prompt, which answer by themselves through `GITEM_TEST_ACCEPT`: `cargo test -p gitem --test real_git_windows --test http_auth -- --ignored --test-threads=1`.
 
 Tests create temporary repositories and briefly store a uniquely named test credential in the OS vault, which is always removed.
 
 **What the tests don't cover:**
 
-- Fetch, pull, push, and clone from a URL are never run; only their arguments are checked.
+- Remote operations never run against a hosting service or over HTTPS, and SSH remotes and passphrase prompts aren't exercised.
 - Hosting, issue-tracker, and AI requests go to the local mock, so they prove gitem's side of each exchange against sample responses, not that a real service accepts them. Try these with your own accounts before relying on them.
 - Native file-picker dialogs aren't automated. Every picker also has a text field.
+- Copilot CLI and OpenCode reading is tested against sample data. No real Copilot session was available, and the real OpenCode database had no tool calls in it.

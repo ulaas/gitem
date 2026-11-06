@@ -8,8 +8,10 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 
-/// Only the end of each transcript is read: they can be very large.
+/// Transcripts can be very large, so only both ends are read: Codex and Copilot
+/// record the working folder once, at the start.
 const TAIL_BYTES: u64 = 512 * 1024;
+const HEAD_BYTES: u64 = 256 * 1024;
 const MAX_FILES: usize = 300;
 /// A file written this recently means the agent is active.
 const WORKING_SECS: i64 = 20;
@@ -52,6 +54,8 @@ impl AgentSession {
     pub fn resume_command(&self) -> String {
         match self.agent {
             "Codex" => format!("codex resume {}", self.id),
+            "Copilot" => format!("copilot --resume {}", self.id),
+            "OpenCode" => format!("opencode --session {}", self.id),
             _ => format!("claude --resume {}", self.id),
         }
     }
@@ -96,6 +100,10 @@ pub fn parse_tail(text: &str) -> Tail {
                 t.id = p.get("id").and_then(Value::as_str).unwrap_or(&t.id).to_string();
             }
         let kind = get("type");
+        if kind.contains('.') {
+            copilot_event(kind, &v, &mut t, &mut counts, &mut open);
+            continue;
+        }
         if kind != "assistant" && kind != "user" {
             continue;
         }
@@ -130,6 +138,39 @@ pub fn parse_tail(text: &str) -> Tail {
     t
 }
 
+/// Copilot CLI: `{"type":"session.start","data":{...}}`. The format is undocumented;
+/// the assistant text and file argument names are best guesses, read when present.
+fn copilot_event(kind: &str, v: &Value, t: &mut Tail, counts: &mut HashMap<String, u64>, open: &mut Vec<String>) {
+    let Some(data) = v.get("data") else { return };
+    let text = |p: &str| data.pointer(p).and_then(Value::as_str);
+    match kind {
+        "session.start" => {
+            t.id = text("/sessionId").unwrap_or(&t.id).to_string();
+            t.cwd = text("/context/cwd").unwrap_or(&t.cwd).to_string();
+            t.branch = text("/context/branch").unwrap_or(&t.branch).to_string();
+        }
+        "assistant.message" => {
+            if let Some(x) = text("/content").filter(|x| !x.is_empty()) {
+                t.last_text = x.chars().take(240).collect();
+            }
+        }
+        "tool.execution_start" => {
+            if let Some(id) = text("/toolCallId") {
+                open.push(id.to_string());
+            }
+            if let Some(f) = ["/arguments/path", "/arguments/file_path", "/arguments/filePath"].iter().find_map(|p| text(p)) {
+                *counts.entry(f.replace('\\', "/")).or_default() += 1;
+            }
+        }
+        "tool.execution_complete" => {
+            if let Some(id) = text("/toolCallId") {
+                open.retain(|x| x != id);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn state_of(age_secs: i64, pending_tool: bool) -> AgentState {
     if age_secs < WORKING_SECS {
         AgentState::Working
@@ -143,10 +184,12 @@ pub fn state_of(age_secs: i64, pending_tool: bool) -> AgentState {
 fn read_tail(p: &Path) -> Option<String> {
     let mut f = std::fs::File::open(p).ok()?;
     let len = f.metadata().ok()?.len();
-    if len > TAIL_BYTES {
+    let mut b = Vec::new();
+    if len > HEAD_BYTES + TAIL_BYTES {
+        f.by_ref().take(HEAD_BYTES).read_to_end(&mut b).ok()?;
+        b.push(b'\n');
         f.seek(SeekFrom::Start(len - TAIL_BYTES)).ok()?;
     }
-    let mut b = Vec::new();
     f.read_to_end(&mut b).ok()?;
     Some(String::from_utf8_lossy(&b).into_owned())
 }
@@ -169,7 +212,8 @@ fn collect_jsonl(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, i64)>) {
 /// `(agent name, transcript folder)` for each supported CLI.
 pub fn default_roots() -> Vec<(&'static str, PathBuf)> {
     let home = PathBuf::from(std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default());
-    vec![("Claude Code", home.join(".claude/projects")), ("Codex", home.join(".codex/sessions"))]
+    let copilot = std::env::var_os("COPILOT_HOME").map_or_else(|| home.join(".copilot"), PathBuf::from);
+    vec![("Claude Code", home.join(".claude/projects")), ("Codex", home.join(".codex/sessions")), ("Copilot", copilot.join("session-state"))]
 }
 
 /// Sessions whose working folder is one of `worktrees`, newest first.
@@ -187,10 +231,85 @@ pub fn scan(roots: &[(&'static str, PathBuf)], worktrees: &[String], now: i64) -
             if !wanted.contains(&norm(&t.cwd)) {
                 continue;
             }
-            let id = if t.id.is_empty() { path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() } else { t.id };
+            // Copilot keeps one `<id>/events.jsonl` per session.
+            let named = if path.file_stem().is_some_and(|s| s == "events") { path.parent().and_then(Path::file_name) } else { path.file_stem() };
+            let id = if t.id.is_empty() { named.map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() } else { t.id };
             out.push(AgentSession { agent, id, path, cwd: t.cwd, branch: t.branch, modified, state: state_of(now - modified, t.pending_tool), last_text: t.last_text, files: t.files });
         }
     }
+    out.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    out
+}
+
+/// Where OpenCode keeps its session database.
+pub fn opencode_db() -> PathBuf {
+    let home = PathBuf::from(std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default());
+    std::env::var_os("XDG_DATA_HOME").map_or_else(|| home.join(".local/share"), PathBuf::from).join("opencode/opencode.db")
+}
+
+/// `(last assistant text, tool still running, file counts)` from an OpenCode
+/// session's `(part JSON, message JSON)` rows, newest first. Tool parts are read
+/// from OpenCode's documented tool shape; no real one was available to check.
+fn opencode_summary(rows: &[(String, String)]) -> (String, bool, Vec<(String, u64)>) {
+    let mut last_text = String::new();
+    let mut pending = false;
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    for (part, message) in rows {
+        let Ok(p) = serde_json::from_str::<Value>(part) else { continue };
+        match p.get("type").and_then(Value::as_str) {
+            Some("text") if last_text.is_empty() => {
+                let role = serde_json::from_str::<Value>(message).ok().and_then(|m| m.get("role").and_then(Value::as_str).map(String::from));
+                if role.as_deref() == Some("assistant") {
+                    last_text = p.get("text").and_then(Value::as_str).unwrap_or("").chars().take(240).collect();
+                }
+            }
+            Some("tool") => {
+                pending |= matches!(p.pointer("/state/status").and_then(Value::as_str), Some("pending" | "running"));
+                if let Some(f) = ["/state/input/filePath", "/state/input/path"].iter().find_map(|k| p.pointer(k).and_then(Value::as_str)) {
+                    *counts.entry(f.replace('\\', "/")).or_default() += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut files: Vec<_> = counts.into_iter().collect();
+    files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    (last_text, pending, files)
+}
+
+/// OpenCode sessions in `worktrees`. A missing or unfamiliar database gives none.
+pub fn scan_opencode(db: &Path, worktrees: &[String], now: i64) -> Vec<AgentSession> {
+    read_opencode(db, worktrees, now).unwrap_or_default()
+}
+
+fn read_opencode(db: &Path, worktrees: &[String], now: i64) -> rusqlite::Result<Vec<AgentSession>> {
+    use rusqlite::{Connection, OpenFlags};
+    if !db.exists() {
+        return Ok(Vec::new());
+    }
+    let wanted: Vec<String> = worktrees.iter().map(|w| norm(w)).collect();
+    let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    c.busy_timeout(std::time::Duration::from_millis(200))?;
+    let mut sessions = c.prepare("select id, directory, time_updated from session where parent_id is null and time_archived is null order by time_updated desc limit 300")?;
+    let rows: Vec<(String, String, i64)> = sessions.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut parts = c.prepare("select p.data, m.data from part p join message m on m.id = p.message_id where p.session_id = ?1 order by p.time_created desc, p.id desc limit 500")?;
+    let mut out = Vec::new();
+    for (id, cwd, updated_ms) in rows {
+        if !wanted.contains(&norm(&cwd)) {
+            continue;
+        }
+        let items: Vec<(String, String)> = parts.query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        let (last_text, pending, files) = opencode_summary(&items);
+        let modified = updated_ms / 1000;
+        out.push(AgentSession { agent: "OpenCode", id, path: db.to_path_buf(), cwd, branch: String::new(), modified, state: state_of(now - modified, pending), last_text, files });
+    }
+    Ok(out)
+}
+
+/// Every supported agent's sessions in `worktrees`, newest first.
+pub fn scan_all(worktrees: &[String], now: i64) -> Vec<AgentSession> {
+    let mut out = scan(&default_roots(), worktrees, now);
+    out.extend(scan_opencode(&opencode_db(), worktrees, now));
     out.sort_by_key(|s| std::cmp::Reverse(s.modified));
     out
 }
@@ -236,6 +355,84 @@ mod tests {
         assert_eq!(found[0].id, "s1");
         assert_eq!(found[0].state, AgentState::NeedsInput);
         assert_eq!(found[0].resume_command(), "claude --resume s1");
+    }
+
+    #[test]
+    fn copilot_sessions() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("state/abc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("events.jsonl"),
+            r#"{"type":"session.start","data":{"sessionId":"abc","context":{"cwd":"C:\\repo","branch":"dev"}},"id":"1"}
+{"type":"assistant.message","data":{"content":"Looking"}}
+{"type":"tool.execution_start","data":{"toolCallId":"t1","toolName":"view","arguments":{"path":"C:\\repo\\a.rs"}}}
+{"type":"tool.execution_complete","data":{"toolCallId":"t1","success":true}}
+{"type":"tool.execution_start","data":{"toolCallId":"t2","toolName":"shell","arguments":{}}}
+"#,
+        )
+        .unwrap();
+        let roots = vec![("Copilot", d.path().join("state"))];
+        let found = scan(&roots, &["C:/repo".to_string()], crate::util::now_ts() + 100);
+        assert_eq!(found.len(), 1);
+        let s = &found[0];
+        assert_eq!((s.id.as_str(), s.branch.as_str(), s.last_text.as_str()), ("abc", "dev", "Looking"));
+        assert_eq!(s.state, AgentState::NeedsInput, "t2 is unfinished");
+        assert_eq!(s.files, vec![("C:/repo/a.rs".to_string(), 1)]);
+        assert_eq!(s.resume_command(), "copilot --resume abc");
+    }
+
+    #[test]
+    fn long_sessions_keep_the_folder_recorded_on_the_first_line() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut text = String::from("{\"type\":\"session_meta\",\"payload\":{\"id\":\"cx\",\"cwd\":\"C:/repo\"}}\n");
+        let filler = format!("{{\"type\":\"response_item\",\"x\":\"{}\"}}\n", "y".repeat(1000));
+        while text.len() < 2 * 1024 * 1024 {
+            text.push_str(&filler);
+        }
+        std::fs::write(root.join("long.jsonl"), text).unwrap();
+        let found = scan(&[("Codex", root)], &["C:/repo".to_string()], crate::util::now_ts() + 100);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "cx");
+    }
+
+    #[test]
+    fn opencode_sessions_come_from_its_database() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("opencode.db");
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch(
+            r#"create table session (id text primary key, directory text, parent_id text, time_archived integer, time_updated integer);
+            create table message (id text primary key, session_id text, data text);
+            create table part (id text primary key, message_id text, session_id text, time_created integer, data text);
+            insert into session values ('ses1', 'C:\repo', null, null, 1000000), ('child', 'C:\repo', 'ses1', null, 1000000), ('old', 'C:\repo', null, 5, 1000000), ('else', 'D:\other', null, null, 1000000);
+            insert into message values ('m1', 'ses1', '{"role":"user"}'), ('m2', 'ses1', '{"role":"assistant"}');
+            insert into part values
+              ('p1', 'm1', 'ses1', 1, '{"type":"text","text":"please fix"}'),
+              ('p2', 'm2', 'ses1', 2, '{"type":"text","text":"Fixing now"}'),
+              ('p3', 'm2', 'ses1', 3, '{"type":"tool","tool":"edit","state":{"status":"completed","input":{"filePath":"C:\\repo\\a.rs"}}}'),
+              ('p4', 'm2', 'ses1', 4, '{"type":"tool","tool":"bash","state":{"status":"running","input":{}}}');"#,
+        )
+        .unwrap();
+        drop(c);
+        let found = scan_opencode(&db, &["c:/REPO".to_string()], 2000);
+        assert_eq!(found.len(), 1, "only top-level, unarchived sessions in this repository");
+        let s = &found[0];
+        assert_eq!((s.id.as_str(), s.modified, s.last_text.as_str()), ("ses1", 1000, "Fixing now"));
+        assert_eq!(s.state, AgentState::NeedsInput);
+        assert_eq!(s.files, vec![("C:/repo/a.rs".to_string(), 1)]);
+        assert_eq!(s.resume_command(), "opencode --session ses1");
+    }
+
+    #[test]
+    fn unreadable_opencode_data_gives_no_sessions() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(scan_opencode(&d.path().join("none.db"), &["x".to_string()], 0).is_empty());
+        let junk = d.path().join("junk.db");
+        std::fs::write(&junk, "not a database").unwrap();
+        assert!(scan_opencode(&junk, &["x".to_string()], 0).is_empty());
     }
 
     #[test]

@@ -37,7 +37,7 @@ impl AgentsView {
         if self.last.is_none_or(|t| t.elapsed() >= REFRESH) && !self.sessions.busy() {
             self.last = Some(Instant::now());
             let worktrees: Vec<String> = cx.data.worktrees().iter().map(|w| w.path.clone()).collect();
-            self.sessions.spawn(ui.ctx(), move || -> Result<Vec<AgentSession>, String> { Ok(agents::scan(&agents::default_roots(), &worktrees, util::now_ts())) });
+            self.sessions.spawn(ui.ctx(), move || -> Result<Vec<AgentSession>, String> { Ok(agents::scan_all(&worktrees, util::now_ts())) });
         }
         ui.horizontal(|ui| {
             let agent = cx.settings.agent_command.clone();
@@ -53,7 +53,7 @@ impl AgentsView {
         };
         let shown: Vec<&AgentSession> = list.iter().filter(|s| !cx.settings.archived_sessions.contains(&s.id)).collect();
         if shown.is_empty() {
-            empty_state(ui, "No agent sessions here", "Claude Code and Codex sessions in this repository's worktrees appear here.", &p);
+            empty_state(ui, "No agent sessions here", "Claude Code, Codex, Copilot CLI, and OpenCode sessions in this repository's worktrees appear here.", &p);
         } else {
             let selected = self.selected.as_ref().and_then(|id| shown.iter().find(|s| s.id == *id).copied());
             if let Some(s) = selected {

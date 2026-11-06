@@ -238,10 +238,10 @@ pub fn helper(op: &str, input: &str) -> Result<String> {
     let fields = parse_helper_input(input);
     let target = helper_target(&fields);
     let field = |k: &str| fields.iter().find(|(a, _)| a == k).map(|x| x.1.clone());
+    let host_only = helper_target(&fields.iter().filter(|(k, _)| k != "path").cloned().collect::<Vec<_>>());
     match op {
         "get" => {
             // Prefer a path-specific entry, then fall back to the host entry.
-            let host_only = helper_target(&fields.iter().filter(|(k, _)| k != "path").cloned().collect::<Vec<_>>());
             let found = match get(&target)? {
                 Some(c) => Some(c),
                 None => get(&host_only)?,
@@ -261,7 +261,8 @@ pub fn helper(op: &str, input: &str) -> Result<String> {
             Ok(String::new())
         }
         "erase" => {
-            delete(&target)?;
+            // `get` may have answered from the host entry, so that's the one to drop.
+            delete(if get(&target)?.is_some() { &target } else { &host_only })?;
             Ok(String::new())
         }
         // Git ignores unknown operations; do the same.

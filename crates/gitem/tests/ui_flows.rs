@@ -1,5 +1,5 @@
 //! Headless end-to-end tests: drive the real UI by clicking widgets, then verify
-//! the outcome with git itself. Temp repositories only; nothing touches a remote.
+//! the outcome with git itself. Temp repositories only; remotes are local bare repos.
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -1062,4 +1062,122 @@ fn saved_layouts_keep_splits_and_drop_one_off_tabs() {
     assert_eq!(keys.len(), 3, "the diff tab isn't kept: {keys:?}");
     assert_eq!(back.iter_leaves().count(), 2, "the split survives");
     assert!(gitem::app::layout_from_json("not json").is_none());
+}
+
+/// `f` tracks a bare repository, and a second clone can move it from elsewhere.
+struct Remote {
+    f: Fx,
+    other: PathBuf,
+    bare: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+fn with_remote() -> Remote {
+    let dir = tempfile::tempdir().unwrap();
+    let (bare, other) = (dir.path().join("remote.git"), dir.path().join("other"));
+    let f = Fx::new();
+    sample_history(&f);
+    let g = &f.git;
+    g.run(None, &["init", "-q", "--bare", "-b", "main", &bare.to_string_lossy()]).unwrap();
+    f.git(&["remote", "add", "origin", &bare.to_string_lossy()]);
+    f.git(&["push", "-q", "-u", "origin", "main"]);
+    g.run(None, &["-c", "core.autocrlf=false", "clone", "-q", &bare.to_string_lossy(), &other.to_string_lossy()]).unwrap();
+    for (k, v) in [("user.name", "Other"), ("user.email", "other@example.com"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
+        g.run(Some(&other), &["config", k, v]).unwrap();
+    }
+    Remote { f, other, bare, _dir: dir }
+}
+
+impl Remote {
+    fn commit_elsewhere(&self, file: &str, msg: &str) {
+        let g = &self.f.git;
+        std::fs::write(self.other.join(file), "elsewhere\n").unwrap();
+        g.run(Some(&self.other), &["add", "-A"]).unwrap();
+        g.run(Some(&self.other), &["commit", "-q", "-m", msg]).unwrap();
+        g.run(Some(&self.other), &["push", "-q"]).unwrap();
+    }
+    fn remote_tip(&self) -> String {
+        self.f.git.run(Some(&self.bare), &["rev-parse", "main"]).unwrap().text().trim().to_string()
+    }
+}
+
+#[test]
+fn toolbar_fetches_pulls_and_pushes() {
+    let r = with_remote();
+    let mut h = harness(&r.f);
+    settle(&mut h);
+
+    r.commit_elsewhere("new.txt", "from elsewhere");
+    click(&mut h, "⟳ Fetch");
+    click(&mut h, "↓ Pull 1");
+    wait_for(&mut h, "pull", || r.f.root.join("new.txt").exists());
+    no_errors(&h);
+
+    r.f.write("mine.txt", "mine\n");
+    r.f.commit("from here");
+    click(&mut h, "↑ Push 1");
+    wait_for(&mut h, "push", || r.remote_tip() == r.f.git(&["rev-parse", "HEAD"]).trim());
+    no_errors(&h);
+}
+
+#[test]
+fn a_rejected_push_shows_git_s_reason() {
+    let r = with_remote();
+    r.commit_elsewhere("new.txt", "from elsewhere");
+    r.f.write("mine.txt", "mine\n");
+    r.f.commit("from here");
+    let tip = r.remote_tip();
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    click(&mut h, "↑ Push 1");
+    pump_for_label(&mut h, "Something went wrong");
+    assert_eq!(r.remote_tip(), tip);
+    assert!(r.f.git(&["log", "-1", "--format=%s"]).contains("from here"), "local work is untouched");
+}
+
+#[test]
+fn a_pull_conflict_opens_into_the_merge_workflow() {
+    let r = with_remote();
+    r.commit_elsewhere("conflict.txt", "from elsewhere");
+    r.f.write("conflict.txt", "from here\n");
+    r.f.commit("from here");
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    click(&mut h, "⟳ Fetch");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::pull(ops::PullMode::Merge, false)));
+    pump_for_label(&mut h, "Something went wrong");
+    assert!(r.f.git(&["status", "--porcelain"]).contains("AA conflict.txt"));
+    click(&mut h, "Dismiss");
+    click(&mut h, "Resolve");
+    pump_for_label(&mut h, "Take theirs");
+}
+
+#[test]
+fn clone_opens_the_new_repository() {
+    let r = with_remote();
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("cloned");
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let op = ops::clone_repo(&r.bare.to_string_lossy(), &dest.to_string_lossy(), None, false, None);
+    h.state_mut().apply_action(&ctx, Action::RunGlobal { op, open_after: Some(dest.clone()) });
+    pump(&mut h, |a| a.repos.len() == 2, "the clone to open");
+    no_errors(&h);
+    assert!(dest.join("a.txt").exists() || std::fs::read_dir(&dest).unwrap().count() > 1);
+}
+
+#[test]
+fn a_failed_clone_opens_nothing_and_says_so() {
+    let r = with_remote();
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("cloned");
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let op = ops::clone_repo(&d.path().join("missing.git").to_string_lossy(), &dest.to_string_lossy(), None, false, None);
+    h.state_mut().apply_action(&ctx, Action::RunGlobal { op, open_after: Some(dest) });
+    pump_for_label(&mut h, "Something went wrong");
+    assert_eq!(h.state().repos.len(), 1);
 }

@@ -14,6 +14,7 @@ ureq = { version = "3", features = ["json"] }
 directories = "6"
 md5 = "0.8"
 thiserror = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Threading"] }

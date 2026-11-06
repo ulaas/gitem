@@ -99,7 +99,6 @@ impl Net {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let bare = dir.path().join("remote.git");
-        let g = git();
         init_bare(&bare);
         let url = path_str(&bare);
         let a = Clone_::at(&url, &dir.path().join("a"));
