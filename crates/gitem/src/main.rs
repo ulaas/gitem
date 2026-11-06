@@ -163,12 +163,19 @@ fn run_app(args: &[String]) -> i32 {
             p => paths.push(PathBuf::from(p)),
         }
     }
-    let options = eframe::NativeOptions { viewport: gitem::chrome::viewport("gitem", size).with_min_inner_size([800.0, 500.0]), persist_window: shot.is_none(), ..Default::default() };
+    let is_shot = shot.is_some();
+    if is_shot {
+        gitem_core::cred::turn_off_for_screenshots();
+    }
+    let storage = standalone::eframe_storage("app.ron", is_shot);
+    let options = eframe::NativeOptions { viewport: gitem::chrome::viewport("gitem", size).with_min_inner_size([800.0, 500.0]), persist_window: !is_shot, persistence_path: storage.clone(), ..Default::default() };
     let result = eframe::run_native(
         "gitem",
         options,
         Box::new(move |cc| {
             let mut a = app::GitemApp::new(&cc.egui_ctx, &paths);
+            // A screenshot must leave the saved session as it found it.
+            a.persist = !is_shot;
             a.shot_tabs = tabs;
             a.shot_inspect = inspect;
             if let Some(q) = &palette {
@@ -181,6 +188,7 @@ fn run_app(args: &[String]) -> i32 {
             Ok(Box::new(a))
         }),
     );
+    standalone::forget_shot_storage(storage.as_deref(), is_shot);
     match result {
         Ok(()) => 0,
         Err(e) => {

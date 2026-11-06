@@ -109,3 +109,19 @@ fn mcp_mode_speaks_over_stdio_with_the_real_binary() {
 fn bad_deep_links_are_rejected() {
     assert_eq!(Command::new(BIN).arg("gitem://nonsense").output().unwrap().status.code(), Some(2));
 }
+
+/// Opens a real window for a moment, so it's opt-in.
+#[test]
+#[ignore = "opens a window; run with --ignored --test-threads=1"]
+fn a_screenshot_stays_inside_the_config_folder() {
+    let d = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(d.path()).status().unwrap().success());
+    run(&["init", "-q", "-b", "main"]);
+    let config = tempfile::tempdir().unwrap();
+    let out = config.path().join("shot.png");
+    let s = Command::new(BIN).arg(d.path()).arg("--shot").arg(&out).arg("--size").arg("800x500").env("GITEM_CONFIG_DIR", config.path()).status().unwrap();
+    assert!(s.success());
+    assert!(out.exists(), "the screenshot was taken");
+    assert!(config.path().join("app.ron").exists(), "eframe's state follows GITEM_CONFIG_DIR");
+    assert!(!config.path().join("settings.json").exists(), "a screenshot doesn't save the session");
+}

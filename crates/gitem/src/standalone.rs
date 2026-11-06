@@ -61,6 +61,35 @@ fn test_switch(name: &str) -> Option<std::ffi::OsString> {
     if cfg!(debug_assertions) { std::env::var_os(name) } else { None }
 }
 
+/// Where eframe keeps window and egui state. `None` means its default, the real
+/// profile, which only an ordinary run may touch.
+fn storage_in(config_dir: Option<PathBuf>, shot_dir: PathBuf, name: &str, is_shot: bool) -> Option<PathBuf> {
+    match config_dir {
+        Some(dir) => Some(dir.join(name)),
+        None => is_shot.then(|| shot_dir.join(name)),
+    }
+}
+
+fn shot_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("gitem-shot-{}", std::process::id()))
+}
+
+/// Picks the storage file and makes its folder, since eframe doesn't when given a path.
+pub fn eframe_storage(name: &str, is_shot: bool) -> Option<PathBuf> {
+    let path = storage_in(gitem_core::settings::config_dir_override(), shot_dir(), name, is_shot)?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    Some(path)
+}
+
+/// A screenshot without `GITEM_CONFIG_DIR` kept its state in a temp folder.
+pub fn forget_shot_storage(storage: Option<&std::path::Path>, is_shot: bool) {
+    if is_shot && storage.is_some_and(|p| p.starts_with(shot_dir())) {
+        let _ = std::fs::remove_dir_all(shot_dir());
+    }
+}
+
 impl HelperApp {
     pub fn new(mode: Mode) -> Self {
         let settings = Settings::load();
@@ -255,8 +284,12 @@ impl HelperApp {
 }
 
 pub fn run(mode: Mode, title: &str, size: [f32; 2]) -> i32 {
-    let options = eframe::NativeOptions { viewport: chrome::viewport(title, size), persist_window: false, ..Default::default() };
+    let is_shot = test_switch("GITEM_SHOT").is_some();
+    // Its own file: a helper mustn't overwrite the main window's state.
+    let storage = eframe_storage("helper.ron", is_shot);
+    let options = eframe::NativeOptions { viewport: chrome::viewport(title, size), persist_window: false, persistence_path: storage.clone(), ..Default::default() };
     let result = eframe::run_native(title, options, Box::new(move |_cc| Ok(Box::new(HelperApp::new(mode)))));
+    forget_shot_storage(storage.as_deref(), is_shot);
     if let Err(e) = result {
         eprintln!("gitem: {e}");
         return 1;
@@ -296,6 +329,24 @@ pub fn difftool(a: String, b: String) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eframe_storage_follows_the_config_folder() {
+        let (config, shot) = (PathBuf::from("scratch"), PathBuf::from("temp"));
+        assert_eq!(storage_in(Some(config.clone()), shot.clone(), "app.ron", false), Some(config.join("app.ron")));
+        assert_eq!(storage_in(Some(config.clone()), shot.clone(), "app.ron", true), Some(config.join("app.ron")));
+    }
+
+    #[test]
+    fn a_screenshot_never_uses_the_real_profile() {
+        let shot = PathBuf::from("temp");
+        assert_eq!(storage_in(None, shot.clone(), "app.ron", true), Some(shot.join("app.ron")));
+    }
+
+    #[test]
+    fn an_ordinary_run_keeps_the_real_profile() {
+        assert_eq!(storage_in(None, PathBuf::from("temp"), "app.ron", false), None);
+    }
 
     #[test]
     fn release_builds_ignore_the_test_switches() {

@@ -7,9 +7,15 @@ use serde::{Deserialize, Serialize};
 use crate::ai::AiConfig;
 use crate::forge::ForgeKind;
 
+/// The folder named by `GITEM_CONFIG_DIR`. When it's set, everything gitem keeps
+/// stays in there: settings, window state and secrets.
+pub fn config_dir_override() -> Option<PathBuf> {
+    std::env::var_os("GITEM_CONFIG_DIR").map(PathBuf::from)
+}
+
 pub fn config_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("GITEM_CONFIG_DIR") {
-        return PathBuf::from(p);
+    if let Some(p) = config_dir_override() {
+        return p;
     }
     directories::ProjectDirs::from("dev", "gitem", "gitem").map(|d| d.config_dir().to_path_buf()).unwrap_or_else(|| PathBuf::from(".gitem"))
 }

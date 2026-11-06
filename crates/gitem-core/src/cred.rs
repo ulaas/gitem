@@ -4,6 +4,10 @@
 //! On other platforms a 0600 file under the config dir is used (no vault
 //! dependency); the UI labels which backend is active.
 //!
+//! Tests and screenshots must never see real secrets. With `GITEM_CONFIG_DIR` set,
+//! secrets stay in a file in that folder on every platform. In `--shot` mode
+//! without it, there's no store at all: see [`turn_off_for_screenshots`].
+//!
 //! Three kinds of secrets, distinguished by target-name prefix:
 //!   `gitem:forge:<host>`   API tokens for GitHub, GitLab, ...
 //!   `gitem:git:<url>`      username/password served to git as a credential helper
@@ -12,6 +16,7 @@
 //! `gitem --credential-helper get|store|erase` implements git's helper protocol.
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::runner::{GitExe, RunOpts};
 use crate::{Error, Result};
@@ -27,12 +32,57 @@ pub struct StoredCred {
     pub secret: String,
 }
 
+static TURNED_OFF: AtomicBool = AtomicBool::new(false);
+
+/// For `--shot`: nothing is read from or written to the real store, so a
+/// screenshot can't show real hosts or accounts, or use a real token.
+pub fn turn_off_for_screenshots() {
+    TURNED_OFF.store(true, Ordering::Relaxed);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    #[cfg(windows)]
+    Vault,
+    File,
+    Off,
+}
+
+fn choose_backend(config_override: bool, turned_off: bool) -> Backend {
+    if config_override {
+        return Backend::File;
+    }
+    if turned_off {
+        return Backend::Off;
+    }
+    #[cfg(windows)]
+    return Backend::Vault;
+    #[cfg(not(windows))]
+    return Backend::File;
+}
+
+fn backend() -> Backend {
+    choose_backend(crate::settings::config_dir_override().is_some(), TURNED_OFF.load(Ordering::Relaxed))
+}
+
+/// Whether this run is cut off from the real profile. Git's own credential helpers
+/// are real too, so they aren't asked either.
+fn isolated() -> bool {
+    crate::settings::config_dir_override().is_some() || TURNED_OFF.load(Ordering::Relaxed)
+}
+
 pub fn backend_name() -> &'static str {
-    if cfg!(windows) { "Windows Credential Manager" } else { "Private file (0600) in the config directory" }
+    match backend() {
+        #[cfg(windows)]
+        Backend::Vault => "Windows Credential Manager",
+        Backend::File if cfg!(windows) => "file in GITEM_CONFIG_DIR, not encrypted",
+        Backend::File => "Private file (0600) in the config directory",
+        Backend::Off => "nothing, because this is a screenshot run",
+    }
 }
 
 #[cfg(windows)]
-mod backend {
+mod vault {
     use super::*;
     use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError};
     use windows_sys::Win32::Security::Credentials::{
@@ -137,11 +187,14 @@ mod backend {
     }
 }
 
-#[cfg(not(windows))]
-mod backend {
+mod file {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
     type Store = BTreeMap<String, (String, String)>;
+
+    /// Each change reads, edits and rewrites the whole file, so two at once would lose one.
+    static LOCK: Mutex<()> = Mutex::new(());
 
     fn path() -> std::path::PathBuf {
         crate::settings::config_dir().join("credentials.json")
@@ -149,45 +202,79 @@ mod backend {
     fn load() -> Store {
         std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
+    /// Through a temp file, so another process never reads a half-written store.
     fn save(s: &Store) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
         let p = path();
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(p)?;
+        let temp = p.with_extension(format!("tmp{}", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut f = options.open(&temp)?;
         f.write_all(&serde_json::to_vec(s).map_err(|e| Error::Other(e.to_string()))?)?;
+        drop(f);
+        std::fs::rename(&temp, p)?;
         Ok(())
     }
+    fn locked() -> std::sync::MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     pub fn write(target: &str, username: &str, secret: &str) -> Result<()> {
+        let _guard = locked();
         let mut s = load();
         s.insert(target.to_string(), (username.to_string(), secret.to_string()));
         save(&s)
     }
     pub fn read(target: &str) -> Result<Option<StoredCred>> {
+        let _guard = locked();
         Ok(load().get(target).map(|(u, p)| StoredCred { target: target.to_string(), username: u.clone(), secret: p.clone() }))
     }
     pub fn delete(target: &str) -> Result<()> {
+        let _guard = locked();
         let mut s = load();
         s.remove(target);
         save(&s)
     }
     pub fn list(prefix: &str) -> Vec<(String, String)> {
+        let _guard = locked();
         load().into_iter().filter(|(k, _)| k.starts_with(prefix)).map(|(k, (u, _))| (k, u)).collect()
     }
 }
 
 pub fn store(target: &str, username: &str, secret: &str) -> Result<()> {
-    backend::write(target, username, secret)
+    match backend() {
+        #[cfg(windows)]
+        Backend::Vault => vault::write(target, username, secret),
+        Backend::File => file::write(target, username, secret),
+        Backend::Off => Err(Error::Other("Secrets can't be saved in a screenshot run.".to_string())),
+    }
 }
 pub fn get(target: &str) -> Result<Option<StoredCred>> {
-    backend::read(target)
+    match backend() {
+        #[cfg(windows)]
+        Backend::Vault => vault::read(target),
+        Backend::File => file::read(target),
+        Backend::Off => Ok(None),
+    }
 }
 pub fn delete(target: &str) -> Result<()> {
-    backend::delete(target)
+    match backend() {
+        #[cfg(windows)]
+        Backend::Vault => vault::delete(target),
+        Backend::File => file::delete(target),
+        Backend::Off => Ok(()),
+    }
 }
 pub fn list(prefix: &str) -> Vec<(String, String)> {
-    backend::list(prefix)
+    match backend() {
+        #[cfg(windows)]
+        Backend::Vault => vault::list(prefix),
+        Backend::File => file::list(prefix),
+        Backend::Off => Vec::new(),
+    }
 }
 
 /// `gitem:*` entries plus those from Git Credential Manager (`git:*`), which the
@@ -272,6 +359,9 @@ pub fn helper(op: &str, input: &str) -> Result<String> {
 
 /// Ask whichever credential helpers git is configured with. Never prompts.
 pub fn git_credential_fill(git: &GitExe, url: &str) -> Option<(String, String)> {
+    if isolated() {
+        return None;
+    }
     let opts = RunOpts {
         stdin: Some(format!("url={url}\n\n").into_bytes()),
         env: vec![("GIT_TERMINAL_PROMPT".into(), "0".into()), ("GIT_ASKPASS".into(), "".into()), ("SSH_ASKPASS".into(), "".into()), ("GCM_INTERACTIVE".into(), "never".into())],
@@ -289,6 +379,9 @@ pub fn git_credential_fill(git: &GitExe, url: &str) -> Option<(String, String)> 
 
 /// Remove an entry from git's configured helpers (`git credential reject`).
 pub fn git_credential_reject(git: &GitExe, url: &str) -> Result<()> {
+    if isolated() {
+        return Ok(());
+    }
     let opts = RunOpts { stdin: Some(format!("url={url}\n\n").into_bytes()), is_write: true, ..Default::default() };
     git.run_opts(None, &["credential".to_string(), "reject".to_string()], &opts, &mut |_| {})?.into_result()?;
     Ok(())
@@ -417,7 +510,50 @@ mod tests {
         assert_eq!(helper_target(&f), "gitem:git:https://example.com");
     }
 
-    /// Real round trip through the OS vault, under a unique name, always cleaned up.
+    #[test]
+    fn the_config_override_keeps_secrets_out_of_the_real_store() {
+        assert_eq!(choose_backend(true, false), Backend::File);
+        assert_eq!(choose_backend(true, true), Backend::File, "a scratch folder can still show fake secrets in a screenshot");
+        assert_eq!(choose_backend(false, true), Backend::Off);
+    }
+
+    #[test]
+    fn tests_keep_secrets_in_the_scratch_folder() {
+        let target = format!("{PREFIX_FORGE}gitem-scratch-{}.invalid", std::process::id());
+        store(&target, "me", "fake-secret").unwrap();
+        let file = crate::settings::config_dir().join("credentials.json");
+        assert!(std::fs::read_to_string(&file).unwrap().contains(&target));
+        assert_eq!(get(&target).unwrap().unwrap().secret, "fake-secret");
+        delete(&target).unwrap();
+        assert_eq!(get(&target).unwrap(), None);
+    }
+
+    #[test]
+    fn git_helpers_are_not_asked_when_isolated() {
+        let git = GitExe::discover(None).unwrap();
+        assert_eq!(git_credential_fill(&git, "https://gitem-test.invalid"), None);
+    }
+
+    /// The only test of the Win32 calls. It adds one uniquely named entry to a real
+    /// vault and removes it again, but it's opt-in because that vault is real.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "uses the real Windows vault"]
+    fn windows_vault_round_trip() {
+        let target = format!("{PREFIX_GIT}https://gitem-test-{}.invalid", std::process::id());
+        let result = std::panic::catch_unwind(|| {
+            vault::write(&target, "me", "s3cret").unwrap();
+            let got = vault::read(&target).unwrap().unwrap();
+            assert_eq!((got.username.as_str(), got.secret.as_str()), ("me", "s3cret"));
+            assert!(vault::list(PREFIX_GIT).iter().any(|(t, _)| *t == target));
+            vault::delete(&target).unwrap();
+            assert_eq!(vault::read(&target).unwrap(), None);
+        });
+        let _ = vault::delete(&target);
+        result.unwrap();
+    }
+
+    /// A round trip through the active store, under a unique name, always cleaned up.
     #[test]
     fn vault_roundtrip_and_helper_protocol() {
         let host = format!("gitem-test-{}.invalid", std::process::id());

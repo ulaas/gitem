@@ -132,6 +132,8 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 - Destructive commands ask first and show the exact git command. You can turn this off in Settings.
 - Repository content is treated as untrusted. Background reads disable `core.fsmonitor`, so opening a repository can't run a program it configures. Links never pass through a shell, and repo files are revealed rather than launched unless you've configured an editor.
 - Secrets go to the OS vault on Windows. On other platforms they're kept in a private file (mode 0600), and the app says so.
+- `GITEM_CONFIG_DIR` moves everything gitem keeps into that folder: settings, window state, and secrets. On Windows that means a plain file instead of the OS vault, so use it for testing, not for real tokens.
+- `--shot` leaves your profile alone. It doesn't save settings or the session, keeps window state in a temp folder unless `GITEM_CONFIG_DIR` is set, and uses no stored secrets.
 - AI features send the relevant diff to your chosen provider, and only when you ask. Oversized diffs are refused rather than silently cut.
 
 ## Project layout
@@ -156,9 +158,9 @@ Write operations are data (`ops.rs`), so every mutation can be logged, confirmed
 - **Headless UI tests** that click real widgets, right-click for context menus, drag refs, and drive the helper windows, then verify the result with git or on disk.
 - **Helper tests** that have real git invoke the built binary.
 
-Opt-in tests have real git open the real windows, including the password prompt, which answer by themselves through `GITEM_TEST_ACCEPT`: `cargo test -p gitem --test real_git_windows --test http_auth -- --ignored --test-threads=1`.
+Opt-in tests have real git open the real windows, including the password prompt, which answer by themselves through `GITEM_TEST_ACCEPT`: `cargo test -p gitem --test real_git_windows --test http_auth --test helper_modes -- --ignored --test-threads=1`. Debug builds read that variable and `GITEM_SHOT`; release builds ignore them.
 
-Tests create temporary repositories and briefly store a uniquely named test credential in the OS vault, which is always removed.
+Tests create temporary repositories. Every test binary starts with its own scratch git config, settings, secrets, and home folder (`crates/gitem-testenv`), so results don't depend on the machine and nothing reaches your real profile. That includes the OS vault: the one test of the real Windows vault is opt-in, with `cargo test -p gitem-core --lib windows_vault_round_trip -- --ignored`.
 
 **What the tests don't cover:**
 

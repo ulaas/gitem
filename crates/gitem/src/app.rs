@@ -296,7 +296,8 @@ pub struct GitemApp {
     pub shot: Option<Shot>,
     pub shot_tabs: Vec<Tab>,
     pub shot_inspect: Option<String>,
-    persist: bool,
+    /// Whether settings and the session are saved. Off for tests and screenshots.
+    pub persist: bool,
     about_open: bool,
     #[cfg(windows)]
     styled_window: bool,
