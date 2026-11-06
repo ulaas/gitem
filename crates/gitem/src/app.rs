@@ -656,12 +656,14 @@ impl GitemApp {
 
     fn about(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
         if !self.about_open {
+            self.about_git = None;
             return;
         }
         let p = self.pal.clone();
         let mut open = true;
         let mut dismiss = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        let git = self.git.as_ref().map(|g| g.version()).unwrap_or_else(|e| e.clone());
+        // Asked once each time the box opens: it starts a process.
+        let git = self.about_git.get_or_insert_with(|| self.git.as_ref().map(|g| g.version()).unwrap_or_else(|e| e.clone())).clone();
         egui::Window::new("About gitem").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).default_width(340.0).show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {

@@ -2659,6 +2659,37 @@ fn the_co_authors_menu_reads_history_once_while_open() {
 }
 
 #[test]
+fn the_about_box_and_signing_page_run_git_once() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::About);
+    pump_for_label(&mut h, "About gitem");
+    for _ in 0..5 {
+        h.step();
+    }
+    let versions = git_commands_matching(&f, "--version");
+    for _ in 0..10 {
+        h.step();
+    }
+    assert_eq!(git_commands_matching(&f, "--version"), versions, "git --version ran on every frame");
+    h.key_press(egui::Key::Escape);
+    h.step();
+    h.step();
+
+    h.state_mut().repos[0].open_tab(Tab::Credentials(Box::default()));
+    click(&mut h, "Commit signing");
+    wait_until_quiet(&mut h);
+    let reads = git_commands_matching(&f, "allowedSignersFile");
+    for _ in 0..10 {
+        h.step();
+    }
+    assert_eq!(git_commands_matching(&f, "allowedSignersFile"), reads, "git config ran on every frame");
+}
+
+#[test]
 fn a_crash_report_is_offered_once_and_then_kept_quietly() {
     let f = Fx::new();
     sample_history(&f);

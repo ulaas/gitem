@@ -367,6 +367,7 @@ impl CredentialsView {
         if self.signing_gen != cx.data.status_gen {
             self.signing_gen = cx.data.status_gen;
             self.signing = None;
+            self.signers_file = None;
         }
         let (fmt, key, sign, tag) = self
             .signing
@@ -409,7 +410,7 @@ impl CredentialsView {
         ui.label(RichText::new("Signing status appears on each commit in the Inspect panel.").small().color(p.faint));
         section(ui, "SSH allowed signers", &p);
         ui.label(RichText::new("Whose SSH signatures to trust, one per line: email, then the public key.").small().color(p.faint));
-        let configured = cx.repo.config_get("gpg.ssh.allowedSignersFile");
+        let configured = self.signers_file.get_or_insert_with(|| cx.repo.config_get("gpg.ssh.allowedSignersFile")).clone();
         let path = configured.clone().map(std::path::PathBuf::from).unwrap_or_else(|| cred::ssh_dir().join("allowed_signers"));
         let text = self.signers.get_or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
         ui.add(crate::widgets::text_area(text).code_editor().desired_rows(5).desired_width(f32::INFINITY));
