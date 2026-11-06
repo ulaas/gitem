@@ -1,5 +1,7 @@
 //! Credential manager: forge tokens, git HTTPS credentials, SSH keys, the askpass
 //! and credential-helper wiring, and commit-signing setup.
+use std::time::{Duration, Instant};
+
 use egui::{RichText, Ui};
 use gitem_core::cred::{self, PREFIX_FORGE, PREFIX_GIT};
 use gitem_core::ops;
@@ -33,6 +35,17 @@ pub struct CredentialsView {
     signing: Option<(String, String, String, String)>,
     signing_gen: u64,
     signers: Option<String>,
+    signers_file: Option<Option<String>>,
+    pending_delete: Option<String>,
+    revealed_at: Option<Instant>,
+    last_frame: u64,
+}
+
+/// A revealed secret goes away by itself, in case the screen is left or being shared.
+const REVEAL_FOR: Duration = Duration::from_secs(30);
+
+fn reveal_is_over(shown: Duration) -> bool {
+    shown >= REVEAL_FOR
 }
 
 fn add_token_form() -> FormDialog {
@@ -85,13 +98,34 @@ impl CredentialsView {
         "Credentials".into()
     }
 
+    /// Secrets stay on screen only while someone is looking at them on this page.
+    fn hide_secret_if_due(&mut self, ctx: &egui::Context, page_before: Page) {
+        // This view draws only while its tab shows, so a gap in frames means it was hidden.
+        let frame = ctx.cumulative_frame_nr();
+        let tab_was_hidden = frame > self.last_frame.saturating_add(1);
+        self.last_frame = frame;
+        let timed_out = self.revealed_at.is_some_and(|t| reveal_is_over(t.elapsed()));
+        if tab_was_hidden || self.page != page_before || timed_out {
+            self.revealed = None;
+            self.revealed_at = None;
+        }
+        if self.revealed.is_some() {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let page_before = self.page;
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.page, Page::Vault, "Stored secrets");
             ui.selectable_value(&mut self.page, Page::Ssh, "SSH keys");
             ui.selectable_value(&mut self.page, Page::Helper, "Git integration");
             ui.selectable_value(&mut self.page, Page::Signing, "Commit signing");
         });
+        self.hide_secret_if_due(ui.ctx(), page_before);
+        if self.page != Page::Vault {
+            self.pending_delete = None;
+        }
         ui.separator();
         egui::ScrollArea::vertical().id_salt("creds").auto_shrink([false, false]).show(ui, |ui| match self.page {
             Page::Vault => self.vault(ui, cx),
@@ -156,24 +190,55 @@ impl CredentialsView {
                         if ui.small_button("Hide").clicked() {
                             self.revealed = None;
                         }
-                    } else if ui.small_button("Reveal").clicked() {
+                    } else if ui.small_button("Reveal").on_hover_text("Shows it for 30 seconds").clicked() {
                         match cred::get(target) {
-                            Ok(Some(c)) => self.revealed = Some((target.clone(), c.secret)),
+                            Ok(Some(c)) => {
+                                self.revealed = Some((target.clone(), c.secret));
+                                self.revealed_at = Some(Instant::now());
+                            }
                             _ => cx.error("Could not read this secret."),
                         }
                     }
                     if ui.small_button("Delete").clicked() {
-                        if let Err(e) = cred::delete(target) {
-                            cx.error(e.to_string());
+                        if cx.settings.confirm_destructive {
+                            self.pending_delete = Some(target.clone());
+                        } else {
+                            reload |= delete_secret(cx, target);
                         }
-                        reload = true;
                     }
                 });
             }
         }
+        reload |= self.delete_dialog(ui.ctx(), cx);
         if reload {
             self.loaded = false;
         }
+    }
+
+    /// The usual confirmation runs a git command. This one has none to run or show.
+    /// Returns true if a secret went.
+    fn delete_dialog(&mut self, ctx: &egui::Context, cx: &mut Cx) -> bool {
+        let Some(target) = self.pending_delete.clone() else { return false };
+        let (mut delete, mut keep) = (false, ctx.input(|i| i.key_pressed(egui::Key::Escape)));
+        egui::Window::new("Delete this secret?").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.label(RichText::new(&target).monospace());
+            ui.add_space(4.0);
+            ui.label(delete_warning(&target));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                delete = ui.add(egui::Button::new(RichText::new("Delete secret").color(egui::Color32::WHITE)).fill(cx.pal.danger)).clicked();
+                keep |= ui.button("Keep it").clicked();
+            });
+        });
+        if delete {
+            self.pending_delete = None;
+            return delete_secret(cx, &target);
+        }
+        if keep {
+            self.pending_delete = None;
+        }
+        false
     }
 
     fn ssh(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -362,6 +427,22 @@ impl CredentialsView {
     }
 }
 
+fn delete_secret(cx: &mut Cx, target: &str) -> bool {
+    if let Err(e) = cred::delete(target) {
+        cx.error(e.to_string());
+    }
+    true
+}
+
+fn delete_warning(target: &str) -> &'static str {
+    // Git Credential Manager and others share the prefix-less `git:` space with gitem's list.
+    if target.starts_with("git:") && !target.starts_with(PREFIX_GIT) {
+        "Another tool stored this, probably Git Credential Manager. Whatever uses it will ask you to sign in again, and gitem can't bring it back."
+    } else {
+        "Whatever uses it stops working until you add it again, and gitem can't bring it back. A token may not be retrievable from its host."
+    }
+}
+
 fn import_gh() -> Result<(), String> {
     let mut c = std::process::Command::new("gh");
     c.args(["auth", "token"]);
@@ -379,4 +460,22 @@ fn import_gh() -> Result<(), String> {
         return Err("GitHub CLI returned no token.".to_string());
     }
     cred::set_forge_token("github.com", "", &t).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reveal_lasts_thirty_seconds() {
+        assert!(!reveal_is_over(Duration::from_secs(29)));
+        assert!(reveal_is_over(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn the_warning_says_when_a_secret_belongs_to_another_tool() {
+        assert!(delete_warning("git:https://host.invalid").contains("Another tool"));
+        assert!(!delete_warning(&format!("{PREFIX_GIT}https://host.invalid")).contains("Another tool"));
+        assert!(!delete_warning(&format!("{PREFIX_FORGE}host.invalid")).contains("Another tool"));
+    }
 }

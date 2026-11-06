@@ -2531,6 +2531,106 @@ fn click_last(h: &mut Harness<GitemApp>, label: &str) {
     h.step();
 }
 
+fn delete_button_of(h: &Harness<GitemApp>, name: &str) -> egui::Pos2 {
+    let y = h.get_by_label(name).rect().center().y;
+    h.query_all_by_label("Delete").find(|n| (n.rect().center().y - y).abs() < 12.0).unwrap_or_else(|| panic!("no Delete on the row of {name}")).rect().center()
+}
+
+fn click_at(h: &mut Harness<GitemApp>, pos: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(pos));
+    h.step();
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.step();
+}
+
+fn fake_token(host: &str) -> String {
+    gitem_core::cred::set_forge_token(host, "", "FAKE_SECRET_VALUE").unwrap();
+    format!("{}{host}", gitem_core::cred::PREFIX_FORGE)
+}
+
+fn open_credentials(h: &mut Harness<GitemApp>) {
+    h.state_mut().repos[0].open_tab(Tab::Credentials(Box::default()));
+    wait_until_quiet(h);
+    click_last(h, "Refresh");
+}
+
+#[test]
+fn deleting_a_stored_secret_asks_first() {
+    let f = Fx::new();
+    sample_history(&f);
+    let host = "ask-first.invalid";
+    let target = fake_token(host);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_credentials(&mut h);
+    pump_for_label(&mut h, host);
+
+    let at = delete_button_of(&h, host);
+    click_at(&mut h, at);
+    assert!(gitem_core::cred::get(&target).unwrap().is_some(), "deleted without asking");
+    pump_for_label(&mut h, "Delete this secret?");
+    click(&mut h, "Keep it");
+    assert!(gitem_core::cred::get(&target).unwrap().is_some(), "Keep it deleted it");
+    assert!(h.query_by_label("Delete this secret?").is_none());
+
+    let at = delete_button_of(&h, host);
+    click_at(&mut h, at);
+    pump_for_label(&mut h, "Delete this secret?");
+    click(&mut h, "Delete secret");
+    assert!(gitem_core::cred::get(&target).unwrap().is_none(), "the confirmed delete didn't happen");
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label(host).is_none(), "the row is still listed");
+}
+
+#[test]
+fn deleting_a_stored_secret_does_not_ask_with_confirmations_off() {
+    let f = Fx::new();
+    sample_history(&f);
+    let host = "no-confirm.invalid";
+    let target = fake_token(host);
+    let mut h = harness(&f);
+    h.state_mut().settings.confirm_destructive = false;
+    settle(&mut h);
+    open_credentials(&mut h);
+    pump_for_label(&mut h, host);
+    let at = delete_button_of(&h, host);
+    click_at(&mut h, at);
+    assert!(gitem_core::cred::get(&target).unwrap().is_none());
+}
+
+#[test]
+fn a_revealed_secret_hides_when_you_leave_the_page_or_the_tab() {
+    let f = Fx::new();
+    sample_history(&f);
+    let host = "reveal.invalid";
+    let target = fake_token(host);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_credentials(&mut h);
+    pump_for_label(&mut h, host);
+    let reveal = |h: &mut Harness<GitemApp>| {
+        let y = h.get_by_label(host).rect().center().y;
+        let at = h.query_all_by_label("Reveal").find(|n| (n.rect().center().y - y).abs() < 12.0).unwrap().rect().center();
+        click_at(h, at);
+        pump_for_label(h, "FAKE_SECRET_VALUE");
+    };
+    reveal(&mut h);
+    click(&mut h, "SSH keys");
+    wait_until_quiet(&mut h);
+    click(&mut h, "Stored secrets");
+    assert!(h.query_by_label("FAKE_SECRET_VALUE").is_none(), "still shown after changing page");
+
+    reveal(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Console(Box::default()));
+    wait_until_quiet(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Credentials(Box::default()));
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("FAKE_SECRET_VALUE").is_none(), "still shown after changing tab");
+    gitem_core::cred::delete(&target).unwrap();
+}
+
 #[test]
 fn a_crash_report_is_offered_once_and_then_kept_quietly() {
     let f = Fx::new();
