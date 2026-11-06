@@ -1540,3 +1540,93 @@ fn opening_with_a_missing_editor_reports_it() {
     assert_eq!(errors.len(), 1);
     assert!(errors[0].contains("f.txt"));
 }
+
+fn open_palette(h: &mut Harness<GitemApp>, typed: &str) {
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::OpenPalette);
+    h.step();
+    h.step();
+    if !typed.is_empty() {
+        h.event(egui::Event::Text(typed.into()));
+        h.step();
+        h.step();
+    }
+}
+
+#[test]
+fn palette_prefixes_narrow_it_to_branches_and_files() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "feature-x"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+
+    open_palette(&mut h, "@feat");
+    assert!(h.query_all_by_label("feature-x").count() >= 2, "listed beside the sidebar's");
+    assert!(h.query_by_label("Stage All").is_none(), "commands aren't listed");
+    h.key_press(egui::Key::Enter);
+    h.step();
+    assert!(!h.state().palette_is_open());
+    wait_for(&mut h, "the switch", || f.git(&["branch", "--show-current"]).trim() == "feature-x");
+
+    open_palette(&mut h, ":second");
+    assert!(h.query_by_label("Stage All").is_none());
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert!(!h.state().palette_is_open(), "Esc closes it");
+
+    open_palette(&mut h, "/b.txt");
+    pump_for_label(&mut h, "b.txt");
+    h.key_press(egui::Key::Enter);
+    h.step();
+    h.step();
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| t.key().contains("b.txt")), "the file opened");
+    no_errors(&h);
+}
+
+#[test]
+fn the_palette_remembers_recent_commands_and_moves_by_keyboard() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+
+    open_palette(&mut h, "reflog");
+    h.key_press(egui::Key::Enter);
+    h.step();
+    h.step();
+    assert_eq!(h.state().settings.palette_recent, ["Reflog"]);
+
+    // It now leads the list, so moving down and back returns to it.
+    open_palette(&mut h, "");
+    h.key_press(egui::Key::ArrowDown);
+    h.step();
+    h.key_press(egui::Key::ArrowUp);
+    h.step();
+    h.key_press(egui::Key::Enter);
+    h.step();
+    h.step();
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Reflog(_))));
+    assert_eq!(h.state().settings.palette_recent, ["Reflog"], "listed once");
+    no_errors(&h);
+}
+
+#[test]
+fn the_palette_footer_switches_modes() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_palette(&mut h, "");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(h.query_by_label("Stage All").is_some());
+    click(&mut h, "@ branches");
+    h.step();
+    assert!(h.query_by_label("Stage All").is_none(), "commands are gone");
+    click(&mut h, "@ branches");
+    h.step();
+    pump_for_label(&mut h, "Stage All");
+    no_errors(&h);
+}

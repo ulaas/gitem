@@ -25,7 +25,7 @@ Links:
   gitem://open?repo=PATH[&commit=SHA][&file=PATH][&line=N]
 
 Visual checks:
-  --shot OUT.png [--tab NAME] [--file PATH] [--size WxH]";
+  --shot OUT.png [--tab NAME] [--file PATH] [--size WxH] [--palette QUERY]";
 
 fn tab_by_name(name: &str) -> Option<Tab> {
     Some(match name {
@@ -108,6 +108,7 @@ fn run_app(args: &[String]) -> i32 {
     let mut tabs: Vec<Tab> = Vec::new();
     let mut size = [1500.0f32, 940.0];
     let mut inspect = None;
+    let mut palette = None;
     let mut link = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -139,6 +140,7 @@ fn run_app(args: &[String]) -> i32 {
                 }
             }
             "--inspect" => inspect = it.next().cloned(),
+            "--palette" => palette = it.next().cloned(),
             "--diff-unstaged" => tabs.push(Tab::diff(gitem_core::repo::DiffSource::Unstaged, None)),
             "--size" => {
                 if let Some((w, h)) = it.next().and_then(|s| s.split_once('x')) {
@@ -169,6 +171,9 @@ fn run_app(args: &[String]) -> i32 {
             let mut a = app::GitemApp::new(&cc.egui_ctx, &paths);
             a.shot_tabs = tabs;
             a.shot_inspect = inspect;
+            if let Some(q) = &palette {
+                a.open_palette_with(q);
+            }
             if let Some(d) = link {
                 a.apply_action(&cc.egui_ctx, gitem::action::Action::DeepLink(d));
             }

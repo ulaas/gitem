@@ -405,6 +405,15 @@ impl GitemApp {
         }
     }
 
+    pub fn palette_is_open(&self) -> bool {
+        self.palette.is_some()
+    }
+
+    /// Opens the palette with text typed, for screenshots.
+    pub fn open_palette_with(&mut self, query: &str) {
+        self.palette = Some(PaletteState::with_query(query));
+    }
+
     fn apply_theme(&mut self, ctx: &egui::Context) {
         let want = (self.settings.theme, (self.settings.ui_scale * 100.0) as u32);
         if self.applied != Some(want) {
@@ -614,7 +623,7 @@ impl GitemApp {
                 if chrome::icon_button(ui, chrome::icon::GEAR_SIX, crate::i18n::t("Settings"), "Preferences", self.no_repo_settings.is_some(), &p).clicked() {
                     out.push(Action::OpenSettings);
                 }
-                if chrome::icon_button(ui, chrome::icon::LIST_MAGNIFYING_GLASS, "Command palette", "Run any command (Ctrl+P)", self.palette.is_some(), &p).clicked() {
+                if !self.repos.is_empty() && chrome::icon_button(ui, chrome::icon::LIST_MAGNIFYING_GLASS, "Command palette", "Run any command (Ctrl+P)", self.palette.is_some(), &p).clicked() {
                     self.palette = Some(PaletteState::new());
                 }
             });
@@ -1217,12 +1226,8 @@ impl GitemApp {
             });
 
             if let Some(pl) = &mut self.palette {
-                let mut close = false;
-                egui::Window::new("palette").title_bar(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 40.0]).show(&ctx, |ui| {
-                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out };
-                    close = pl.ui(ui, &mut cx);
-                });
-                if close {
+                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out };
+                if pl.show(&ctx, &mut cx) {
                     self.palette = None;
                 }
             }

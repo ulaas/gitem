@@ -116,6 +116,8 @@ pub struct Settings {
     pub archived_sessions: Vec<String>,
     pub language: String,
     pub graph_layout: Option<GraphLayout>,
+    /// Commands last used from the palette, newest first.
+    pub palette_recent: Vec<String>,
     /// Open tabs per repository, restored next time.
     pub session_tabs: std::collections::HashMap<String, Vec<String>>,
     /// Tab arrangement per repository, including splits.
@@ -174,6 +176,7 @@ impl Default for Settings {
             archived_sessions: Vec::new(),
             language: "en".to_string(),
             graph_layout: None,
+            palette_recent: Vec::new(),
             session_tabs: std::collections::HashMap::new(),
             session_layouts: std::collections::HashMap::new(),
         }

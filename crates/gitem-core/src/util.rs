@@ -66,29 +66,43 @@ pub fn prefix(s: &str, n: usize) -> &str {
 
 /// Subsequence fuzzy scoring; `None` when `needle` does not match.
 pub fn fuzzy_score(needle: &str, hay: &str) -> Option<i32> {
-    if needle.is_empty() {
-        return Some(0);
+    fuzzy_match(needle, hay).map(|m| m.0)
+}
+
+/// A score and the matched character positions. A run of the typed text beats
+/// scattered letters, and one starting at a word beats one inside a word.
+pub fn fuzzy_match(needle: &str, hay: &str) -> Option<(i32, Vec<u32>)> {
+    let wanted: Vec<char> = needle.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    if wanted.is_empty() {
+        return Some((0, Vec::new()));
     }
     let hay_l: Vec<char> = hay.to_lowercase().chars().collect();
+    let at_word = |i: usize| i == 0 || matches!(hay_l.get(i - 1), Some(' ' | '/' | '-' | '_' | ':' | '.'));
+    let length_cost = (hay_l.len() as i32) / 8;
+    let runs: Vec<usize> = (0..hay_l.len().saturating_sub(wanted.len() - 1)).filter(|&i| hay_l[i..i + wanted.len()] == wanted[..]).collect();
+    if let Some(&start) = runs.iter().find(|&&i| at_word(i)).or(runs.first()) {
+        let bonus = if start == 0 { 60 } else if at_word(start) { 40 } else { 0 };
+        let score = 25 * wanted.len() as i32 + bonus - length_cost;
+        return Some((score, (start..start + wanted.len()).map(|i| i as u32).collect()));
+    }
     let mut score = 0;
     let mut pos = 0usize;
     let mut last: Option<usize> = None;
-    for n in needle.to_lowercase().chars() {
-        if n.is_whitespace() {
-            continue;
-        }
+    let mut positions = Vec::with_capacity(wanted.len());
+    for n in wanted {
         let found = hay_l[pos..].iter().position(|&c| c == n)? + pos;
         score += 10;
         if last.is_some_and(|l| l + 1 == found) {
             score += 15;
         }
-        if found == 0 || matches!(hay_l.get(found - 1), Some(' ' | '/' | '-' | '_' | ':' | '.')) {
+        if at_word(found) {
             score += 10;
         }
+        positions.push(found as u32);
         last = Some(found);
         pos = found + 1;
     }
-    Some(score - (hay_l.len() as i32) / 8)
+    Some((score - length_cost, positions))
 }
 
 #[cfg(test)]
@@ -119,5 +133,11 @@ mod tests {
         assert!(fuzzy_score("gc", "git commit").is_some());
         assert!(fuzzy_score("zz", "git commit").is_none());
         assert!(fuzzy_score("gc", "git commit") > fuzzy_score("gc", "xgxxxxcxxxxxxxxxxxxxxxxxxx"));
+        assert_eq!(fuzzy_match("gc", "git commit").unwrap().1, vec![0, 4]);
+        assert_eq!(fuzzy_match("comm", "git commit").unwrap().1, vec![4, 5, 6, 7]);
+        // A word start beats the same letters inside a word, and a run beats scattered.
+        assert_eq!(fuzzy_match("log", "catalog log").unwrap().1, vec![8, 9, 10]);
+        assert!(fuzzy_score("pull", "Pull") > fuzzy_score("pull", "a pretty unusual lull"));
+        assert_eq!(fuzzy_match("", "anything"), Some((0, Vec::new())));
     }
 }
