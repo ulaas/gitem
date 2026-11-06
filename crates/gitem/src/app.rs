@@ -1287,12 +1287,22 @@ impl eframe::App for GitemApp {
 /// A new terminal window in `dir`, optionally running a command there. The folder
 /// is passed as the working directory, so its name is never parsed by a shell.
 fn open_terminal(dir: &Path, command: Option<&str>, errors: &mut Vec<String>) {
+    if let Err(e) = terminal_command(dir, command).spawn() {
+        errors.push(format!("Could not open a terminal: {e}"));
+    }
+}
+
+fn terminal_command(dir: &Path, command: Option<&str>) -> std::process::Command {
     #[cfg(windows)]
     let mut c = {
         use std::os::windows::process::CommandExt;
         let mut c = std::process::Command::new("cmd.exe");
         if let Some(cmd) = command {
             c.arg("/K").arg(cmd);
+            // cmd looks in the current folder before PATH, and the folder is a repository,
+            // so a tracked `claude.cmd` would run in place of the real one. A plain
+            // terminal stays as the user expects it, since they type there themselves.
+            c.env("NoDefaultCurrentDirectoryInExePath", "1");
         }
         c.creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
         c
@@ -1313,9 +1323,7 @@ fn open_terminal(dir: &Path, command: Option<&str>, errors: &mut Vec<String>) {
         c
     };
     c.current_dir(dir).env("GITEM_WORKTREE_PATH", dir);
-    if let Err(e) = c.spawn() {
-        errors.push(format!("Could not open a terminal: {e}"));
-    }
+    c
 }
 
 /// Open a file in the configured editor, otherwise only reveal it. Repository
@@ -1362,3 +1370,55 @@ pub fn open_file(path: &Path, editor: &str, errors: &mut Vec<String>) {
 }
 
 pub use mergeview::MergeSource;
+
+#[cfg(all(test, windows))]
+mod terminal_tests {
+    use super::*;
+    use std::os::windows::process::CommandExt;
+
+    /// A repository holding a tracked-looking command, and a PATH holding the real one.
+    /// Each leaves a file behind saying which one ran.
+    struct Agents {
+        repo: tempfile::TempDir,
+        path_dir: tempfile::TempDir,
+    }
+
+    const NAME: &str = "gitemfakeagent";
+
+    fn agents() -> Agents {
+        let (repo, path_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(repo.path().join(format!("{NAME}.cmd")), "@echo repo> \"%~dp0ran-from-repo.txt\"\r\n").unwrap();
+        std::fs::write(path_dir.path().join(format!("{NAME}.cmd")), "@echo path> \"%~dp0ran-from-path.txt\"\r\n").unwrap();
+        Agents { repo, path_dir }
+    }
+
+    fn ran(a: &Agents, mut c: std::process::Command) -> (bool, bool) {
+        let path = format!("{};{}", a.path_dir.path().display(), std::env::var("PATH").unwrap());
+        // No window, and `& exit` in the command, so this ends by itself.
+        assert!(c.env("PATH", path).stdin(std::process::Stdio::null()).creation_flags(0x0800_0000).status().unwrap().success());
+        (a.repo.path().join("ran-from-repo.txt").exists(), a.path_dir.path().join("ran-from-path.txt").exists())
+    }
+
+    #[test]
+    fn a_command_named_in_settings_comes_from_path_not_from_the_repository() {
+        let a = agents();
+        let c = terminal_command(a.repo.path(), Some(&format!("{NAME} & exit")));
+        assert_eq!(ran(&a, c), (false, true));
+    }
+
+    /// Shows the test above can tell the difference, whatever this machine's defaults are.
+    #[test]
+    fn without_the_variable_cmd_runs_the_one_in_the_repository() {
+        let a = agents();
+        let mut c = terminal_command(a.repo.path(), Some(&format!("{NAME} & exit")));
+        c.env_remove("NoDefaultCurrentDirectoryInExePath");
+        assert_eq!(ran(&a, c), (true, false));
+    }
+
+    #[test]
+    fn a_plain_terminal_is_left_as_it_was() {
+        let c = terminal_command(Path::new("."), None);
+        assert!(!c.get_envs().any(|(k, _)| k == "NoDefaultCurrentDirectoryInExePath"));
+        assert_eq!(c.get_args().count(), 0);
+    }
+}
