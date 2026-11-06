@@ -84,8 +84,10 @@ impl AiConfig {
 /// never describes only part of a diff without the user knowing.
 pub const MAX_PROMPT_CHARS: usize = 600_000;
 
+/// Follows no redirects: the client only strips `Authorization` when it changes host,
+/// so a redirect would carry an `x-api-key` header along to the new one.
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(300))).build().into()
+    ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(300))).build().into()
 }
 
 fn post(url: &str, headers: &[(&str, String)], body: &Value) -> Result<Value> {
@@ -95,6 +97,9 @@ fn post(url: &str, headers: &[(&str, String)], body: &Value) -> Result<Value> {
     }
     let mut resp = r.header("content-type", "application/json").send(body.to_string()).map_err(|e| Error::Other(format!("request failed: {e}")))?;
     let status = resp.status().as_u16();
+    if (300..400).contains(&status) {
+        return Err(Error::Other(format!("HTTP {status}: the AI endpoint redirected this request. gitem doesn't follow redirects, so your key stays with the address you configured. Check the base URL in Settings.")));
+    }
     let text = resp.body_mut().read_to_string().map_err(|e| Error::Other(format!("reading response: {e}")))?;
     let v: Value = serde_json::from_str(&text).map_err(|_| Error::Other(format!("HTTP {status}: {}", text.chars().take(400).collect::<String>())))?;
     if status >= 400 {

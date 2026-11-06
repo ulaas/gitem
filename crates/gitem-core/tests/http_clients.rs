@@ -337,3 +337,46 @@ fn code_suggestions_post_a_review_with_suggestion_blocks() {
     let g = client(ForgeKind::GitLab, "o/r", &m.base, "");
     assert!(g.suggest_changes(9, &s).is_err());
 }
+
+/// Answers every request with a redirect to `to`, as a misconfigured gateway might.
+fn redirector(status: u16, to: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':')
+                    && k.eq_ignore_ascii_case("content-length") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+            }
+            let mut b = vec![0u8; len];
+            let _ = r.read_exact(&mut b);
+            let _ = write!(s, "HTTP/1.1 {status} Moved\r\nLocation: {to}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    });
+    base
+}
+
+#[test]
+fn ai_keys_are_never_sent_to_a_redirect_target() {
+    let target = mock(|_| (200, "{}".to_string()));
+    // 127.0.0.1 and localhost are different hosts as far as a client can tell.
+    let other_host = target.base.replace("127.0.0.1", "localhost");
+    for provider in [AiProvider::Anthropic, AiProvider::Gemini, AiProvider::OpenAi] {
+        for status in [301, 302, 303, 307, 308] {
+            let base = redirector(status, other_host.clone());
+            let e = ai::complete(&ai_cfg(provider, &base), Some("FAKE_KEY"), "s", "u").unwrap_err().to_string();
+            assert!(e.contains(&status.to_string()), "the error says what happened: {e}");
+        }
+    }
+    let seen = target.log.lock().unwrap();
+    assert!(seen.is_empty(), "the other host was contacted: {seen:?}");
+}
