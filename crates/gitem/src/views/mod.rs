@@ -12,6 +12,7 @@ pub mod contributors;
 pub mod credentials;
 pub mod diffview;
 pub mod fileview;
+pub mod filetree;
 pub mod graph;
 pub mod graphcols;
 pub mod health;

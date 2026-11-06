@@ -1,6 +1,6 @@
 //! Left sidebar: trees of commits, branches, remotes, tags, stashes, worktrees,
-//! contributors, submodules, and repository files.
-use std::collections::{BTreeMap, HashMap};
+//! contributors, and submodules, or the repository's files.
+use std::collections::HashMap;
 
 use egui::{RichText, Sense, Ui, pos2, vec2};
 use gitem_core::model::*;
@@ -13,18 +13,12 @@ use crate::task::Task;
 use crate::views::Tab;
 use crate::widgets::*;
 
-struct Files {
-    list: Vec<String>,
-    tree: Dir,
-}
-
 #[derive(Default)]
 pub struct Sidebar {
     filter: String,
     commits: Task<Vec<Commit>>,
     commits_gen: Option<u64>,
-    files: Task<Files>,
-    files_gen: Option<u64>,
+    files: crate::views::filetree::FilesView,
     contributors: Task<Vec<Contributor>>,
     contributors_gen: Option<u64>,
     /// Commits a branch is missing from its upstream, and the reverse, by branch.
@@ -47,15 +41,22 @@ const TRACKING_LIMIT: usize = 50;
 
 impl Sidebar {
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        if let Some(files) = crate::views::filetree::view_switch(ui, cx.settings.sidebar_files, &p) {
+            cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.sidebar_files = files)));
+        }
+        if cx.settings.sidebar_files {
+            self.files.ui(ui, cx);
+            return;
+        }
         self.commits.poll();
-        self.files.poll();
         self.contributors.poll();
         for t in self.tracking.values_mut() {
             t.incoming.poll();
             t.outgoing.poll();
         }
         ui.add_space(2.0);
-        ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter branches, tags, files…").desired_width(f32::INFINITY));
+        ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter branches, tags, and more…").desired_width(f32::INFINITY));
         ui.add_space(2.0);
         egui::ScrollArea::vertical().id_salt("sidebar").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -67,7 +68,6 @@ impl Sidebar {
             self.worktrees(ui, cx);
             self.contributor_list(ui, cx);
             self.submodules(ui, cx);
-            self.file_tree(ui, cx);
         });
     }
 
@@ -360,74 +360,6 @@ impl Sidebar {
                 }
             }
         });
-    }
-
-    fn file_tree(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        let p = cx.pal.clone();
-        section(ui, "sb-files", crate::chrome::icon::FOLDER, p.series[3], "Files", "", false, &[], &p, |ui| {
-            if self.files_gen != Some(cx.data.status_gen) {
-                self.files_gen = Some(cx.data.status_gen);
-                let r = cx.repo.clone();
-                self.files.spawn(ui.ctx(), move || -> gitem_core::Result<Files> {
-                    let list = r.tracked_files(None)?;
-                    let mut tree = Dir::default();
-                    for f in &list {
-                        tree.insert(f);
-                    }
-                    Ok(Files { list, tree })
-                });
-            }
-            let Some(files) = self.files.value.take() else { return };
-            if self.filter.is_empty() {
-                files.tree.ui(ui, cx, "");
-            } else {
-                for f in files.list.iter().filter(|f| self.matches(f)).take(500) {
-                    file_entry(ui, cx, f, f);
-                }
-            }
-            self.files.value = Some(files);
-        });
-    }
-}
-
-fn file_entry(ui: &mut Ui, cx: &mut Cx, path: &str, label: &str) {
-    let p = cx.pal.clone();
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
-    if resp.hovered() {
-        ui.painter().rect_filled(rect, 0.0, p.hover);
-    }
-    paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), label, prop(12.5), p.dim);
-    if resp.clicked() {
-        cx.open(Tab::file(path, None, None));
-    }
-    resp.context_menu(|ui| menus::file_menu(ui, cx, path, None));
-}
-
-#[derive(Default)]
-pub struct Dir {
-    dirs: BTreeMap<String, Dir>,
-    files: Vec<(String, String)>,
-}
-
-impl Dir {
-    pub fn insert(&mut self, path: &str) {
-        let mut cur = self;
-        let mut rest = path;
-        while let Some((d, r)) = rest.split_once('/') {
-            cur = cur.dirs.entry(d.to_string()).or_default();
-            rest = r;
-        }
-        cur.files.push((rest.to_string(), path.to_string()));
-    }
-
-    fn ui(&self, ui: &mut Ui, cx: &mut Cx, prefix: &str) {
-        for (name, d) in &self.dirs {
-            let full = format!("{prefix}{name}/");
-            egui::CollapsingHeader::new(RichText::new(name).size(12.5)).id_salt(("dir", &full)).show(ui, |ui| d.ui(ui, cx, &full));
-        }
-        for (name, path) in &self.files {
-            file_entry(ui, cx, path, name);
-        }
     }
 }
 

@@ -1651,3 +1651,56 @@ fn accents_and_new_themes_can_be_chosen_and_saved() {
     assert!(h.state().settings.accent.is_empty());
     no_errors(&h);
 }
+
+#[test]
+fn the_sidebar_has_a_files_view() {
+    let f = Fx::new();
+    f.write("src/nested/deep.rs", "fn deep() {}\n");
+    f.write("top.txt", "one\n");
+    f.commit("files");
+    f.write("top.txt", "two\n");
+    f.write("fresh.txt", "new\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert!(h.query_by_label("Files section").is_none(), "no longer a section of the branch tree");
+    click(&mut h, "Files");
+    assert!(h.state().settings.sidebar_files, "remembered");
+
+    // Folders first, joined when they hold one folder, and untracked files included.
+    pump_for_label(&mut h, "src/nested");
+    pump_for_label(&mut h, "top.txt");
+    pump_for_label(&mut h, "fresh.txt");
+    assert!(h.query_by_label("deep.rs").is_none());
+    assert!(h.query_by_label("Branches section").is_none());
+
+    click(&mut h, "src/nested");
+    pump_for_label(&mut h, "deep.rs");
+    click(&mut h, "deep.rs");
+    h.step();
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| t.key().contains("deep.rs")), "the file opened");
+
+    click(&mut h, "Collapse folders");
+    h.step();
+    assert!(h.query_by_label("deep.rs").is_none());
+
+    // Only what changed: the folder without changes goes.
+    click(&mut h, "Changed files only");
+    h.step();
+    assert!(h.query_by_label("src/nested").is_none());
+    assert!(h.query_by_label("top.txt").is_some());
+    click(&mut h, "Changed files only");
+    h.step();
+
+    // Filtering finds files inside closed folders.
+    h.get_by_role(egui::accesskit::Role::TextInput).click();
+    h.step();
+    h.event(egui::Event::Text("deep".into()));
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "deep.rs");
+    assert!(h.query_by_label("top.txt").is_none());
+
+    click(&mut h, "Repository");
+    pump_for_label(&mut h, "Branches section");
+    no_errors(&h);
+}
