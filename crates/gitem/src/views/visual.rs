@@ -187,7 +187,19 @@ impl VisualView {
         let baseline = bars.center().y;
         painter.line_segment([pos2(plot.left(), baseline), pos2(plot.right(), baseline)], Stroke::new(1.0, p.border));
         let bar_w = (plot.width() / in_window.len().max(1) as f32 * 0.5).clamp(2.0, 8.0);
+        // Thousands of marks land on a few hundred pixels, each costing a mesh. Where several
+        // would share one, only the largest is drawn: the others couldn't be seen.
+        let pixel = |t: i64| x_of(t) as i32;
+        let mut tallest_bar: HashMap<i32, u32> = HashMap::new();
         for x in &in_window {
+            let at = tallest_bar.entry(pixel(x.time)).or_default();
+            *at = (*at).max(x.additions.max(x.deletions));
+        }
+        for x in &in_window {
+            if tallest_bar.get(&pixel(x.time)).is_some_and(|m| *m != x.additions.max(x.deletions)) {
+                continue;
+            }
+            tallest_bar.remove(&pixel(x.time));
             let cx_x = x_of(x.time);
             let a = x.additions as f32 / max_churn * (bars.height() / 2.0 - 2.0);
             let d = x.deletions as f32 / max_churn * (bars.height() / 2.0 - 2.0);
@@ -207,15 +219,25 @@ impl VisualView {
         let hover_pos = ui.input(|i| i.pointer.hover_pos()).filter(|h| plot.contains(*h));
         let clip = painter.with_clip_rect(plot);
         let mut best_d = f32::MAX;
+        let lane_at = |x: &FileHistoryPoint| if kept.contains(&x.author.as_str()) { lane_of(&x.author) } else { lanes.len() - 1 };
+        let mut largest: HashMap<(usize, i32), u32> = HashMap::new();
         for x in &in_window {
-            let lane = if kept.contains(&x.author.as_str()) { lane_of(&x.author) } else { lanes.len() - 1 };
+            let at = largest.entry((lane_at(x), pixel(x.time))).or_default();
+            *at = (*at).max(x.additions + x.deletions);
+        }
+        for x in &in_window {
+            let lane = lane_at(x);
             let y = plot.top() + (lane as f32 + 0.5) * lane_h;
             let cx_x = x_of(x.time);
             let frac = (x.additions + x.deletions) as f32 / max_total;
             let r = 4.0 + frac.sqrt() * (lane_h.min(40.0) * 0.45 - 4.0).max(2.0);
             let color = p.lane(lane as u16);
             let selected = self.selected.as_deref() == Some(&x.sha);
-            clip.circle(pos2(cx_x, y), r, color.gamma_multiply(if selected { 1.0 } else { 0.85 }), Stroke::new(if selected { 2.0 } else { 1.5 }, if selected { p.text } else { p.bg }));
+            let key = (lane, pixel(x.time));
+            if selected || largest.get(&key) == Some(&(x.additions + x.deletions)) {
+                largest.remove(&key);
+                clip.circle(pos2(cx_x, y), r, color.gamma_multiply(if selected { 1.0 } else { 0.85 }), Stroke::new(if selected { 2.0 } else { 1.5 }, if selected { p.text } else { p.bg }));
+            }
             if let Some(h) = hover_pos {
                 let dist = pos2(cx_x, y).distance(h);
                 // Hit targets are larger than the mark.
