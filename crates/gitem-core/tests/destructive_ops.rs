@@ -418,19 +418,53 @@ fn renaming_a_stash_keeps_it_and_the_others() {
     assert_eq!(f.q(&["rev-parse", "stash@{0}"]), sha, "the same stash");
 }
 
+/// The newest one takes another path, because storing what the ref holds adds no entry.
 #[test]
-fn a_failed_store_leaves_the_stash_where_it_was() {
+fn renaming_the_newest_stash_works_and_leaves_nothing_behind() {
+    let f = Fx::new();
+    f.commit("f.txt", "base\n", "base");
+    f.stash_of("f.txt", "one\n", "one");
+    f.stash_of("f.txt", "two\n", "two");
+    let sha = f.q(&["rev-parse", "stash@{0}"]);
+    f.run(ops::stash_rename("stash@{0}", &sha, "renamed"));
+    let list = f.q(&["stash", "list", "--format=%gs"]);
+    let list: Vec<&str> = list.lines().collect();
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!(list[0], "renamed");
+    assert_eq!(f.q(&["rev-parse", "stash@{0}"]), sha);
+    assert!(!f.has_ref(ops::STASH_RENAME_REF));
+}
+
+/// A failure at any step leaves the stash reachable: here listed, as nothing was dropped.
+#[test]
+fn a_rename_stopped_by_a_lock_keeps_the_stash() {
+    let f = Fx::new();
+    f.commit("f.txt", "base\n", "base");
+    f.stash_of("f.txt", "one\n", "one");
+    f.stash_of("f.txt", "two\n", "two");
+    for sel in ["stash@{0}", "stash@{1}"] {
+        let sha = f.q(&["rev-parse", sel]);
+        let lock = f.root.join(".git/refs/stash.lock");
+        std::fs::write(&lock, "").unwrap();
+        assert!(f.fails(ops::stash_rename(sel, &sha, "renamed")));
+        std::fs::remove_file(&lock).unwrap();
+        assert_eq!(f.q(&["rev-parse", sel]), sha, "{sel}");
+        assert_eq!(f.stash_messages().len(), 2, "{sel}");
+    }
+}
+
+/// Between its steps, the ref is what keeps the newest stash from being dangling.
+#[test]
+fn the_newest_stash_stays_reachable_if_a_rename_is_cut_short() {
     let f = Fx::new();
     f.commit("f.txt", "base\n", "base");
     f.stash_of("f.txt", "one\n", "one");
     let sha = f.q(&["rev-parse", "stash@{0}"]);
-    // Git locks the reflog to store, so a lock in the way makes the first step fail.
-    let lock = f.root.join(".git/refs/stash.lock");
-    std::fs::write(&lock, "").unwrap();
-    assert!(f.fails(ops::stash_rename("stash@{0}", &sha, "renamed")));
-    std::fs::remove_file(&lock).unwrap();
-    assert_eq!(f.q(&["rev-parse", "stash@{0}"]), sha);
-    assert_eq!(f.stash_messages().len(), 1);
+    let mut op = ops::stash_rename("stash@{0}", &sha, "renamed");
+    assert_eq!(op.steps.len(), 4);
+    op.steps.truncate(2);
+    f.run(op);
+    assert_eq!(f.q(&["rev-parse", ops::STASH_RENAME_REF]), sha);
 }
 
 /// An editor or agent running git beside this holds the lock for a moment.

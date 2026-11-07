@@ -632,13 +632,28 @@ pub fn stash_branch(name: &str, sel: &str) -> GitOp {
     GitOp::new(format!("Branch {name} from {sel}")).step(&["stash", "branch", name, sel])
 }
 
-/// Rename by re-storing the same stash commit under a new message. Stored first, so a
-/// failure leaves two entries at worst, never none. That puts the new one on top, moving
-/// the old one down by one.
+/// Rename by re-storing the same stash commit under a new message. Stored first where that
+/// can be done, so a failure leaves two entries at worst, never none: the new one goes on
+/// top and the old one moves down by one.
+///
+/// The newest stash can't go that way, because storing the commit the ref already points
+/// at adds no entry. It has to be dropped first, so a ref holds on to it meanwhile. If the
+/// steps are cut short, that ref keeps the stash in reach and in the graph.
 pub fn stash_rename(sel: &str, sha: &str, message: &str) -> GitOp {
-    let moved = stash_index(sel).map_or_else(|| sel.to_string(), |n| format!("stash@{{{}}}", n + 1));
-    only_if_stash_is(GitOp::new(format!("Rename {sel}")), sel, sha).step(&["stash", "store", "-m", message, sha]).step(&["stash", "drop", &moved])
+    let op = only_if_stash_is(GitOp::new(format!("Rename {sel}")), sel, sha);
+    match stash_index(sel) {
+        Some(0) => op
+            .step(&["update-ref", STASH_RENAME_REF, sha])
+            .step(&["stash", "drop", sel])
+            .step(&["stash", "store", "-m", message, sha])
+            .step(&["update-ref", "-d", STASH_RENAME_REF]),
+        Some(n) => op.step(&["stash", "store", "-m", message, sha]).step(&["stash", "drop", &format!("stash@{{{}}}", n + 1)]),
+        None => op.step(&["stash", "store", "-m", message, sha]).step(&["stash", "drop", sel]),
+    }
 }
+
+/// Holds a stash while it's being renamed.
+pub const STASH_RENAME_REF: &str = "refs/gitem/stash-being-renamed";
 
 fn stash_index(sel: &str) -> Option<usize> {
     sel.strip_prefix("stash@{")?.strip_suffix('}')?.parse().ok()

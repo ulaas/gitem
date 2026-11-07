@@ -52,20 +52,25 @@ fn has_stage(signature: &str, stage: u8) -> bool {
 
 /// The versions to merge, and the file on disk if there is one. The file decides what's
 /// shown: it may hold hand edits or an earlier partial save, and those must survive.
-fn build_doc(git: &gitem_core::GitExe, b: Vec<u8>, o: Vec<u8>, t: Vec<u8>, signature: String, disk: Option<Vec<u8>>) -> Loaded {
+fn build_doc(git: &gitem_core::GitExe, b: Vec<u8>, o: Vec<u8>, t: Vec<u8>, signature: String, disk: Option<Vec<u8>>, empty_is_nothing: bool) -> Loaded {
     let in_repo = !signature.is_empty();
     let (missing_ours, missing_theirs) = (in_repo && !has_stage(&signature, 2), in_repo && !has_stage(&signature, 3));
     let mut loaded = Loaded { doc: MergeDoc::default(), binary: true, missing_ours, missing_theirs, signature, fresh: None, disk: None, raw: None, disk_unreadable: false };
     let (Some(bt), Some(ot), Some(tt)) = (exact_text(&b), exact_text(&o), exact_text(&t)) else { return loaded };
     loaded.binary = false;
-    let disk_text = disk.as_deref().and_then(exact_text);
-    loaded.disk_unreadable = disk.is_some() && disk_text.is_none();
+    let disk_text = disk.as_deref().filter(|d| !(empty_is_nothing && d.is_empty())).and_then(exact_text);
+    loaded.disk_unreadable = disk.as_ref().is_some_and(|d| !d.is_empty()) && disk_text.is_none();
     // With core.autocrlf the versions are LF while the file is CRLF, and it should stay so.
     loaded.doc = match disk_text {
         Some(d) if merge::worktree_uses_crlf(d, [bt, ot, tt]) => MergeDoc::checked_with_git(git, &merge::to_crlf(bt), &merge::to_crlf(ot), &merge::to_crlf(tt)),
         _ => MergeDoc::checked_with_git(git, bt, ot, tt),
     };
-    let Some(text) = disk_text else { return loaded };
+    let Some(text) = disk_text else {
+        if !loaded.disk_unreadable {
+            loaded.disk = disk;
+        }
+        return loaded;
+    };
     if loaded.doc.matches_marked_text(text) {
         // The file is as git wrote it, so the finer view of the three versions is the same text.
     } else if let Some(on_disk) = MergeDoc::from_marked_text(text, &loaded.doc) {
@@ -180,7 +185,7 @@ impl MergeView {
                 let p = p.clone();
                 self.doc.spawn(ui.ctx(), move || -> Result<Loaded, String> {
                     let disk = std::fs::read(repo.root.join(&p)).ok();
-                    Ok(build_doc(&repo.git, repo.stage_content(1, &p), repo.stage_content(2, &p), repo.stage_content(3, &p), repo.unmerged_signature(&p), disk))
+                    Ok(build_doc(&repo.git, repo.stage_content(1, &p), repo.stage_content(2, &p), repo.stage_content(3, &p), repo.unmerged_signature(&p), disk, false))
                 });
             }
             MergeSource::Files { base, local, remote, merged } => {
@@ -188,8 +193,7 @@ impl MergeView {
                 self.doc.spawn(ui.ctx(), move || -> Result<Loaded, String> {
                     let rd = |p: &PathBuf| std::fs::read(p).unwrap_or_default();
                     // Standalone callers may pass a merged file that doesn't hold anything yet.
-                    let disk = std::fs::read(&m).ok().filter(|d| !d.is_empty());
-                    Ok(build_doc(&repo.git, rd(&b), rd(&l), rd(&r), String::new(), disk))
+                    Ok(build_doc(&repo.git, rd(&b), rd(&l), rd(&r), String::new(), std::fs::read(&m).ok(), true))
                 });
             }
         }

@@ -111,8 +111,15 @@ fn rebase_editor_writes_the_todo_or_empties_it_to_abort() {
     assert_eq!(std::fs::read_to_string(&todo).unwrap(), "", "an empty todo tells git to abort");
 }
 
+/// The merged file holds the conflict as git would have written it.
 fn merge_mode(d: &tempfile::TempDir, base: &[u8], local: &[u8], remote: &[u8]) -> (Mode, PathBuf) {
-    let merged = temp_file(d, "merged", b"");
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let marked = gitem_core::merge::MergeDoc::new(&text(base), &text(local), &text(remote)).render("local", "remote");
+    merge_mode_with(d, base, local, remote, marked.as_bytes())
+}
+
+fn merge_mode_with(d: &tempfile::TempDir, base: &[u8], local: &[u8], remote: &[u8], merged_now: &[u8]) -> (Mode, PathBuf) {
+    let merged = temp_file(d, "merged", merged_now);
     let m = MergeSource::Files { base: temp_file(d, "base", base), local: temp_file(d, "local", local), remote: temp_file(d, "remote", remote), merged: merged.clone() };
     (Mode::Merge(Box::new(MergeView::with_source(m))), merged)
 }
@@ -131,13 +138,40 @@ fn standalone_merge_tool_resolves_and_saves() {
 }
 
 #[test]
+fn standalone_merge_tool_with_nothing_in_the_merged_file_yet_merges_as_usual() {
+    let d = tempfile::tempdir().unwrap();
+    let (mode, merged) = merge_mode_with(&d, b"a\nb\nc\n", b"a\nOURS\nc\n", b"a\nTHEIRS\nc\n", b"");
+    let mut h = harness(mode);
+    find(&mut h, "Take theirs");
+    click(&mut h, "Take theirs");
+    click(&mut h, "Save and finish");
+    assert_eq!(h.state().result, Some((0, None)));
+    assert_eq!(std::fs::read_to_string(&merged).unwrap(), "a\nTHEIRS\nc\n");
+}
+
+/// As in the repository: git's mergetool can be started on a file already edited by hand.
+#[test]
+fn standalone_merge_tool_keeps_a_hand_edit_in_the_merged_file() {
+    let d = tempfile::tempdir().unwrap();
+    let edited = b"HAND\n<<<<<<< local\nOURS\n=======\nTHEIRS\n>>>>>>> remote\nc\n";
+    let (mode, merged) = merge_mode_with(&d, b"a\nb\nc\n", b"a\nOURS\nc\n", b"a\nTHEIRS\nc\n", edited);
+    let mut h = harness(mode);
+    find(&mut h, "Take theirs");
+    click(&mut h, "Take theirs");
+    click(&mut h, "Save and finish");
+    assert_eq!(h.state().result, Some((0, None)));
+    assert_eq!(std::fs::read_to_string(&merged).unwrap(), "HAND\nTHEIRS\nc\n");
+}
+
+#[test]
 fn standalone_merge_tool_cancel_leaves_the_file() {
     let d = tempfile::tempdir().unwrap();
     let (mode, merged) = merge_mode(&d, b"a\n", b"x\n", b"y\n");
+    let before = std::fs::read(&merged).unwrap();
     let mut h = harness(mode);
     click(&mut h, "Cancel merge");
     assert_eq!(h.state().result, Some((1, None)));
-    assert_eq!(std::fs::read(&merged).unwrap(), b"<<<<<<< markers from git\n");
+    assert_eq!(std::fs::read(&merged).unwrap(), before);
 }
 
 #[test]
