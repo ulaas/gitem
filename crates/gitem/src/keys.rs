@@ -171,9 +171,17 @@ pub fn context_chord(bindings: &std::collections::HashMap<String, String>, name:
     if context_clash(bindings, c, wanted).is_some() { default } else { Some(wanted) }
 }
 
+/// Whether what's held now is what these keys ask for. Exactly, except for punctuation: on many
+/// layouts `/` is itself typed with Shift, so that's still `/` and not something else.
+fn held_for(now: egui::Modifiers, wanted: egui::Modifiers, key: egui::Key) -> bool {
+    use egui::Key::*;
+    let typed_with_shift = matches!(key, Slash | Backslash | Pipe | Questionmark | Comma | Period | Semicolon | Colon | Minus | Plus | Equals | Quote | Backtick | OpenBracket | CloseBracket | OpenCurlyBracket | CloseCurlyBracket | Exclamationmark);
+    now.matches_exact(wanted) || (typed_with_shift && !wanted.shift && now.shift && now.matches_exact(wanted.plus(egui::Modifiers::SHIFT)))
+}
+
 /// Whether these keys were pressed just now, with no others held.
 pub fn context_pressed(i: &egui::InputState, bindings: &std::collections::HashMap<String, String>, name: &str) -> bool {
-    context_chord(bindings, name).is_some_and(|(m, k)| i.modifiers.matches_exact(m) && i.key_pressed(k))
+    context_chord(bindings, name).is_some_and(|(m, k)| held_for(i.modifiers, m, k) && i.key_pressed(k))
 }
 
 /// The same, keeping them from anything else that would act on them.
@@ -366,6 +374,17 @@ mod tests {
         // A command moved onto a view's default key is said too.
         let b = bound(&[("fetch", "Ctrl+F")]);
         assert!(binding_problems(&b)[0].contains("Fetch now has the keys of Find"), "{:?}", binding_problems(&b));
+    }
+
+    #[test]
+    fn punctuation_can_take_shift_to_type_and_letters_cant() {
+        use egui::{Key, Modifiers as M};
+        assert!(held_for(M::NONE, M::NONE, Key::Slash));
+        assert!(held_for(M::SHIFT, M::NONE, Key::Slash), "as on a layout with / on Shift+7");
+        assert!(!held_for(M::CTRL, M::NONE, Key::Slash));
+        assert!(!held_for(M::SHIFT, M::NONE, Key::J));
+        assert!(held_for(M::SHIFT, M::SHIFT, Key::F3));
+        assert!(!held_for(M::SHIFT, M::NONE, Key::F3), "that one's the other way through the matches");
     }
 
     #[test]

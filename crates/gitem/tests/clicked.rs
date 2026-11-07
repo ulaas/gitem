@@ -137,7 +137,6 @@ fn a_moment(h: &mut Harness<GitemApp>) {
     }
 }
 
-/// The last of that name, which is the dialog's or menu's when something behind it has one too.
 // ---- FG-9: several branches, picked in the sidebar
 
 /// Two picked with Ctrl+click, one merged and one not: the question says which is which, and Undo
@@ -452,6 +451,7 @@ fn finishing_with_changes_in_the_tree_is_refused_in_the_form() {
     assert_eq!(f.git(&["symbolic-ref", "--short", "HEAD"]), "feature/x");
 }
 
+/// The last of that name, which is the dialog's or menu's when something behind it has one too.
 fn click(h: &mut Harness<GitemApp>, label: &str) {
     wait_for_label(h, label);
     a_moment(h);
