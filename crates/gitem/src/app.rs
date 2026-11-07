@@ -375,7 +375,7 @@ impl RepoTab {
                             if dropped > 0 {
                                 out.push(Action::Error(format!("{title} stopped at a conflict.{not_run}")));
                             }
-                        } else if let (Some(target), Some(files), true) = (title.strip_prefix("Check out "), ops::switch_blocked_by_changes(&e), dropped == 0) {
+                        } else if let (Some(target), Some(files), true) = (title.strip_prefix("Check out ").filter(|t| self.data.local_branches().any(|b| b.name == *t)), ops::switch_blocked_by_changes(&e), dropped == 0) {
                             out.push(Action::Form(forms::switch_with_changes(target.to_string(), files)));
                         } else {
                             out.push(Action::Error(format!("{title} failed:\n{e}{not_run}")));

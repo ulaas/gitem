@@ -7926,3 +7926,29 @@ fn arrow_keys_go_down_the_other_long_lists() {
     assert!(focused(&h).unwrap_or_default().contains("dir/f30.txt"), "{:?}", focused(&h));
 }
 
+/// Only a local branch can be switched to by name afterwards. Checking out a remote's makes a
+/// new branch, whose op the form couldn't repeat, so that keeps git's message.
+#[test]
+fn checking_out_a_remote_branch_with_changes_in_the_way_says_so_plainly() {
+    let f = Fx::new();
+    changes_in_the_way(&f);
+    f.git(&["update-ref", "refs/remotes/origin/other", "other"]);
+    f.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::checkout_remote("origin/other", &["origin".to_string()])));
+    wait_until_quiet(&mut h);
+    let t = Instant::now();
+    while h.state().errors_showing().is_empty() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "no error");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(h.query_by_label_contains("Changes are in the way").is_none());
+    assert_eq!(f.git(&["branch", "--show-current"]).trim(), "main");
+    assert_eq!(std::fs::read_to_string(f.root.join("a.txt")).unwrap(), "my edit
+");
+    assert!(f.git(&["stash", "list"]).is_empty());
+}
+
