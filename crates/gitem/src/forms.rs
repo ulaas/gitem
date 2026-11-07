@@ -455,6 +455,46 @@ pub fn fetch_form(remotes: Vec<String>, prune: bool) -> FormDialog {
 
 const PULL_MODES: [(ops::PullMode, &str); 4] = [(ops::PullMode::Default, "Repository default"), (ops::PullMode::FfOnly, "Fast-forward only"), (ops::PullMode::Rebase, "Rebase"), (ops::PullMode::Merge, "Merge")];
 
+const RECONCILE_MODES: [(ops::PullMode, &str); 2] = [(ops::PullMode::Merge, "Merge: join the two with a merge commit"), (ops::PullMode::Rebase, "Rebase: replay your commits on top of the remote's")];
+
+/// Git won't choose for you between these when both sides have commits and nothing says which.
+pub fn pull_reconcile_form() -> FormDialog {
+    FormDialog::new("Pull: both sides have new commits", "Pull")
+        .info("This branch and its remote each have commits the other doesn't. Merging keeps your commits as they are. Rebasing rewrites them on top of the remote's, as if you'd started from there.")
+        .choice_of("mode", "How to bring them together", &RECONCILE_MODES, 0)
+        .check("autostash", "Stash local changes first", false)
+        .check("remember", "Always do this when pulling in this repository", false)
+        .on_submit(|v| {
+            let mode = v.picked("mode", &RECONCILE_MODES);
+            let mut out = Vec::new();
+            if v.on("remember") {
+                out.push(Action::Run(ops::config_set("pull.rebase", if mode == ops::PullMode::Rebase { "true" } else { "false" }, "local")));
+            }
+            out.push(Action::Run(ops::pull(mode, v.on("autostash"))));
+            Ok(out)
+        })
+}
+
+impl FormDialog {
+    /// Fill in a field by name, as typing or choosing would. For tests outside this file.
+    pub fn set_for_test(&mut self, key: &str, value: &str) {
+        for f in &mut self.fields {
+            match f {
+                Field::Check { key: k, value: v, .. } if *k == key => *v = value == "1",
+                Field::Choice { key: k, options, value: v, .. } if *k == key => *v = options.iter().position(|o| o == value).expect("that option"),
+                Field::Text { key: k, value: v, .. } if *k == key => *v = value.to_string(),
+                _ => {}
+            }
+        }
+    }
+
+    /// What pressing the button would do.
+    pub fn submit_for_test(&mut self) -> Result<Vec<Action>, String> {
+        let values = self.values();
+        (self.on_submit)(&values)
+    }
+}
+
 pub fn pull_form() -> FormDialog {
     FormDialog::new("Pull", "Pull").choice_of("mode", "How to integrate", &PULL_MODES, 0).check("autostash", "Stash local changes first", false).on_submit(|v| run(ops::pull(v.picked("mode", &PULL_MODES), v.on("autostash"))))
 }
@@ -589,7 +629,9 @@ pub fn start_interactive_rebase(repo: &Repo, base: Option<&str>, items: &[gitem_
     std::fs::write(&path, render_todo(items)).map_err(|e| e.to_string())?;
     let mut o = o;
     o.onto = base.unwrap_or_default().to_string();
-    Ok(ops::rebase_interactive(&o, base.is_none(), &path, &helper))
+    let mut op = ops::rebase_interactive(&o, base.is_none(), &path, &helper);
+    op.remove_after = vec![path];
+    Ok(op)
 }
 
 /// Commits a rebase from `base` would touch, oldest first.

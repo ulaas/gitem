@@ -163,6 +163,10 @@ impl Tab {
     pub fn line_history(path: &str, a: u32, b: u32) -> Self {
         Tab::History(Box::new(history::HistoryView::for_lines(path, a, b)))
     }
+    /// Line numbers read from a revision of the file, with a note if they may be off.
+    pub fn line_history_at(path: &str, a: u32, b: u32, rev: Option<String>, note: Option<String>) -> Self {
+        Tab::History(Box::new(history::HistoryView::for_lines(path, a, b).at_rev(rev).noting(note)))
+    }
     pub fn visual(path: &str) -> Self {
         Tab::Visual(Box::new(visual::VisualView::new(path)))
     }

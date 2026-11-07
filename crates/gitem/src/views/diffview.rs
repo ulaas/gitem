@@ -48,6 +48,8 @@ struct Prepared {
     syntax: HashMap<(usize, usize), Spans>,
     /// The widest line as drawn, in characters. Worked out once: there can be many lines.
     max_chars: usize,
+    /// Lines shown with how they end, because that's all that changed about them.
+    marked: HashMap<(usize, usize), String>,
 }
 
 fn prepare(f: &FileDiff, dark: bool) -> Prepared {
@@ -86,8 +88,19 @@ fn prepare(f: &FileDiff, dark: bool) -> Prepared {
         unified.push((hi, None));
         unified.extend((0..h.lines.len()).map(|li| (hi, Some(li))));
     }
-    let unified_chars = f.hunks.iter().flat_map(|h| &h.lines).map(|l| l.text.len().min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
-    Prepared { additions: f.additions(), deletions: f.deletions(), unified, unified_chars, side, words, syntax: syn, max_chars }
+    let unified_chars = f.hunks.iter().flat_map(|h| &h.lines).map(|l| shown_chars(&l.text)).max().unwrap_or(0);
+    // The side-by-side rows have worked out which pairs differ only by their line ending.
+    let mut marked = HashMap::new();
+    for r in &side {
+        for (idx, cell) in [(r.left_idx, &r.left), (r.right_idx, &r.right)] {
+            if let (Some(i), Some((_, text))) = (idx, cell)
+                && f.hunks[r.hunk].lines[i].text != *text
+            {
+                marked.insert((r.hunk, i), text.clone());
+            }
+        }
+    }
+    Prepared { additions: f.additions(), deletions: f.deletions(), unified, unified_chars, side, words, syntax: syn, max_chars, marked }
 }
 
 fn change_for(f: &FileDiff) -> gitem_core::FileChange {
@@ -142,6 +155,8 @@ pub struct DiffView {
     full_file: bool,
     selected_file: usize,
     selected_lines: HashSet<(usize, usize)>,
+    /// What the selection was made on, to tell whether a reload changed anything under it.
+    selected_on: Option<(usize, Vec<diff::Hunk>)>,
     scroll_to_row: Option<usize>,
     images: ImagePair,
     wrap_key: String,
@@ -170,6 +185,7 @@ impl DiffView {
             full_file: false,
             selected_file: 0,
             selected_lines: HashSet::new(),
+            selected_on: None,
             scroll_to_row: None,
             images: ImagePair::default(),
             wrap_key: String::new(),
@@ -217,6 +233,17 @@ impl DiffView {
         matches!(self.src, DiffSource::Unstaged | DiffSource::Staged)
     }
 
+    /// Whether a patch can be made from what's on screen. A diff that ignores whitespace
+    /// doesn't match the file, so a patch from it wouldn't apply.
+    fn can_patch(&self) -> bool {
+        self.can_stage() && self.opts.ws == WsMode::None
+    }
+
+    /// The selected lines, as a list a test can read.
+    pub fn selected_line_count(&self) -> usize {
+        self.selected_lines.len()
+    }
+
     fn reload(&mut self, ctx: &egui::Context, cx: &Cx) {
         let (src, path) = (self.src.clone(), self.path.clone());
         let mut opts = self.opts;
@@ -229,7 +256,9 @@ impl DiffView {
         }
         let dark = cx.pal.dark;
         self.dark = Some(dark);
-        self.selected_lines.clear();
+        // Any file saved anywhere reloads this, which is no reason to lose a selection. Once
+        // the new diff is here, it stays if those lines are still what they were.
+        self.selected_on = (!self.selected_lines.is_empty()).then(|| self.files.get().and_then(|l| l.files.get(self.selected_file)).map(|f| (self.selected_file, f.hunks.clone()))).flatten();
         self.preparing.stop();
         self.long_jobs.clear();
         self.load_no += 1;
@@ -245,7 +274,12 @@ impl DiffView {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
-        self.files.poll();
+        if self.files.poll() {
+            let same = self.selected_on.take().is_some_and(|(at, hunks)| at == self.selected_file && self.files.get().and_then(|l| l.files.get(at)).is_some_and(|f| f.hunks == hunks));
+            if !same {
+                self.selected_lines.clear();
+            }
+        }
         if self.preparing.poll()
             && let (Some((at, p)), Some(loaded)) = (self.preparing.value.take(), self.files.value.as_mut())
         {
@@ -271,7 +305,14 @@ impl DiffView {
             return;
         };
         if loaded.files.is_empty() {
-            let hint = if self.opts.ws != WsMode::None { "Only whitespace changed, or the file matches its source." } else { "These two versions are identical." };
+            let nested = self.src == DiffSource::Untracked && self.path.as_deref().is_some_and(|p| cx.repo.is_nested_repo(p));
+            let hint = if nested {
+                "This folder is a Git repository of its own, so its files have no diff here."
+            } else if self.opts.ws != WsMode::None {
+                "Only whitespace changed, or the file matches its source."
+            } else {
+                "These two versions are identical."
+            };
             empty_state(ui, "No differences", hint, cx.pal);
         } else {
             if loaded.files.len() > 1 {
@@ -370,7 +411,9 @@ impl DiffView {
                     cx.open(Tab::file_history(path));
                 }
             }
-            if self.can_stage() && !self.selected_lines.is_empty() && !self.selection_is_exact() {
+            if self.can_stage() && self.opts.ws != WsMode::None {
+                ui.label(RichText::new("Showing whitespace is needed to stage parts of a file").small().color(cx.pal.dim));
+            } else if self.can_stage() && !self.selected_lines.is_empty() && !self.selection_is_exact() {
                 // As on the hunk buttons: a patch from this text would rewrite the file's bytes.
                 ui.label(RichText::new("Not UTF-8: stage the whole file").small().color(cx.pal.warn));
             } else if self.can_stage() && !self.selected_lines.is_empty() {
@@ -452,6 +495,9 @@ impl DiffView {
     }
 
     fn hunk_buttons(&self, ui: &mut Ui, cx: &mut Cx, f: &FileDiff, hunk: usize) {
+        if !self.can_patch() {
+            return;
+        }
         // Text that isn't UTF-8 can't be rebuilt into an exact patch.
         if self.can_stage() && f.hunks.get(hunk).is_some_and(|h| !diff::hunk_is_exact(h)) {
             ui.label(RichText::new("Not UTF-8: stage the whole file").small().color(cx.pal.warn));
@@ -492,19 +538,36 @@ impl DiffView {
                 && !f.is_new && !f.is_deleted {
                     ui.label(RichText::new(format!("mode {a} → {b}")).small().color(pal.faint));
                 }
-            if self.can_stage() && !f.hunks.is_empty() {
+            // Whatever the change is: a binary file, a mode or a plain rename has no hunks.
+            let conflicted = f.header.first().is_some_and(|l| l.starts_with("diff --cc "));
+            if self.can_stage() && !conflicted {
                 let path = f.display_path().to_string();
                 if self.src == DiffSource::Unstaged {
                     if ui.small_button("Stage file").clicked() {
                         cx.run(ops::stage_paths(&[path]));
                     }
                 } else if ui.small_button("Unstage file").clicked() {
-                    cx.run(ops::unstage_paths(&[path], true));
+                    // A rename goes back whole, or its old name stays staged as a deletion.
+                    let mut names = vec![path];
+                    if f.is_rename {
+                        names.push(f.old_path.clone());
+                    }
+                    let has_head = cx.status().is_some_and(|s| !s.head_sha.is_empty());
+                    cx.run(ops::unstage_paths(&names, has_head));
                 }
             }
         });
         if f.is_binary {
             self.binary(ui, cx, f);
+            return;
+        }
+        if f.header.first().is_some_and(|l| l.starts_with("diff --cc ")) {
+            empty_state(ui, "This file is in conflict", "Git can't show one diff of it until the conflict is settled.", &pal);
+            ui.vertical_centered(|ui| {
+                if ui.button("Resolve in merge tool").clicked() {
+                    cx.open(Tab::merge(f.display_path()));
+                }
+            });
             return;
         }
         if f.hunks.is_empty() {
@@ -538,7 +601,7 @@ impl DiffView {
             ui.painter().text(pos2(rect.left() + gutter - 6.0, rect.center().y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
         }
         let changed = matches!(kind, Some(LineKind::Add | LineKind::Del));
-        if changed && self.can_stage()
+        if changed && self.can_patch()
             && let Some(k) = key {
                 let gr = Rect::from_min_size(rect.min, vec2(gutter, rect.height()));
                 let r = ui.interact(gr, row_id.with("g"), Sense::click()).on_hover_text("Click to select this line for staging");
@@ -665,7 +728,8 @@ impl DiffView {
                     continue;
                 }
                 let id = ui.id().with(("urow", i));
-                self.draw_cell(ui, &pal, rect, None, Some(&l.text), Some(l.kind), Some((hi, li)), pr, font, gutter, 0.0, id);
+                let text = pr.marked.get(&(hi, li)).unwrap_or(&l.text);
+                self.draw_cell(ui, &pal, rect, None, Some(text), Some(l.kind), Some((hi, li)), pr, font, gutter, 0.0, id);
                 if let Some(n) = l.old_no {
                     ui.painter().text(pos2(rect.left() + 42.0, rect.center().y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
                 }

@@ -46,6 +46,38 @@ pub fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|&b| b == 0)
 }
 
+/// Text in UTF-16 is full of NUL bytes, and says what it is in its first two.
+pub fn has_utf16_bom(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff])
+}
+
+/// A file's text for reading on screen, and the encoding if it isn't UTF-8. This is for
+/// showing only: anything written back has to work from the bytes. Without a mark to go by,
+/// Latin-1 is a guess, though a line of it reads better than one of replacement characters.
+pub fn text_for_viewing(bytes: &[u8]) -> (String, Option<&'static str>) {
+    let utf16 = |to_u16: fn([u8; 2]) -> u16| String::from_utf16_lossy(&bytes[2..].as_chunks::<2>().0.iter().map(|c| to_u16(*c)).collect::<Vec<u16>>());
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        return (utf16(u16::from_le_bytes), Some("UTF-16"));
+    }
+    if bytes.starts_with(&[0xfe, 0xff]) {
+        return (utf16(u16::from_be_bytes), Some("UTF-16"));
+    }
+    let plain = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    match std::str::from_utf8(plain) {
+        Ok(s) => (s.to_string(), None),
+        Err(_) => (plain.iter().map(|&b| b as char).collect(), Some("Latin-1 (a guess: not UTF-8)")),
+    }
+}
+
+/// Lines for reading on screen. A file with only carriage returns, as from an old Mac,
+/// would otherwise be a single line.
+pub fn lines_for_viewing(s: &str) -> Vec<String> {
+    if s.contains('\r') && !s.contains('\n') {
+        return split_lines(&s.replace('\r', "\n"));
+    }
+    split_lines(s)
+}
+
 /// Split into lines, keeping `\r` out; a trailing newline does not create a line.
 pub fn split_lines(s: &str) -> Vec<String> {
     let mut v: Vec<String> = s.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l).to_string()).collect();
@@ -186,6 +218,27 @@ pub fn fuzzy_match(needle: &str, hay: &str) -> Option<(i32, Vec<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn files_in_other_encodings_read_as_text() {
+        let le: Vec<u8> = [0xff, 0xfe].into_iter().chain("h\u{e9}y\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let be: Vec<u8> = [0xfe, 0xff].into_iter().chain("h\u{e9}y\n".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(text_for_viewing(&le), ("h\u{e9}y\n".to_string(), Some("UTF-16")));
+        assert_eq!(text_for_viewing(&be).0, "h\u{e9}y\n");
+        assert!(has_utf16_bom(&le) && is_binary(&le), "the NUL bytes are why this has to be asked first");
+        assert_eq!(text_for_viewing(b"caf\xe9").0, "caf\u{e9}");
+        assert!(text_for_viewing(b"caf\xe9").1.is_some());
+        assert_eq!(text_for_viewing("caf\u{e9}".as_bytes()), ("caf\u{e9}".to_string(), None));
+        assert_eq!(text_for_viewing(b"\xef\xbb\xbfx"), ("x".to_string(), None));
+        assert_eq!(text_for_viewing(&[0xff, 0xfe, 0x41]).0, "", "half a character is dropped, not a panic");
+    }
+
+    #[test]
+    fn carriage_returns_alone_make_lines_when_nothing_else_does() {
+        assert_eq!(lines_for_viewing("a\rb\r"), vec!["a", "b"]);
+        assert_eq!(lines_for_viewing("a\r\nb\n"), vec!["a", "b"]);
+        assert_eq!(lines_for_viewing("a\rstill a\nb\n"), vec!["a\rstill a", "b"]);
+    }
 
     #[test]
     fn config_values_hide_their_secrets() {

@@ -293,10 +293,12 @@ impl Sidebar {
         if t.refs_gen != Some(cx.data.refs_gen) {
             t.refs_gen = Some(cx.data.refs_gen);
             let r = cx.repo.clone();
-            let (rev, limit) = (b.name.clone(), t.commits_limit);
-            t.commits.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec![rev], limit, ..Default::default() }));
+            // The short name would mean a tag of the same name, if there is one.
+            let (rev, limit) = (b.rev_among(cx.data.tags()), t.commits_limit);
+            let own = rev.clone();
+            t.commits.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec![own], limit, ..Default::default() }));
             if let Some(up) = &upstream {
-                for (task, count, limit, range) in [(&mut t.incoming, b.behind, t.incoming_limit, format!("{}..{up}", b.name)), (&mut t.outgoing, b.ahead, t.outgoing_limit, format!("{up}..{}", b.name))] {
+                for (task, count, limit, range) in [(&mut t.incoming, b.behind, t.incoming_limit, format!("{rev}..{up}")), (&mut t.outgoing, b.ahead, t.outgoing_limit, format!("{up}..{rev}"))] {
                     if count > 0 {
                         let r = cx.repo.clone();
                         task.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec![range], limit, ..Default::default() }));

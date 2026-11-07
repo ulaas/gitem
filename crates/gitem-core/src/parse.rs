@@ -11,7 +11,7 @@ const LOG_FIELDS: usize = 11;
 pub fn parse_log(out: &str) -> Vec<Commit> {
     let mut v = Vec::new();
     let fields: Vec<&str> = out.split('\0').collect();
-    for f in fields.chunks_exact(LOG_FIELDS) {
+    for f in fields.as_chunks::<LOG_FIELDS>().0 {
         v.push(Commit {
             sha: f[0].to_string(),
             parents: f[1].split_whitespace().map(String::from).collect(),
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn stat_log_finds_the_new_name_of_a_rename_and_keeps_odd_subjects() {
-        let c = parse_stat_log("\x01aaa\0Ann\0a@x\0100\0a \x01 subject\0\n1\t2\t\0src/old.txt\0src/new.txt\0\x01bbb\0Ann\0a@x\099\0s\0\n3\t4\tsrc/old.txt\0\x01ccc\0B\0b@x\098\0empty\0\0");
+        let c = parse_stat_log("\x01aaa\0Ann\0a@x\x00100\0a \x01 subject\0\n1\t2\t\0src/old.txt\0src/new.txt\0\x01bbb\0Ann\0a@x\x0099\0s\0\n3\t4\tsrc/old.txt\0\x01ccc\0B\0b@x\x0098\0empty\0\0");
         assert_eq!(c.len(), 3);
         assert_eq!((c[0].path.as_deref(), c[0].additions, c[0].subject.as_str()), (Some("src/new.txt"), 1, "a \x01 subject"));
         assert_eq!((c[1].path.as_deref(), c[1].deletions), (Some("src/old.txt"), 4));

@@ -377,6 +377,8 @@ const POLL_WITHOUT_WATCHER: Duration = Duration::from_secs(5);
 pub enum ErrorFix {
     SetUpstream,
     PullOptions,
+    /// Both sides have commits and nothing says how to join them.
+    Reconcile,
     Stash,
     AddRemote,
     Credentials,
@@ -387,6 +389,7 @@ impl ErrorFix {
         match self {
             ErrorFix::SetUpstream => "Set upstream…",
             ErrorFix::PullOptions => "Pull options…",
+            ErrorFix::Reconcile => "Merge or rebase…",
             ErrorFix::Stash => "Stash…",
             ErrorFix::AddRemote => "Add a remote…",
             ErrorFix::Credentials => "Open Credentials",
@@ -404,7 +407,9 @@ pub fn explain_error(text: &str) -> Option<(&'static str, ErrorFix)> {
         Some(("You have uncommitted changes in files this would replace. Stash them, or commit them, and try again.", ErrorFix::Stash))
     } else if has("No configured push destination") || has("does not appear to be a git repository") || has("No remote repository specified") {
         Some(("There's no remote to talk to. Add one, or check the name of the one you meant.", ErrorFix::AddRemote))
-    } else if has("reconcile divergent branches") || has("non-fast-forward") || has("fetch first") || has("Not possible to fast-forward") {
+    } else if has("reconcile divergent branches") {
+        Some(("This branch and its remote both have new commits, and git needs to be told how to bring them together.", ErrorFix::Reconcile))
+    } else if has("non-fast-forward") || has("fetch first") || has("Not possible to fast-forward") {
         Some(("This branch and its remote have both moved on. Bring in the remote's commits first.", ErrorFix::PullOptions))
     } else if has("Authentication failed") || has("could not read Username") || has("could not read Password") || has("Permission denied (publickey") || has("terminal prompts disabled") {
         Some(("The remote didn't accept your sign-in. Check the saved credentials or your SSH key.", ErrorFix::Credentials))
@@ -1968,6 +1973,7 @@ impl GitemApp {
                         Action::Form(forms::set_upstream(branch.unwrap_or_default(), candidates))
                     }
                     ErrorFix::PullOptions => Action::Form(forms::pull_form()),
+                    ErrorFix::Reconcile => Action::Form(forms::pull_reconcile_form()),
                     ErrorFix::Stash => Action::Form(forms::stash_form(Vec::new())),
                     ErrorFix::AddRemote => Action::Form(forms::add_remote()),
                     ErrorFix::Credentials => Action::OpenTab(Tab::Credentials(Box::default())),

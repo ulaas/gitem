@@ -56,6 +56,11 @@ pub struct GraphView {
     /// Where a Shift+click range starts. A commit, not a row: rows move on every reload.
     last_clicked: Option<String>,
     scroll_to: Option<usize>,
+    /// A row to bring into view only if it isn't: the keyboard moves one row at a time, and
+    /// the list jumping about each time would lose your place.
+    reveal: Option<usize>,
+    /// How far down the list was on the last frame.
+    last_scroll_y: f32,
     query: String,
     matches: Task<HashSet<String>>,
     /// A ref being looked up to jump to, and the name asked for.
@@ -100,6 +105,8 @@ impl Default for GraphView {
             selected: Vec::new(),
             last_clicked: None,
             scroll_to: None,
+            reveal: None,
+            last_scroll_y: 0.0,
             query: String::new(),
             matches: Task::default(),
             match_list: Vec::new(),
@@ -153,7 +160,16 @@ fn build_query(f: &Filters, limit: usize, stash_shas: &[String], cur: Option<&st
         q.excludes.push(format!("refs/heads/{h}"));
         q.excludes.push(format!("refs/remotes/{h}"));
     }
-    q.all = true;
+    if f.hidden.is_empty() {
+        q.all = true;
+    } else {
+        // `--all` always brings HEAD back, so hiding the current branch would do nothing.
+        q.all_refs_only = true;
+        // A detached HEAD may be on no ref at all, and nobody can have hidden it by name.
+        if cur.is_none() {
+            q.revs.push("HEAD".into());
+        }
+    }
     if f.stashes {
         q.revs.extend(stash_shas.iter().cloned());
     }
@@ -223,10 +239,17 @@ impl GraphView {
                     c.refs.push(RefLabel { kind: RefKind::Stash, name: "stash".into(), current: false });
                 }
             }
+            // With commits filtered out, git still names their real parents, so what's drawn
+            // has to be worked out. `commits` keeps the real ones, which menus act on.
+            let hidden_merges = if f.no_merges { Some(repo.merge_first_parents(&q).map_err(|e| e.to_string())?) } else { None };
             if dirty && !head.is_empty() {
-                commits.insert(0, Commit { sha: WIP.into(), parents: vec![head], subject: "Work in progress".into(), ..Default::default() });
+                // HEAD can be filtered out, and then this row has nothing to connect to.
+                let shown = |sha: &str| commits.iter().any(|c| c.sha == sha);
+                let target = hidden_merges.as_ref().and_then(|m| m.get(&head)).cloned().unwrap_or_else(|| head.clone());
+                let parents = if shown(&head) || shown(&target) { vec![head] } else { Vec::new() };
+                commits.insert(0, Commit { sha: WIP.into(), parents, subject: "Work in progress".into(), ..Default::default() });
             }
-            let rows = graph::layout(&commits);
+            let rows = if f.first_parent || f.no_merges { graph::layout(&graph::parents_for_filters(&commits, f.first_parent, hidden_merges.as_ref())) } else { graph::layout(&commits) };
             let max_width = rows.iter().map(|r| r.width).max().unwrap_or(1);
             let index = commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect();
             Ok(Graph { commits, rows, index, max_width, more, loaded })
@@ -272,6 +295,10 @@ impl GraphView {
                 if ui.small_button("Stop").on_hover_text("Stop this search").clicked() {
                     self.matches.stop();
                 }
+            }
+            if let Some(e) = &self.matches.error {
+                let first = e.lines().next().unwrap_or(e).trim_start_matches("fatal: ");
+                ui.label(RichText::new(format!("Search failed: {first}")).color(p.danger));
             }
             if !self.match_list.is_empty() || self.matches.get().is_some() {
                 ui.label(RichText::new(format!("{} of {}", if self.match_list.is_empty() { 0 } else { self.match_pos + 1 }, self.match_list.len())).color(p.dim));
@@ -387,6 +414,10 @@ impl GraphView {
             self.recompute_matches();
         }
         if self.matches.poll() {
+            // A failed search has no results, and the last one's highlights aren't its answer.
+            if self.matches.error.is_some() {
+                self.matches.value = None;
+            }
             self.recompute_matches();
             self.match_pos = 0;
             self.scroll_to = self.match_list.first().copied();
@@ -469,7 +500,8 @@ impl GraphView {
                 let n = self.worktree_counts.get().and_then(|m| m.get(&w.path)).copied().unwrap_or(0);
                 let text = if n > 0 { format!("{name} ({n})") } else { name.clone() };
                 if ui.selectable_label(w.is_current, RichText::new(text).small()).on_hover_text(format!("{}\nClick to focus the graph on it", w.path)).clicked() {
-                    focus = Some(name);
+                    // "detached" is only a label: what it's on is a commit.
+                    focus = Some(w.branch.clone().unwrap_or_else(|| w.head.clone()));
                 }
             }
         });
@@ -609,6 +641,16 @@ impl GraphView {
             // Rows sit edge to edge: the spacing set for them below is zero.
             sa = sa.vertical_scroll_offset((pos as f32 * ROW_H - area_h / 3.0).max(0.0));
         }
+        if let Some(target) = self.reveal.take()
+            && let Some(pos) = visible.iter().position(|&v| v == target)
+        {
+            let top = pos as f32 * ROW_H;
+            if top < self.last_scroll_y {
+                sa = sa.vertical_scroll_offset(top);
+            } else if top + ROW_H > self.last_scroll_y + area_h {
+                sa = sa.vertical_scroll_offset(top + ROW_H - area_h);
+            }
+        }
         let mut clicked_row: Option<(usize, egui::Modifiers)> = None;
         let mut scroll_y = 0.0;
 
@@ -664,7 +706,8 @@ impl GraphView {
                     if is_wip {
                         painter.circle(node, 5.0, p.bg, Stroke::new(1.5, p.warn));
                     } else if c.is_merge() {
-                        painter.circle_filled(node, 3.5, node_color);
+                        let is_head = c.refs.iter().any(|x| x.current);
+                        painter.circle(node, 3.5, node_color, Stroke::new(if is_head { 2.0 } else { 0.0 }, p.text));
                     } else {
                         let is_head = c.refs.iter().any(|x| x.current);
                         painter.circle(node, 5.0, node_color, Stroke::new(if is_head { 2.0 } else { 1.0 }, if is_head { p.text } else { p.bg }));
@@ -779,6 +822,7 @@ impl GraphView {
             })
         });
         scroll_y += out.inner.state.offset.y;
+        self.last_scroll_y = scroll_y;
         let content_h = visible.len() as f32 * ROW_H;
 
         if let Some((i, mods)) = clicked_row {
@@ -882,7 +926,7 @@ impl GraphView {
         if g.commits[i].sha != WIP {
             self.selected = vec![g.commits[i].sha.clone()];
             self.last_clicked = Some(g.commits[i].sha.clone());
-            self.scroll_to = Some(i);
+            self.reveal = Some(i);
             cx.inspect(&g.commits[i].sha);
         }
     }

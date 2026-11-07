@@ -1,4 +1,6 @@
 //! File history and line history: commit lists scoped to a path or line range.
+use std::collections::HashMap;
+
 use egui::{RichText, Ui};
 use gitem_core::model::*;
 use gitem_core::repo::DiffSource;
@@ -14,7 +16,13 @@ const PAGE: usize = 500;
 pub struct HistoryView {
     path: String,
     lines: Option<(u32, u32)>,
+    /// The revision the line numbers belong to. `None` is the working file or HEAD.
+    rev: Option<String>,
+    /// Why the numbers may be off, if they may.
+    note: Option<String>,
     commits: Task<Vec<Commit>>,
+    /// What each commit called this file, as it may have been renamed since.
+    paths: Task<HashMap<String, String>>,
     loaded_gen: u64,
     limit: usize,
     selected: Option<String>,
@@ -24,15 +32,27 @@ pub struct HistoryView {
 
 impl HistoryView {
     pub fn for_file(path: &str) -> Self {
-        Self { path: path.to_string(), lines: None, commits: Task::default(), loaded_gen: u64::MAX, limit: PAGE, selected: None, follow: true, author: String::new() }
+        Self { path: path.to_string(), lines: None, rev: None, note: None, commits: Task::default(), paths: Task::default(), loaded_gen: u64::MAX, limit: PAGE, selected: None, follow: true, author: String::new() }
     }
 
     pub fn for_lines(path: &str, a: u32, b: u32) -> Self {
         Self { lines: Some((a, b)), ..Self::for_file(path) }
     }
 
+    /// Line numbers read from this revision of the file.
+    pub fn at_rev(mut self, rev: Option<String>) -> Self {
+        self.rev = rev;
+        self
+    }
+
+    /// Something to say above the list about how far to trust it.
+    pub fn noting(mut self, note: Option<String>) -> Self {
+        self.note = note;
+        self
+    }
+
     pub fn key(&self) -> String {
-        format!("history:{}:{:?}", self.path, self.lines)
+        format!("history:{}:{:?}:{:?}", self.path, self.lines, self.rev)
     }
 
     pub fn title(&self) -> String {
@@ -45,7 +65,8 @@ impl HistoryView {
 
     fn load(&mut self, ctx: &egui::Context, cx: &Cx) {
         let repo = cx.repo.clone();
-        let mut q = LogQuery { revs: vec!["HEAD".into()], limit: self.limit, ..Default::default() };
+        let start = self.rev.clone().unwrap_or_else(|| "HEAD".to_string());
+        let mut q = LogQuery { revs: vec![start], limit: self.limit, ..Default::default() };
         if let Some((a, b)) = self.lines {
             q.line_range = Some((a, b, self.path.clone()));
         } else {
@@ -57,11 +78,18 @@ impl HistoryView {
             q.author = Some(self.author.trim().to_string());
         }
         self.commits.spawn(ctx, move || repo.log(&q));
+        if self.lines.is_none() && self.follow {
+            let (repo, path, limit) = (cx.repo.clone(), self.path.clone(), self.limit);
+            self.paths.spawn(ctx, move || repo.file_history_points(&path, limit).map(|points| points.into_iter().map(|p| (p.sha, p.path)).collect()));
+        } else {
+            self.paths = Task::default();
+        }
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         self.commits.poll();
+        self.paths.poll();
         if self.loaded_gen != cx.data.refs_gen {
             self.loaded_gen = cx.data.refs_gen;
             self.load(&ui.ctx().clone(), cx);
@@ -76,7 +104,7 @@ impl HistoryView {
                 self.load(&ui.ctx().clone(), cx);
             }
             if ui.small_button("Open file").clicked() {
-                cx.open(Tab::file(&self.path, None, self.lines.map(|x| x.0)));
+                cx.open(Tab::file(&self.path, self.rev.clone(), self.lines.map(|x| x.0)));
             }
             if self.lines.is_none() && ui.small_button("Visual").clicked() {
                 cx.open(Tab::visual(&self.path));
@@ -85,6 +113,9 @@ impl HistoryView {
                 ui.add(spinner(14.0));
             }
         });
+        if let Some(n) = &self.note {
+            ui.label(RichText::new(n).small().color(p.warn));
+        }
         ui.separator();
         if let Some(e) = &self.commits.error {
             error_box(ui, e, &p);
@@ -105,13 +136,16 @@ impl HistoryView {
             self.limit = choice.apply(self.limit, PAGE);
             self.load(&ui.ctx().clone(), cx);
         }
+        let paths = self.paths.get();
         commit_list(ui, cx, &list, &mut self.selected, "history-list", |ui, cx, c| {
+            // Before a rename, the file had another name, and only that name exists there.
+            let then = paths.and_then(|m| m.get(&c.sha)).unwrap_or(&path);
             if ui.button("Open changes to this file").clicked() {
-                cx.diff(DiffSource::Commit(c.sha.clone()), Some(&path));
+                cx.diff(DiffSource::Commit(c.sha.clone()), Some(then));
                 ui.close();
             }
             if ui.button("Open this revision with blame").clicked() {
-                cx.open(Tab::file(&path, Some(c.sha.clone()), None));
+                cx.open(Tab::file(then, Some(c.sha.clone()), None));
                 ui.close();
             }
             if ui.button("Compare with working tree").clicked() {
@@ -135,6 +169,7 @@ pub fn commit_list(ui: &mut Ui, cx: &mut Cx, list: &[Commit], selected: &mut Opt
         for i in range {
             let c = &list[i];
             let (rect, resp) = row(ui, row_h, selected.as_deref() == Some(&c.sha), &p);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, c.subject.as_str()));
             paint_avatar(ui, egui::pos2(rect.left() + 18.0, rect.center().y), 11.0, &c.author_name, &c.author_email, &p, cx.settings.gravatar);
             let right = rect.right() - 76.0;
             let top = egui::Rect::from_min_max(egui::pos2(rect.left() + 36.0, rect.top() + 3.0), egui::pos2(right, rect.top() + 20.0));

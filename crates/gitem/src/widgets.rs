@@ -371,11 +371,21 @@ pub const MAX_SHOWN_LINE_BYTES: usize = 5_000;
 
 /// Characters a line takes on screen, for sizing the column it's in.
 pub fn shown_chars(text: &str) -> usize {
+    // A tab takes the room of four characters, which a plain count would cut off at the end.
+    let width = |s: &str| s.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>();
     if text.len() > MAX_SHOWN_LINE_BYTES {
-        util::prefix(text, MAX_SHOWN_LINE_BYTES).chars().count() + truncation_marker(text.len()).chars().count()
+        width(util::prefix(text, MAX_SHOWN_LINE_BYTES)) + truncation_marker(text.len()).chars().count()
     } else {
-        text.chars().count()
+        width(text)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_tab_counts_as_the_room_it_takes() {
+    assert_eq!(shown_chars("ab"), 2);
+    assert_eq!(shown_chars("\t\tx"), 9);
+    assert_eq!(shown_chars("\u{e9}"), 1);
 }
 
 fn truncation_marker(len: usize) -> String {

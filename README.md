@@ -94,7 +94,7 @@ gitem isn't an editor plugin, so the following differ by design.
 - Blame and annotations appear in gitem's read-only file view, not in your editor as you type. Use **Settings > External editor** to jump to your editor.
 - Patches and workspaces are stored locally; there's no GitKraken account or cloud sync.
 - Code lens finds symbols with a regex rather than a language server, so it can miss some declarations.
-- Bare repositories can't be opened, because gitem works from a working tree.
+- Bare repositories can't be opened, because gitem works from a working tree. It says so, and names any linked worktrees to open instead. A linked worktree of a bare repository opens as usual.
 - The in-app rebase editor works on linear history: merge commits in the range aren't kept, and the view says so. It refuses to start if HEAD has moved since the plan was made. For `--rebase-merges`, use **Rebase onto…**, which has that option, or run the rebase from the command line with gitem as `sequence.editor`.
 - Hunk and line staging need UTF-8 text. For other encodings, stage the whole file. The merge tool offers a choice of versions for such files rather than rewriting them. A valid file that really contains U+FFFD is treated the same way.
 
@@ -160,6 +160,13 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 - `GITEM_CONFIG_DIR` moves everything gitem keeps into that folder: settings, window state, and secrets. On Windows that means a plain file instead of the OS vault, so use it for testing, not for real tokens.
 - `--shot` leaves your profile alone. It doesn't save settings or the session, keeps window state in a temp folder unless `GITEM_CONFIG_DIR` is set, and uses no stored secrets.
 - AI features send the relevant diff to your chosen provider, and only when you ask. Oversized diffs are refused rather than silently cut.
+- A pull git refuses because both sides have new commits and nothing says how to join them offers Merge or Rebase, and can remember the choice for the repository as `pull.rebase`.
+- A staged rename stays whole: unstaging it, or committing it in the Composer, takes both names, and clicking it shows the rename with its real edits. Unstaging a hunk of one keeps the rename. Staging or taking back part of a new or deleted file works.
+- Lists too long for a command line go to git over stdin, except that `git stash` passes names on to another git, so stashing a very long list by name is refused before anything changes.
+- In a partial clone, line counts in the graph, Visual History and Contributors no longer download files. Commits whose files aren't here show no counts. Opening a commit's diff still fetches what it needs.
+- A squash merge fills in its prepared message and says it's waiting for its commit. A prepared message keeps lines that start with `#`, and drops only git's own list of conflicts.
+- In the graph, No merges and First parent draw real connections rather than lanes that never end, and the arrow keys only scroll when the row is off screen. Hiding the current branch now hides it. A search git rejects says why.
+- The file view shows PNG and JPEG pictures, reads UTF-16 by its byte order mark, and shows other files that aren't UTF-8 as Latin-1, a guess that it labels as one. The diff view compares only PNG and JPEG.
 
 ## Project layout
 

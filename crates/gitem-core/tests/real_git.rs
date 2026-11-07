@@ -1502,6 +1502,97 @@ fn a_change_of_line_ending_alone_says_so_side_by_side() {
     assert_eq!(row.right.as_ref().unwrap().1, "same [CR]");
 }
 
+/// An empty side isn't a deleted one, and the reason given has to say which it is.
+#[test]
+fn auto_rebase_says_whether_a_side_was_emptied_or_deleted() {
+    use gitem_core::autorebase;
+    for (emptied, want) in [(true, "emptied"), (false, "deleted")] {
+        let f = Fx::new();
+        f.write("c.txt", "base\n");
+        f.commit_all("base");
+        f.run(ops::branch_create("work", None, true));
+        f.write("c.txt", "mine\n");
+        f.commit_all("mine");
+        f.run(ops::checkout("main"));
+        if emptied {
+            f.write("c.txt", "");
+        } else {
+            std::fs::remove_file(f.repo.root.join("c.txt")).unwrap();
+        }
+        f.commit_all("theirs");
+        f.run(ops::checkout("work"));
+        let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| panic!("this needs a person, not the model")).unwrap();
+        let why = sum.paused.expect("it stopped");
+        assert!(why.contains(want), "{why}");
+    }
+}
+
+#[test]
+fn auto_rebase_says_what_the_model_really_did() {
+    use gitem_core::autorebase::Summary;
+    let s = Summary { resolved: vec!["a.txt".into()], merged_without_ai: vec!["b.txt".into()], ..Default::default() };
+    let text = s.describe("main");
+    let (with, without) = (text.find("Resolved with AI").unwrap(), text.find("Merged without asking").unwrap());
+    assert!(text[with..without].contains("a.txt") && text[without..].contains("b.txt"), "{text}");
+    assert!(Summary::default().describe("main").contains("No conflicts needed resolving"));
+}
+
+#[test]
+fn conflict_markers_count_with_or_without_a_label() {
+    use gitem_core::merge::has_conflict_markers;
+    assert!(has_conflict_markers("a\n<<<<<<<\nb\n=======\nc\n>>>>>>>\n"));
+    assert!(has_conflict_markers("<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> side\n"));
+    assert!(!has_conflict_markers("<<<<<<<< eight\n>>>>>>>> eight\n"));
+    assert!(!has_conflict_markers("a\n=======\nc\n"));
+}
+
+/// Commits a staged rename whole, where it used to leave the old name staged for later.
+#[test]
+fn composing_a_staged_rename_commits_both_names() {
+    let f = Fx::new();
+    f.write("old.txt", "one\ntwo\nthree\nfour\nfive\n");
+    f.commit_all("base");
+    f.repo.git.run(Some(&f.repo.root), &["mv", "old.txt", "new.txt"]).unwrap();
+    f.write("other.txt", "not in this commit\n");
+    f.run(ops::compose_commits(&[ops::ComposedCommit { message: "moved".into(), files: vec!["new.txt".into()], renamed_from: vec!["old.txt".into()] }]));
+    let d = f.repo.diff(&DiffSource::Commit(f.repo.resolve("HEAD").unwrap()), None, &DiffOpts::default()).unwrap();
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].is_rename);
+    let st = f.repo.status().unwrap();
+    assert_eq!(st.entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), vec!["other.txt"], "nothing of the rename is left over");
+}
+
+/// Git keeps a stash's untracked files in a third parent, with no parent of its own to compare.
+#[test]
+fn a_stashes_untracked_files_can_be_shown() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit_all("base");
+    f.write("a.txt", "b\n");
+    f.write("u.txt", "untracked\n");
+    f.run(ops::stash_push(&ops::StashOpts { include_untracked: true, ..Default::default() }));
+    let third = f.repo.resolve("stash@{0}^3").unwrap();
+    let d = f.repo.diff(&DiffSource::Commit(third), None, &DiffOpts::default()).unwrap();
+    assert_eq!(d.iter().map(|x| x.display_path()).collect::<Vec<_>>(), vec!["u.txt"]);
+    f.run(ops::stash_push(&ops::StashOpts::default()).clone());
+    assert!(f.repo.resolve("stash@{0}^3").is_err() || f.repo.stashes().unwrap().len() == 1);
+}
+
+#[test]
+fn an_op_cleans_up_its_scratch_files_whether_it_works_or_not() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit_all("base");
+    for (args, ok) in [(vec!["status"], true), (vec!["no-such-command"], false)] {
+        let scratch = f.repo.root.join(".git/scratch.txt");
+        std::fs::write(&scratch, "x").unwrap();
+        let mut op = GitOp::new("x").step(&args);
+        op.remove_after = vec![scratch.clone()];
+        assert_eq!(f.try_run(op), ok);
+        assert!(!scratch.exists());
+    }
+}
+
 /// Full ref names say which kind each is, so a log needs no other command to label them.
 #[test]
 fn a_log_is_one_command() {

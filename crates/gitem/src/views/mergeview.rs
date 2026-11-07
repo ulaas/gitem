@@ -88,7 +88,12 @@ pub struct MergeView {
     doc: Task<Loaded>,
     started: bool,
     show_base: bool,
-    current: usize,
+    /// The conflict last jumped to. None until the first jump.
+    current: Option<usize>,
+    /// How far the panes' text is scrolled sideways.
+    text_x: f32,
+    /// The widest line in characters, and what it was worked out for.
+    widest: ((usize, usize, bool), usize),
     scroll_to: Option<usize>,
     editing: Option<(usize, String)>,
     raw_mode: bool,
@@ -129,7 +134,9 @@ impl MergeView {
             doc: Task::default(),
             started: false,
             show_base: false,
-            current: 0,
+            current: None,
+            text_x: 0.0,
+            widest: ((usize::MAX, 0, false), 0),
             scroll_to: None,
             editing: None,
             raw_mode: false,
@@ -270,7 +277,7 @@ impl MergeView {
         self.expanded.clear();
         self.raw_mode = false;
         self.saved = false;
-        self.current = 0;
+        self.current = None;
         self.confirm_restart = false;
         self.pending_save = None;
     }
@@ -397,14 +404,15 @@ impl MergeView {
         ui.label(RichText::new(msg).color(pal.dim));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if !l.missing_ours && ui.button(format!("Keep {}", self.sides.0)).clicked() {
-                cx.run(ops::checkout_conflict_side(path, false));
+            // As from the Changes list: each of these throws away what the other side did.
+            if !l.missing_ours && ui.button(format!("Keep {}…", self.sides.0)).clicked() {
+                cx.confirm("Resolve conflict", &format!("Keep {} for {path}? Changes from the other side are discarded.", self.sides.0), "Keep", ops::checkout_conflict_side(path, false));
             }
-            if !l.missing_theirs && ui.button(format!("Keep {}", self.sides.1)).clicked() {
-                cx.run(ops::checkout_conflict_side(path, true));
+            if !l.missing_theirs && ui.button(format!("Keep {}…", self.sides.1)).clicked() {
+                cx.confirm("Resolve conflict", &format!("Keep {} for {path}? Changes from the other side are discarded.", self.sides.1), "Keep", ops::checkout_conflict_side(path, true));
             }
-            if (l.missing_ours || l.missing_theirs) && ui.button("Delete the file").clicked() {
-                cx.run(ops::remove_conflicted(path));
+            if (l.missing_ours || l.missing_theirs) && ui.button("Delete the file…").clicked() {
+                cx.confirm("Delete file", &format!("Resolve the conflict by deleting {path}?"), "Delete", ops::remove_conflicted(path));
             }
         });
     }
@@ -426,12 +434,15 @@ impl MergeView {
             }
             let indices = Self::conflict_indices(doc);
             if ui.small_button("▲").on_hover_text("Previous conflict").clicked() && !indices.is_empty() {
-                self.current = (self.current + indices.len() - 1) % indices.len();
-                self.scroll_to = Some(indices[self.current]);
+                let at = self.current.map_or(indices.len() - 1, |c| (c + indices.len() - 1) % indices.len());
+                self.current = Some(at);
+                self.scroll_to = Some(indices[at]);
             }
             if ui.small_button("▼").on_hover_text("Next conflict").clicked() && !indices.is_empty() {
-                self.current = (self.current + 1) % indices.len();
-                self.scroll_to = Some(indices[self.current]);
+                // The first press goes to the first conflict: nothing has been visited yet.
+                let at = self.current.map_or(0, |c| (c + 1) % indices.len());
+                self.current = Some(at);
+                self.scroll_to = Some(indices[at]);
             }
             ui.separator();
             if ui.small_button(format!("All {}", self.sides.0)).on_hover_text(format!("Resolve remaining conflicts with {}", self.sides.0)).clicked() {
@@ -559,6 +570,32 @@ impl MergeView {
         }
     }
 
+    /// How far the panes' text can scroll sideways, for the document as it stands. It's only
+    /// worked out again when the document changes: there can be many lines.
+    fn widest_line(&mut self, doc: &MergeDoc) -> usize {
+        let key = (doc.regions.len(), doc.unresolved_count(), self.editing.is_some());
+        if self.widest.0 != key {
+            let longest = |lines: &[String]| lines.iter().map(|l| shown_chars(plain(l))).max().unwrap_or(0);
+            let widest = doc.regions.iter().map(|r| match r {
+                Region::Stable(l) => longest(l),
+                Region::Auto { lines, base, .. } | Region::Same { lines, base } => longest(lines).max(longest(base)),
+                Region::Conflict { base, ours, theirs, resolution } => longest(base).max(longest(ours)).max(longest(theirs)).max(longest(&resolved_lines(base, ours, theirs, resolution))),
+            });
+            self.widest = (key, widest.max().unwrap_or(0));
+        }
+        self.widest.1
+    }
+
+    /// How far the panes' text is scrolled sideways.
+    pub fn text_scroll(&self) -> f32 {
+        self.text_x
+    }
+
+    /// The conflict last jumped to.
+    pub fn current_conflict(&self) -> Option<usize> {
+        self.current
+    }
+
     /// Lay out one row of panes with synced vertical scrolling across regions.
     fn panes(&mut self, ui: &mut Ui, cx: &mut Cx, doc: &mut MergeDoc) {
         let pal = cx.pal.clone();
@@ -566,6 +603,26 @@ impl MergeView {
         let row_h = (font * 1.45).ceil();
         let header_h = 26.0;
         let n_panes = if self.show_base { 4 } else { 3 };
+
+        // The panes keep their share of the width, so all sides stay in view together. A long
+        // line scrolls inside its pane, all of them together, by sideways wheel or the bar.
+        let char_w = ui.fonts_mut(|fx| fx.glyph_width(&mono(font), 'm'));
+        let widest = self.widest_line(doc);
+        let share = (ui.available_width() - 8.0) / n_panes as f32;
+        let max_x = (widest as f32 * char_w + 24.0 - share).max(0.0);
+        self.text_x = self.text_x.clamp(0.0, max_x);
+        if max_x > 0.0 {
+            egui::Panel::bottom(ui.id().with("merge-x")).resizable(false).show_separator_line(false).show(ui, |ui| {
+                let w = ui.available_width();
+                let out = egui::ScrollArea::horizontal().id_salt("merge-x-bar").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).horizontal_scroll_offset(self.text_x).show(ui, |ui| {
+                    ui.allocate_exact_size(vec2(w + max_x, 10.0), Sense::hover());
+                });
+                self.text_x = out.state.offset.x;
+            });
+        }
+        if ui.rect_contains_pointer(ui.available_rect_before_wrap()) {
+            self.text_x = (self.text_x - ui.input(|i| i.smooth_scroll_delta.x)).clamp(0.0, max_x);
+        }
 
         let total_w = ui.available_width();
         let (hdr, _) = ui.allocate_exact_size(vec2(total_w, 20.0), Sense::hover());
@@ -578,7 +635,7 @@ impl MergeView {
 
         // Region heights so we can virtualise and jump.
         let heights: Vec<f32> = doc.regions.iter().enumerate().map(|(i, r)| self.region_height(i, r, row_h, header_h)).collect();
-        let mut sa = egui::ScrollArea::both().id_salt("merge-panes").auto_shrink([false, false]);
+        let mut sa = egui::ScrollArea::vertical().id_salt("merge-panes").auto_shrink([false, false]);
         if let Some(t) = self.scroll_to.take() {
             sa = sa.vertical_scroll_offset(heights[..t.min(heights.len())].iter().sum::<f32>());
         }
@@ -667,7 +724,7 @@ impl MergeView {
                     }
                     for idx in 0..(if self.show_base { 4 } else { 3 }) {
                         let pr = self.pane_rect(rect, pane_w, idx);
-                        paint_text(ui, Rect::from_min_size(pos2(pr.left() + 6.0, y), vec2(pr.width() - 8.0, row_h)), text, mono(font), pal.dim);
+                        pane_text(ui, Rect::from_min_size(pos2(pr.left() + 6.0, y), vec2(pr.width() - 8.0, row_h)), text, font, pal.dim, self.text_x);
                     }
                 }
             }
@@ -678,21 +735,21 @@ impl MergeView {
                 for idx in [source_idx, r_idx] {
                     let pr = self.pane_rect(rect, pane_w, idx);
                     ui.painter().rect_filled(pr, 0.0, fill);
-                    lines_at(ui, pr, lines, row_h, font, pal.text);
+                    lines_at(ui, pr, lines, row_h, font, pal.text, self.text_x);
                 }
-                lines_at(ui, self.pane_rect(rect, pane_w, other_idx), base, row_h, font, pal.dim);
+                lines_at(ui, self.pane_rect(rect, pane_w, other_idx), base, row_h, font, pal.dim, self.text_x);
                 if let Some(bi) = b_idx {
-                    lines_at(ui, self.pane_rect(rect, pane_w, bi), base, row_h, font, pal.dim);
+                    lines_at(ui, self.pane_rect(rect, pane_w, bi), base, row_h, font, pal.dim, self.text_x);
                 }
             }
             Region::Same { lines, base } => {
                 for idx in [o_idx, r_idx, t_idx] {
                     let pr = self.pane_rect(rect, pane_w, idx);
                     ui.painter().rect_filled(pr, 0.0, pal.good.gamma_multiply(0.1));
-                    lines_at(ui, pr, lines, row_h, font, pal.text);
+                    lines_at(ui, pr, lines, row_h, font, pal.text, self.text_x);
                 }
                 if let Some(bi) = b_idx {
-                    lines_at(ui, self.pane_rect(rect, pane_w, bi), base, row_h, font, pal.dim);
+                    lines_at(ui, self.pane_rect(rect, pane_w, bi), base, row_h, font, pal.dim, self.text_x);
                 }
             }
             Region::Conflict { base, ours, theirs, resolution } => {
@@ -703,10 +760,10 @@ impl MergeView {
                 let (op, tp) = (self.pane_rect(body, pane_w, o_idx), self.pane_rect(body, pane_w, t_idx));
                 ui.painter().rect_filled(op, 0.0, fill);
                 ui.painter().rect_filled(tp, 0.0, fill);
-                lines_at(ui, op, ours, row_h, font, pal.text);
-                lines_at(ui, tp, theirs, row_h, font, pal.text);
+                lines_at(ui, op, ours, row_h, font, pal.text, self.text_x);
+                lines_at(ui, tp, theirs, row_h, font, pal.text, self.text_x);
                 if let Some(bi) = b_idx {
-                    lines_at(ui, self.pane_rect(body, pane_w, bi), base, row_h, font, pal.dim);
+                    lines_at(ui, self.pane_rect(body, pane_w, bi), base, row_h, font, pal.dim, self.text_x);
                 }
 
                 // Toolbar for this conflict.
@@ -762,7 +819,7 @@ impl MergeView {
                     ui.painter().text(rp.center(), egui::Align2::CENTER_CENTER, "Choose a resolution above", prop(12.0), pal.warn);
                 } else {
                     ui.painter().rect_filled(rp, 0.0, pal.good.gamma_multiply(0.08));
-                    lines_at(ui, rp, &resolved_lines(base, ours, theirs, resolution), row_h, font, pal.text);
+                    lines_at(ui, rp, &resolved_lines(base, ours, theirs, resolution), row_h, font, pal.text, self.text_x);
                 }
                 let _ = cx;
             }
@@ -770,14 +827,20 @@ impl MergeView {
     }
 }
 
-fn lines_at(ui: &Ui, pane: Rect, lines: &[String], row_h: f32, font: f32, color: Color32) {
+/// One line, moved left by how far the panes are scrolled and kept inside its own pane.
+fn pane_text(ui: &Ui, r: Rect, text: &str, font: f32, color: Color32, scroll_x: f32) {
+    ui.painter().with_clip_rect(r.intersect(ui.clip_rect())).text(pos2(r.left() - scroll_x, r.center().y), egui::Align2::LEFT_CENTER, text, mono(font), color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lines_at(ui: &Ui, pane: Rect, lines: &[String], row_h: f32, font: f32, color: Color32, scroll_x: f32) {
     // Only those on screen: an open region can be most of a large file, in up to four panes.
     let clip = ui.clip_rect();
     let first = (((clip.top() - pane.top()) / row_h).floor().max(0.0) as usize).min(lines.len());
     let last = (((clip.bottom() - pane.top()) / row_h).ceil().max(0.0) as usize).clamp(first, lines.len());
     for (k, l) in lines.iter().enumerate().take(last).skip(first) {
         let y = pane.top() + k as f32 * row_h;
-        paint_text(ui, Rect::from_min_size(pos2(pane.left() + 6.0, y), vec2(pane.width() - 8.0, row_h)), plain(l), mono(font), color);
+        pane_text(ui, Rect::from_min_size(pos2(pane.left() + 6.0, y), vec2(pane.width() - 8.0, row_h)), plain(l), font, color, scroll_x);
     }
 }
 

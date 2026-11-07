@@ -48,6 +48,8 @@ pub struct GitOp {
     pub background: bool,
     /// This changes the repository's config by the user's own hand in gitem.
     pub own_config: bool,
+    /// Scratch files this op needs only while it runs.
+    pub remove_after: Vec<std::path::PathBuf>,
 }
 
 impl GitOp {
@@ -176,6 +178,14 @@ impl GitOp {
 
     /// Run all steps in order, stopping on the first hard failure.
     pub fn run(&self, git: &GitExe, cwd: Option<&Path>, cancel: Option<Arc<AtomicBool>>, on_line: &mut dyn FnMut(&str)) -> Result<Vec<GitOutput>> {
+        let result = self.run_steps(git, cwd, cancel, on_line);
+        for f in &self.remove_after {
+            let _ = std::fs::remove_file(f);
+        }
+        result
+    }
+
+    fn run_steps(&self, git: &GitExe, cwd: Option<&Path>, cancel: Option<Arc<AtomicBool>>, on_line: &mut dyn FnMut(&str)) -> Result<Vec<GitOutput>> {
         if let Some(why) = &self.refused {
             return Err(crate::Error::Git(why.clone()));
         }

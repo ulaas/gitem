@@ -571,7 +571,7 @@ impl Repo {
     pub fn worktree_file_is_binary(&self, path: &str) -> bool {
         use std::io::Read;
         let mut head = [0u8; 8000];
-        std::fs::File::open(self.root.join(path)).and_then(|mut f| f.read(&mut head)).is_ok_and(|n| crate::util::is_binary(&head[..n]))
+        std::fs::File::open(self.root.join(path)).and_then(|mut f| f.read(&mut head)).is_ok_and(|n| crate::util::is_binary(&head[..n]) && !crate::util::has_utf16_bom(&head[..n]))
     }
 
     pub fn tracked_files(&self, rev: Option<&str>) -> Result<Vec<String>> {

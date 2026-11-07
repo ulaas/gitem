@@ -224,16 +224,22 @@ impl ChangesView {
             return;
         };
         let st: &RepoStatus = &st;
-        // During a merge or similar, git prepares the commit message.
-        if st.op != RepoOp::None && self.applied_prepared_for != Some(st.op) && self.message.is_empty() {
+        // During a merge or similar, git prepares the commit message. A squash merge does too,
+        // though its only sign is a file. That file can outlive what was staged, so it counts
+        // only while there's something to commit.
+        let squash = squash_waiting(st);
+        if (st.op != RepoOp::None || squash) && self.applied_prepared_for != Some(st.op) && self.message.is_empty() {
             if let Some(m) = cx.repo.prepared_message() {
                 self.prefilled = m.clone();
                 self.message = m;
             }
             self.applied_prepared_for = Some(st.op);
         }
-        if st.op == RepoOp::None {
-            self.applied_prepared_for = None;
+        if st.op == RepoOp::None && !squash {
+            // Aborted: that message was for an operation that isn't happening any more.
+            if self.applied_prepared_for.take().is_some() && self.message == self.prefilled {
+                self.message.clear();
+            }
         }
 
         egui::Panel::bottom("commit-box").resizable(true).default_size(190.0).show(ui, |ui| self.commit_box(ui, cx, st));
@@ -316,7 +322,7 @@ impl ChangesView {
                             cx.run(ops::unstage_all(!st.head_sha.is_empty()));
                         } else {
                             // `reset` would cancel the operation. This also leaves conflicts as they are.
-                            let paths: Vec<String> = st.entries.iter().filter(|e| e.is_staged()).map(|e| e.path.clone()).collect();
+                            let paths: Vec<String> = st.entries.iter().filter(|e| e.is_staged()).flat_map(paths_to_unstage).collect();
                             cx.run(ops::unstage_during_op(&paths));
                         }
                     }
@@ -500,6 +506,12 @@ impl ChangesView {
             box_focused = ui.add(crate::widgets::text_area(&mut self.message).hint_text("Message (Ctrl+Enter to commit)").desired_rows(3).desired_width(f32::INFINITY)).has_focus();
         });
         let len = self.message.lines().next().unwrap_or("").chars().count();
+        if squash_waiting(st) {
+            ui.label(RichText::new("A squash merge is staged. Git has made it no commit yet: committing this is what records it.").small().color(p.dim));
+        }
+        if self.message.lines().nth(1).is_some_and(|l| !l.trim().is_empty()) {
+            ui.label(RichText::new("Leave the second line blank: git and most tools read the first line alone as the subject.").small().color(p.warn));
+        }
         ui.horizontal(|ui| {
             if ui.checkbox(&mut self.amend, "Amend").changed() && self.amend && self.message.trim().is_empty() {
                 self.amend_message.spawn_git(ui.ctx(), cx.repo, |r| r.commit("HEAD").map(|c| c.message()));
@@ -584,14 +596,16 @@ impl ChangesView {
         }
         let paths: Vec<String> = self.selected.iter().cloned().collect();
         let tracked: Vec<String> = st.entries.iter().filter(|e| self.selected.contains(&e.path) && e.worktree != FileStatus::Untracked && e.is_unstaged()).map(|e| e.path.clone()).collect();
+        // Only what's staged: git refuses the whole list over one name it doesn't know.
+        let staged: Vec<String> = st.entries.iter().filter(|e| self.selected.contains(&e.path) && e.is_staged()).flat_map(paths_to_unstage).collect();
         ui.horizontal(|ui| {
             ui.label(format!("{} selected", paths.len()));
             if ui.small_button("Stage").clicked() {
                 cx.run(ops::stage_paths(&paths));
                 self.selected.clear();
             }
-            if ui.small_button("Unstage").clicked() {
-                cx.run(ops::unstage_paths(&paths, !st.head_sha.is_empty()));
+            if !staged.is_empty() && ui.small_button("Unstage").clicked() {
+                cx.run(ops::unstage_paths(&staged, !st.head_sha.is_empty()));
                 self.selected.clear();
             }
             if ui.small_button("Stash…").clicked() {
@@ -678,7 +692,11 @@ fn folder_menu(ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section, rows
     match section {
         Section::Staged => {
             if ui.button(format!("Unstage {count} file(s)")).clicked() {
-                cx.run(ops::unstage_paths(&targets(), !st.head_sha.is_empty()));
+                let mut names = targets();
+                // A rename into this folder from elsewhere goes back whole.
+                let inside = format!("{folder}/");
+                names.extend(st.entries.iter().filter(|e| e.is_staged() && e.path.starts_with(&inside)).filter_map(|e| e.orig_path.clone()));
+                cx.run(ops::unstage_paths(&names, !st.head_sha.is_empty()));
                 ui.close();
             }
             ui.separator();
@@ -722,11 +740,13 @@ fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf) {
             cx.open(Tab::merge(&e.path));
             ui.close();
         }
-        if ui.button(format!("Take {ours}…")).clicked() {
+        // A side with no version of the file has nothing to take.
+        let (has_ours, has_theirs) = conflict_sides(&code);
+        if has_ours && ui.button(format!("Take {ours}…")).clicked() {
             cx.confirm("Resolve conflict", &format!("Replace {} with {ours}? Changes from the other side are discarded.", e.path), "Replace", ops::checkout_conflict_side(&e.path, false));
             ui.close();
         }
-        if ui.button(format!("Take {theirs}…")).clicked() {
+        if has_theirs && ui.button(format!("Take {theirs}…")).clicked() {
             cx.confirm("Resolve conflict", &format!("Replace {} with {theirs}? Changes from the other side are discarded.", e.path), "Replace", ops::checkout_conflict_side(&e.path, true));
             ui.close();
         }
@@ -745,6 +765,27 @@ fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf) {
             ui.close();
         }
     });
+}
+
+/// Whether (ours, theirs) have a version of a conflicted file, from its status code.
+pub fn conflict_sides(code: &str) -> (bool, bool) {
+    match code {
+        "DD" => (false, false),
+        "DU" | "UA" => (false, true),
+        "UD" | "AU" => (true, false),
+        _ => (true, true),
+    }
+}
+
+/// A squash merge staged and not yet committed.
+fn squash_waiting(st: &RepoStatus) -> bool {
+    st.squash_pending && st.entries.iter().any(|e| e.is_staged())
+}
+
+/// The names that take a staged file back out of the index. Its old name too if it's a
+/// rename, or that half stays staged as a deletion for the next commit to pick up.
+fn paths_to_unstage(e: &StatusEntry) -> Vec<String> {
+    std::iter::once(e.path.clone()).chain(e.orig_path.clone()).collect()
 }
 
 fn conflict_help(code: &str) -> &'static str {
@@ -784,18 +825,18 @@ fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, select
     let is_selected = selected.contains(&e.path);
     let resp = changed_file_row(ui, &ch, is_selected, leaf, &p);
     if row_button(ui, &resp, crate::chrome::icon::MINUS, &format!("Unstage {}", e.path), is_selected, &p) {
-        cx.run(ops::unstage_paths(std::slice::from_ref(&e.path), !st.head_sha.is_empty()));
+        cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty()));
     }
     if select_click(ui, &resp, &e.path, selected) {
     } else if resp.clicked() {
         cx.diff(DiffSource::Staged, Some(&e.path));
     }
     if resp.double_clicked() {
-        cx.run(ops::unstage_paths(std::slice::from_ref(&e.path), !st.head_sha.is_empty()));
+        cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty()));
     }
     resp.context_menu(|ui| {
         if ui.button("Unstage").clicked() {
-            cx.run(ops::unstage_paths(std::slice::from_ref(&e.path), !st.head_sha.is_empty()));
+            cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty()));
             ui.close();
         }
         if ui.button("Open changes").clicked() {
@@ -843,7 +884,12 @@ fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, selected: &mut HashSe
                 ui.close();
             }
             if ui.button("Delete file…").clicked() {
-                cx.confirm("Delete file", &format!("Permanently delete the untracked file {}?", e.path), "Delete", ops::delete_untracked(std::slice::from_ref(&e.path)));
+                if cx.repo.is_nested_repo(&e.path) {
+                    // `git clean` would leave it alone and report success.
+                    cx.error(format!("{} is a Git repository of its own, with its own history. gitem won't delete that: remove the folder by hand if you're sure.", e.path));
+                } else {
+                    cx.confirm("Delete file", &format!("Permanently delete the untracked file {}?", e.path), "Delete", ops::delete_untracked(std::slice::from_ref(&e.path)));
+                }
                 ui.close();
             }
         } else if ui.button("Discard changes…").clicked() {
@@ -855,6 +901,26 @@ fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, selected: &mut HashSe
     });
 }
 
+/// A rule matching exactly this path. The leading slash ties it to the top of the repository,
+/// and takes care of a name starting with `#` or `!`.
+pub fn gitignore_entry(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 1);
+    out.push('/');
+    for c in path.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    // Trailing spaces are dropped from a rule unless marked.
+    let spaces = out.len() - out.trim_end_matches(' ').len();
+    if spaces > 0 {
+        out.truncate(out.len() - spaces);
+        out.push_str(&"\\ ".repeat(spaces));
+    }
+    out
+}
+
 pub fn add_to_gitignore(cx: &mut Cx, path: &str) {
     use std::io::Write;
     let file = cx.repo.ignore_path();
@@ -863,7 +929,7 @@ pub fn add_to_gitignore(cx: &mut Cx, path: &str) {
         if needs_nl {
             f.write_all(b"\n")?;
         }
-        f.write_all(format!("/{path}\n").as_bytes())
+        f.write_all(format!("{}\n", gitignore_entry(path)).as_bytes())
     });
     match r {
         Ok(()) => cx.toast(format!("Ignored {path}")),

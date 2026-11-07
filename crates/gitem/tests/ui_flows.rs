@@ -750,9 +750,14 @@ fn non_utf8_conflicts_are_never_rewritten_as_text() {
     let mut h = harness(&f);
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::merge("t.txt"));
-    pump_for_label(&mut h, "Keep theirs");
+    pump_for_label(&mut h, "Keep theirs…");
     assert!(h.query_by_label("Save and mark resolved").is_none(), "no text merge is offered");
-    click(&mut h, "Keep theirs");
+    click(&mut h, "Keep theirs…");
+    pump_for_label(&mut h, "Keep");
+    for _ in 0..3 {
+        h.step();
+    }
+    click(&mut h, "Keep");
     wait_for(&mut h, "conflict cleared", || !f.git(&["status", "--short"]).contains("UU"));
     assert_eq!(std::fs::read(f.root.join("t.txt")).unwrap(), b"caf\xe9 side\nkeep\n", "bytes preserved exactly");
 }
@@ -1051,9 +1056,14 @@ fn delete_the_file_resolves_a_conflict_with_a_deleted_side() {
     f.commit("change it");
     assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok());
     let mut h = harness(&f);
-    open_merge(&mut h, "Delete the file");
-    assert!(h.query_by_label("Keep theirs").is_none(), "that side has no file to keep");
-    click(&mut h, "Delete the file");
+    open_merge(&mut h, "Delete the file…");
+    assert!(h.query_by_label("Keep theirs…").is_none(), "that side has no file to keep");
+    click(&mut h, "Delete the file…");
+    pump_for_label(&mut h, "Delete");
+    for _ in 0..3 {
+        h.step();
+    }
+    click(&mut h, "Delete");
     wait_for(&mut h, "the file to be gone", || !f.root.join("c.txt").exists() && f.git(&["status", "--short"]).trim() == "D  c.txt");
     no_errors(&h);
 }
@@ -4694,7 +4704,7 @@ fn errors_people_often_meet_are_explained() {
         ("error: Your local changes to the following files would be overwritten by merge:", ErrorFix::Stash),
         ("fatal: No configured push destination.", ErrorFix::AddRemote),
         ("fatal: 'origin' does not appear to be a git repository", ErrorFix::AddRemote),
-        ("hint: You have divergent branches and need to specify how to reconcile divergent branches.", ErrorFix::PullOptions),
+        ("hint: You have divergent branches and need to specify how to reconcile divergent branches.", ErrorFix::Reconcile),
         (" ! [rejected] main -> main (non-fast-forward)", ErrorFix::PullOptions),
         ("fatal: Authentication failed for 'https://example.invalid/'", ErrorFix::Credentials),
         ("git@example.invalid: Permission denied (publickey).", ErrorFix::Credentials),
@@ -4966,4 +4976,711 @@ fn an_ai_message_fills_a_box_nobody_has_touched() {
         assert!(t.elapsed() < PATIENCE, "the message never came");
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+// ---- daily views: names, renames, filters ----------------------------------------------
+
+fn rename_staged(f: &Fx) {
+    f.write("old.txt", "one\ntwo\nthree\nfour\nfive\n");
+    f.commit("base");
+    f.git(&["mv", "old.txt", "new.txt"]);
+}
+
+/// The whole rename goes back, not half of it left staged as a deletion.
+#[test]
+fn unstaging_a_renamed_row_takes_back_both_names() {
+    let f = Fx::new();
+    rename_staged(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "new.txt");
+    h.get_by_label("new.txt").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Unstage");
+    wait_for(&mut h, "both names to be unstaged", || f.git(&["diff", "--cached", "--name-only"]).trim().is_empty());
+    let st = f.git(&["status", "--short"]);
+    assert!(st.contains(" D old.txt") && st.contains("?? new.txt"), "{st}");
+    no_errors(&h);
+}
+
+#[test]
+fn unstaging_from_a_rename_diff_also_takes_both() {
+    let f = Fx::new();
+    rename_staged(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Staged, Some("new.txt".into())));
+    pump_for_label(&mut h, "Unstage file");
+    assert!(h.query_by_label_contains("old.txt → new.txt").is_some(), "shown as the rename it is");
+    click(&mut h, "Unstage file");
+    wait_for(&mut h, "both names to be unstaged", || f.git(&["diff", "--cached", "--name-only"]).trim().is_empty());
+    no_errors(&h);
+}
+
+/// A binary file has no hunks, and the button used to go with them.
+#[test]
+fn stage_file_is_there_for_a_change_with_no_text() {
+    let f = Fx::new();
+    f.write("base.txt", "x\n");
+    f.commit("base");
+    std::fs::write(f.root.join("b.bin"), [0u8, 1, 2, 3, 0, 5]).unwrap();
+    f.git(&["add", "b.bin"]);
+    f.commit("add binary");
+    std::fs::write(f.root.join("b.bin"), [9u8, 0, 2, 3, 0, 5]).unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("b.bin".into())));
+    pump_for_label(&mut h, "Stage file");
+    click(&mut h, "Stage file");
+    wait_for(&mut h, "it to be staged", || f.git(&["diff", "--cached", "--name-only"]).trim() == "b.bin");
+}
+
+#[test]
+fn batch_unstage_leaves_out_what_isnt_staged() {
+    let f = Fx::new();
+    f.write("t.txt", "1\n");
+    f.commit("base");
+    f.write("t.txt", "2\n");
+    f.git(&["add", "t.txt"]);
+    f.write("u.txt", "new\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "t.txt");
+    h.get_by_label("t.txt").click_modifiers(egui::Modifiers::COMMAND);
+    h.step();
+    h.get_by_label("u.txt").click_modifiers(egui::Modifiers::COMMAND);
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "2 selected");
+    click(&mut h, "Unstage");
+    wait_for(&mut h, "t.txt to be unstaged", || f.git(&["diff", "--cached", "--name-only"]).trim().is_empty());
+    no_errors(&h);
+}
+
+#[test]
+fn a_nested_repository_isnt_deleted_with_a_false_ok() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit("base");
+    std::fs::create_dir(f.root.join("nested")).unwrap();
+    f.git.run(Some(&f.root.join("nested")), &["init", "-q"]).unwrap();
+    std::fs::write(f.root.join("nested/x"), "x").unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "nested/");
+    h.get_by_label("nested/").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Delete file…");
+    pump_for_error(&mut h);
+    assert!(h.state().errors_showing()[0].contains("repository of its own"));
+    assert!(f.root.join("nested/x").exists());
+}
+
+// ---- prepared messages --------------------------------------------------------------------
+
+fn changes_message(h: &Harness<GitemApp>) -> String {
+    h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Changes(c) = t { Some(c.message.clone()) } else { None }).unwrap()
+}
+
+#[test]
+fn a_squash_merge_fills_in_its_message_and_says_what_it_is() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.write("s.txt", "s\n");
+    f.commit("side work");
+    f.git(&["switch", "-q", "main"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::merge("side", ops::MergeMode::Squash)));
+    let t = Instant::now();
+    while !changes_message(&h).contains("side work") {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the message never came");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(h.query_by_label_contains("A squash merge is staged").is_some());
+    no_errors(&h);
+}
+
+#[test]
+fn an_aborted_merges_message_leaves_with_it() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    let t = Instant::now();
+    while changes_message(&h).is_empty() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the message never came");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::op_abort("merge")));
+    let t = Instant::now();
+    while !changes_message(&h).is_empty() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the merge's message stayed after the abort");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+/// Only an unchanged message goes. One the user touched is theirs.
+#[test]
+fn a_message_edited_during_a_merge_stays_after_the_abort() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    let t = Instant::now();
+    while changes_message(&h).is_empty() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the message never came");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    let input = egui::accesskit::Role::MultilineTextInput;
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text(" and more");
+    h.step();
+    h.step();
+    let typed = changes_message(&h);
+    assert!(typed.contains("and more"), "{typed}");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::op_abort("merge")));
+    settle(&mut h);
+    assert_eq!(changes_message(&h), typed);
+}
+
+#[test]
+fn a_message_with_no_blank_second_line_gets_a_note() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "Commit to main");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text("subject\nnot blank");
+    h.step();
+    h.step();
+    assert!(h.query_by_label_contains("Leave the second line blank").is_some());
+}
+
+// ---- the graph ----------------------------------------------------------------------------
+
+fn painted_y(h: &Harness<GitemApp>, text: &str) -> f32 {
+    painted_text(h).iter().find(|(_, _, t)| t == text).map(|x| x.0.y).unwrap_or_else(|| panic!("{text} isn't on screen"))
+}
+
+/// One row down shouldn't move the list when that row is already on screen, and the row
+/// the keyboard reaches is always brought into view.
+#[test]
+fn the_keyboard_only_scrolls_the_graph_when_it_has_to() {
+    let f = Fx::new();
+    for i in 0..120 {
+        f.git(&["commit", "-q", "--allow-empty", "-m", &format!("c{i:03}")]);
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    pump_for_label(&mut h, "c119");
+    click(&mut h, "c119");
+    h.step();
+    let before = painted_y(&h, "c117");
+    h.key_press(egui::Key::ArrowDown);
+    h.step();
+    h.step();
+    assert_eq!(painted_y(&h, "c117"), before, "the row was on screen, so nothing had to move");
+
+    // On past the bottom of the screen.
+    for _ in 0..90 {
+        h.key_press(egui::Key::ArrowDown);
+        h.step();
+    }
+    for _ in 0..4 {
+        h.step();
+    }
+    let selected = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Graph(g) = t { g.selected().last().cloned() } else { None }).unwrap();
+    let subject = f.git(&["log", "-1", "--format=%s", &selected]);
+    let y = painted_y(&h, subject.trim());
+    assert!(y > 0.0 && y < 940.0, "{} is off screen at {y}", subject.trim());
+    no_errors(&h);
+}
+
+#[test]
+fn a_search_that_fails_says_so_and_drops_old_highlights() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    pump_for_label(&mut h, "second");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    h.step();
+    h.step();
+    h.event(egui::Event::Text("foo(".into()));
+    h.step();
+    h.key_press(egui::Key::Enter);
+    let t = Instant::now();
+    while h.query_by_label_contains("Search failed").is_none() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "nothing said the search failed");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+/// `--all` always brought HEAD back, so this used to do nothing at all.
+#[test]
+fn hiding_the_current_branch_hides_it() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit("shared");
+    f.git(&["switch", "-q", "-c", "other"]);
+    f.write("o.txt", "o\n");
+    f.commit("on other");
+    f.git(&["switch", "-q", "main"]);
+    f.write("m.txt", "m\n");
+    f.commit("on main");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    pump_for_label(&mut h, "on main");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::GraphHide("main".into()));
+    settle(&mut h);
+    assert!(h.query_by_label("on main").is_none(), "main's own commit is still shown");
+    assert!(h.query_by_label("on other").is_some() && h.query_by_label("shared").is_some());
+    no_errors(&h);
+}
+
+#[test]
+fn hiding_with_a_dirty_tree_keeps_the_working_row_from_dangling() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit("shared");
+    f.git(&["switch", "-q", "-c", "other"]);
+    f.write("o.txt", "o\n");
+    f.commit("on other");
+    f.git(&["switch", "-q", "main"]);
+    f.write("m.txt", "m\n");
+    f.commit("on main");
+    f.write("a.txt", "dirty\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    pump_for_label(&mut h, "on main");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::GraphHide("main".into()));
+    settle(&mut h);
+    assert!(h.query_by_label("Work in progress").is_some());
+    assert!(h.query_by_label("on main").is_none());
+    no_errors(&h);
+}
+
+#[test]
+fn menu_presets_refuse_a_merge_and_a_commit_from_elsewhere() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.write("s.txt", "s\n");
+    f.commit("on side only");
+    f.git(&["switch", "-q", "main"]);
+    f.write("m.txt", "m\n");
+    f.commit("on main");
+    f.git(&["merge", "-q", "--no-ff", "-m", "the merge", "side"]);
+    f.git(&["switch", "-q", "-c", "elsewhere", "HEAD~1"]);
+    f.write("e.txt", "e\n");
+    f.commit("on elsewhere");
+    f.git(&["switch", "-q", "main"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    pump_for_label(&mut h, "the merge");
+    h.get_by_label("the merge").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Drop…");
+    pump_for_error(&mut h);
+    assert!(h.state().errors_showing()[0].contains("merge commit"), "{:?}", h.state().errors_showing());
+    assert!(!h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Rebase(_))));
+    h.key_press(egui::Key::Escape);
+    h.step();
+    h.step();
+    h.get_by_label("on elsewhere").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Reword…");
+    pump_for_error(&mut h);
+    assert!(h.state().errors_showing()[0].contains("isn't on the current branch"), "{:?}", h.state().errors_showing());
+    assert!(!h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Rebase(_))));
+}
+
+/// Saying no leaves everything as it was, and that includes the tabs.
+#[test]
+fn recompose_opens_the_composer_only_on_the_go_ahead() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    pump_for_label(&mut h, "first");
+    h.get_by_label("first").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Recompose from here…");
+    pump_for_label(&mut h, "Cancel");
+    for _ in 0..3 {
+        h.step();
+    }
+    let composer = |a: &GitemApp| a.repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Composer(_)));
+    assert!(!composer(h.state()), "before answering");
+    click(&mut h, "Cancel");
+    h.step();
+    assert!(!composer(h.state()), "after saying no");
+    assert_eq!(f.subjects()[0], "second");
+}
+
+// ---- file and line history -----------------------------------------------------------------
+
+fn renamed_file_history(f: &Fx) {
+    let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    f.write("old.txt", &body);
+    f.commit("create");
+    f.write("old.txt", &body.replace("line 3\n", "line three\n"));
+    f.commit("edit before rename");
+    f.git(&["mv", "old.txt", "new.txt"]);
+    f.commit("rename");
+    f.write("new.txt", &body.replace("line 3\n", "line three\n").replace("line 20\n", "line twenty\n"));
+    f.commit("edit after rename");
+}
+
+/// A row from before a rename used to show nothing, and an error for the file's contents.
+#[test]
+fn file_history_opens_a_commit_from_before_a_rename_by_its_name_then() {
+    let f = Fx::new();
+    renamed_file_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file_history("new.txt"));
+    pump_for_label(&mut h, "edit before rename");
+    wait_until_quiet(&mut h);
+    h.get_by_label("edit before rename").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Open this revision with blame");
+    pump_for_label(&mut h, "old.txt");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    let file = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::File(v) = t { Some(v.path.clone()) } else { None });
+    assert_eq!(file.as_deref(), Some("old.txt"));
+
+    h.state_mut().repos[0].open_tab(Tab::file_history("new.txt"));
+    h.step();
+    pump_for_label(&mut h, "edit before rename");
+    h.get_by_label("edit before rename").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Open changes to this file");
+    let t = Instant::now();
+    while !painted_text(&h).iter().any(|(_, _, x)| x.contains("line three")) {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the commit's diff never showed");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+/// Starting at a revision, each Newer goes one newer. It used to swing between two.
+#[test]
+fn newer_walks_forward_from_a_file_opened_at_a_revision() {
+    let f = Fx::new();
+    for i in 0..5 {
+        f.write("n.txt", &format!("{i}\n"));
+        f.commit(&format!("rev {i}"));
+    }
+    let shas: Vec<String> = f.git(&["log", "--reverse", "--format=%H"]).lines().map(String::from).collect();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("n.txt", Some(shas[1].clone()), None));
+    pump_for_label(&mut h, "Newer ▶");
+    let rev_of = |a: &GitemApp| a.repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::File(v) = t { Some(v.rev.clone()) } else { None }).flatten();
+    for want in &shas[2..] {
+        click(&mut h, "Newer ▶");
+        pump(&mut h, |a| rev_of(a).as_deref() == Some(want.as_str()), "the next revision");
+    }
+    no_errors(&h);
+}
+
+/// The numbers belong to the revision on screen, and `-L` counts in the revision it starts at.
+#[test]
+fn line_history_follows_the_revision_its_numbers_came_from() {
+    let f = Fx::new();
+    f.write("n.txt", "keep\nold line\n");
+    f.commit("old version");
+    let old = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut long = String::new();
+    for i in 0..10 {
+        long.push_str(&format!("pad {i}\n"));
+    }
+    f.write("n.txt", &format!("{long}keep\nold line\n"));
+    f.commit("padded out");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::line_history_at("n.txt", 2, 2, Some(old), None));
+    pump_for_label(&mut h, "old version");
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("padded out").is_none(), "a later commit can't be in the past of this revision");
+    no_errors(&h);
+}
+
+#[test]
+fn line_history_of_an_edited_file_says_its_numbers_may_be_off() {
+    let f = Fx::new();
+    f.write("n.txt", "a\nb\nc\n");
+    f.commit("base");
+    f.write("n.txt", "new\na\nb\nc\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    let note = Some("This file has uncommitted changes".to_string());
+    h.state_mut().repos[0].open_tab(Tab::line_history_at("n.txt", 1, 1, None, note));
+    pump_for_any(&mut h, "This file has uncommitted changes");
+}
+
+// ---- diff view ------------------------------------------------------------------------------
+
+/// Any file saved anywhere reloads a diff, which used to clear the lines picked for staging.
+#[test]
+fn a_reload_keeps_the_line_selection_unless_those_lines_changed() {
+    let f = Fx::new();
+    f.write("a.txt", "one\ntwo\nthree\n");
+    f.write("other.txt", "x\n");
+    f.commit("base");
+    f.write("a.txt", "one\nTWO\nthree\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("a.txt".into())));
+    pump_for_label(&mut h, "Stage file");
+    click(&mut h, "Unified");
+    wait_until_quiet(&mut h);
+    click_line(&mut h, "Stage hunk", 0, 2.0);
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Stage 1 selected line(s)");
+
+    f.write("other.txt", "changed elsewhere\n");
+    settle(&mut h);
+    assert!(h.query_by_label("Stage 1 selected line(s)").is_some(), "an unrelated file changed, and the selection was lost");
+
+    f.write("a.txt", "one\nDIFFERENT\nthree\n");
+    settle(&mut h);
+    assert!(h.query_by_label("Stage 1 selected line(s)").is_none(), "those lines changed, so the selection can't stand");
+}
+
+#[test]
+fn hiding_whitespace_takes_away_the_buttons_that_couldnt_apply() {
+    let f = Fx::new();
+    f.write("a.txt", "one\ntwo\n");
+    f.commit("base");
+    f.write("a.txt", "one\n  two\nthree\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("a.txt".into())));
+    pump_for_label(&mut h, "Stage hunk");
+    h.get_by_label("Whitespace: show").click();
+    h.step();
+    h.step();
+    click(&mut h, "Ignore all");
+    pump_for_any(&mut h, "Showing whitespace is needed to stage parts of a file");
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("Stage hunk").is_none());
+    assert!(h.query_by_label("Stage file").is_some(), "the whole file doesn't need a patch");
+}
+
+#[test]
+fn a_conflicted_file_says_so_in_the_diff_and_leads_to_the_merge_tool() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let path = f.git(&["diff", "--name-only", "--diff-filter=U"]).trim().to_string();
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some(path)));
+    pump_for_any(&mut h, "This file is in conflict");
+    assert!(h.query_by_label("Stage file").is_none());
+    click(&mut h, "Resolve in merge tool");
+    h.step();
+    assert!(merge_tab_open(&h));
+}
+
+// ---- merge view -----------------------------------------------------------------------------
+
+fn merge_view_of<'a>(h: &'a Harness<'_, GitemApp>) -> Option<&'a gitem::views::mergeview::MergeView> {
+    h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Merge(m) = t { Some(&**m) } else { None })
+}
+
+/// All the sides stay on screen, and a long line scrolls inside its pane.
+#[test]
+fn long_conflict_lines_can_be_scrolled_to_their_end() {
+    let f = Fx::new();
+    let long = |c: char| format!("{}END\n", c.to_string().repeat(800));
+    f.write("c.txt", "base\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "other"]);
+    f.write("c.txt", &long('t'));
+    f.commit("theirs");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", &long('o'));
+    f.commit("ours");
+    assert!(!f.git.run_raw(Some(&f.root), &["merge", "other"]).unwrap().ok());
+    let mut h = harness(&f);
+    open_merge(&mut h, "Take ours");
+    let row = h.get_by_label("Take ours").rect().center() + vec2(0.0, 40.0);
+    assert_eq!(merge_view_of(&h).unwrap().text_scroll(), 0.0);
+    let start = painted_text(&h).into_iter().find(|(_, _, t)| t.starts_with("ooo")).expect("ours is on screen");
+    h.event(egui::Event::PointerMoved(row));
+    h.step();
+    h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(-400.0, 0.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+    for _ in 0..30 {
+        h.step();
+    }
+    assert!(merge_view_of(&h).unwrap().text_scroll() > 0.0, "the wheel didn't reach the panes");
+    let moved = painted_text(&h).into_iter().find(|(_, _, t)| t.starts_with("ooo")).expect("ours is still on screen");
+    assert!(moved.0.x < start.0.x, "the text didn't move");
+    assert_eq!(moved.1, start.1, "it stays inside its own pane");
+    assert!(h.query_by_label("Take ours").is_some(), "the conflict's buttons stay where they are");
+}
+
+#[test]
+fn the_first_jump_goes_to_the_first_conflict() {
+    let f = Fx::new();
+    make_two_conflicts(&f);
+    let mut h = harness(&f);
+    open_merge(&mut h, "All ours");
+    assert_eq!(merge_view_of(&h).unwrap().current_conflict(), None);
+    h.get_by_label("▼").click();
+    h.step();
+    h.step();
+    assert_eq!(merge_view_of(&h).unwrap().current_conflict(), Some(0));
+    h.get_by_label("▼").click();
+    h.step();
+    h.step();
+    assert_eq!(merge_view_of(&h).unwrap().current_conflict(), Some(1));
+}
+
+/// A deleted side has nothing to take, and asking for it was only an error from git.
+#[test]
+fn a_conflict_row_offers_only_the_sides_that_exist() {
+    use gitem::views::changes::conflict_sides;
+    assert_eq!(conflict_sides("UU"), (true, true));
+    assert_eq!(conflict_sides("AA"), (true, true));
+    assert_eq!(conflict_sides("DU"), (false, true));
+    assert_eq!(conflict_sides("UD"), (true, false));
+    assert_eq!(conflict_sides("AU"), (true, false));
+    assert_eq!(conflict_sides("UA"), (false, true));
+    assert_eq!(conflict_sides("DD"), (false, false));
+}
+
+#[test]
+fn a_gitignore_entry_matches_that_file_alone() {
+    let f = Fx::new();
+    f.write("a.txt", "x");
+    f.commit("base");
+    // Asked by name, as Windows wouldn't allow some of these as files.
+    for (name, near_miss) in [("a[1].txt", "a1.txt"), ("what?.txt", "whatX.txt"), ("sta*r.txt", "staxxr.txt"), ("#hash.txt", "hash.txt"), ("!bang.txt", "bang.txt"), ("sub dir/back up.txt", "sub dir/other.txt"), ("ends in space ", "ends in space")] {
+        let entry = gitem::views::changes::gitignore_entry(name);
+        f.write(".gitignore", &format!("{entry}\n"));
+        let ignored = |p: &str| f.git.run_raw(Some(&f.root), &["check-ignore", "-q", "--no-index", "--", p]).unwrap().ok();
+        assert!(ignored(name), "{entry} doesn't ignore {name}");
+        assert!(!ignored(near_miss), "{entry} also ignores {near_miss}");
+    }
+}
+
+// ---- file view -------------------------------------------------------------------------------
+
+#[test]
+fn a_utf16_file_reads_as_text_and_says_which_it_is() {
+    let f = Fx::new();
+    let bytes: Vec<u8> = [0xff, 0xfe].into_iter().chain("first line\nsecond line\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    std::fs::write(f.root.join("u.txt"), bytes).unwrap();
+    f.commit("utf-16");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("u.txt", None, None));
+    pump_for_any(&mut h, "UTF-16");
+    wait_until_quiet(&mut h);
+    assert!(painted_text(&h).iter().any(|(_, _, t)| t.contains("second line")));
+    let sha = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    h.state_mut().repos[0].open_tab(Tab::file("u.txt", Some(sha), None));
+    h.step();
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn a_file_that_isnt_utf8_reads_as_a_guess_and_says_so() {
+    let f = Fx::new();
+    std::fs::write(f.root.join("l.txt"), b"caf\xe9 au lait\n").unwrap();
+    f.commit("latin-1");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("l.txt", None, None));
+    pump_for_any(&mut h, "Latin-1 (a guess: not UTF-8)");
+    wait_until_quiet(&mut h);
+    assert!(painted_text(&h).iter().any(|(_, _, t)| t.contains("caf\u{e9} au lait")));
+}
+
+#[test]
+fn a_picture_shows_as_a_picture() {
+    let f = Fx::new();
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    std::fs::write(f.root.join("p.png"), &png).unwrap();
+    f.commit("picture");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("p.png", None, None));
+    pump_for_any(&mut h, "3 × 2 px");
+    assert!(h.query_by_label("Binary file").is_none());
+}
+
+// ---- a right click means the line under it ----------------------------------------------------
+
+#[test]
+fn a_right_click_outside_the_selection_is_about_that_line() {
+    let f = Fx::new();
+    f.write("n.txt", "one\ntwo\nthree\nfour\nfive\n");
+    f.commit("base");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("n.txt", None, None));
+    pump_for_label(&mut h, "◀ Older");
+    wait_until_quiet(&mut h);
+    let spot = |h: &Harness<GitemApp>, t: &str| painted_text(h).into_iter().find(|(_, _, x)| x == t).map(|x| x.0).unwrap_or_else(|| panic!("{t} isn't on screen"));
+    let two = spot(&h, "two") + vec2(4.0, 6.0);
+    click_at(&mut h, two);
+    h.step();
+    pump_for_any(&mut h, "Line history 2-2");
+    let p = spot(&h, "five") + vec2(4.0, 6.0);
+    h.event(egui::Event::PointerMoved(p));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.step();
+    pump_for_any(&mut h, "Line history (5-5)");
 }

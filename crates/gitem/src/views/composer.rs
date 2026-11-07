@@ -124,14 +124,15 @@ impl ComposerView {
             let busy = self.suggest.busy();
             if ui.add_enabled(!busy && !changed.is_empty(), egui::Button::new("Suggest with AI")).on_hover_text("Sends the diff of tracked files to your AI provider").clicked() {
                 let (repo, cfg) = (cx.repo.clone(), cx.settings.ai.clone());
-                let paths = changed.clone();
+                let untracked: Vec<String> = st.entries.iter().filter(|e| e.worktree == gitem_core::model::FileStatus::Untracked).map(|e| e.path.clone()).collect();
                 self.suggest.spawn(ui.ctx(), move || -> Result<Vec<ComposedCommit>, String> {
                     let mut diff = repo.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?;
-                    // Untracked files have no diff, so list them by name.
-                    let tracked: Vec<&String> = paths.iter().filter(|p| !diff.contains(p.as_str()) && !repo.ai_ignored(p)).collect();
-                    if !tracked.is_empty() {
+                    // Untracked files have no diff, so list them by name. From the status, not by
+                    // looking for the name in the diff, where `a.txt` is found inside `data.txt`.
+                    let listed: Vec<&String> = untracked.iter().filter(|p| !repo.ai_ignored(p)).collect();
+                    if !listed.is_empty() {
                         diff.push_str("\n\nNew untracked files:\n");
-                        for t in tracked {
+                        for t in listed {
                             diff.push_str(t);
                             diff.push('\n');
                         }

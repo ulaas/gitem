@@ -205,6 +205,78 @@ fn deleting_a_branch_on_a_remote_with_a_slash_in_its_name_names_that_remote() {
     assert_eq!(git().run(None, &[&bare_dir, "branch", "--list"]).unwrap().text().trim(), "");
 }
 
+// ---- graph filters --------------------------------------------------------------------
+
+/// A branch with merges from short-lived side branches.
+fn merges(f: &Fx, n: usize) {
+    f.write("a", "a\n");
+    f.commit("root");
+    for i in 0..n {
+        f.q(&["switch", "-qc", &format!("s{i}")]);
+        f.write(&format!("s{i}"), "s\n");
+        f.commit(&format!("side {i}"));
+        f.q(&["switch", "-q", "main"]);
+        f.write(&format!("m{i}"), "m\n");
+        f.commit(&format!("main {i}"));
+        f.q(&["merge", "-q", "--no-ff", "-m", &format!("merge {i}"), &format!("s{i}")]);
+    }
+}
+
+fn widest(commits: &[Commit]) -> u16 {
+    gitem_core::graph::layout(commits).iter().map(|r| r.width).max().unwrap_or(0)
+}
+
+/// Each hidden parent used to start a lane that never ended, so the graph got wider all the
+/// way down.
+#[test]
+fn graph_filters_dont_leave_lanes_running_to_nowhere() {
+    let f = Fx::new();
+    merges(&f, 6);
+    let q = LogQuery { revs: vec!["HEAD".into()], ..Default::default() };
+    let all = f.repo.log(&q).unwrap();
+    assert!(widest(&all) <= 3, "as a yardstick: {}", widest(&all));
+
+    let q = LogQuery { revs: vec!["HEAD".into()], first_parent: true, ..Default::default() };
+    let c = f.repo.log(&q).unwrap();
+    assert!(widest(&c) > 2, "the bug this is for needs to show up: {}", widest(&c));
+    let shaped = gitem_core::graph::parents_for_filters(&c, true, None);
+    assert_eq!(widest(&shaped), 1);
+
+    let q = LogQuery { revs: vec!["HEAD".into()], no_merges: true, ..Default::default() };
+    let c = f.repo.log(&q).unwrap();
+    assert!(c.iter().all(|x| !x.is_merge()));
+    assert!(widest(&c) > 3, "the bug this is for needs to show up: {}", widest(&c));
+    let map = f.repo.merge_first_parents(&q).unwrap();
+    assert_eq!(map.len(), 6);
+    let shaped = gitem_core::graph::parents_for_filters(&c, false, Some(&map));
+    assert!(widest(&shaped) <= 2, "{}", widest(&shaped));
+    let shas: Vec<&str> = c.iter().map(|x| x.sha.as_str()).collect();
+    for x in &shaped {
+        for p in &x.parents {
+            assert!(shas.contains(&p.as_str()), "{} has a parent that isn't in the list", x.subject);
+        }
+    }
+    assert!(c.iter().any(|x| x.subject == "main 5" && x.parents.len() == 1), "what menus act on keeps its real parents");
+}
+
+#[test]
+fn hiding_only_needs_the_refs_that_remain() {
+    let f = Fx::new();
+    f.write("a", "a\n");
+    f.commit("shared");
+    f.q(&["switch", "-qc", "other"]);
+    f.write("o", "o\n");
+    f.commit("on other");
+    f.q(&["switch", "-q", "main"]);
+    f.write("m", "m\n");
+    f.commit("on main");
+    let q = LogQuery { all: true, excludes: vec!["refs/heads/main".into()], ..Default::default() };
+    assert_eq!(f.repo.log(&q).unwrap().len(), 3, "--all brings HEAD back, which is what this is about");
+    let q = LogQuery { all_refs_only: true, excludes: vec!["refs/heads/main".into()], ..Default::default() };
+    let got: Vec<String> = f.repo.log(&q).unwrap().into_iter().map(|c| c.subject).collect();
+    assert_eq!(got, vec!["on other", "shared"]);
+}
+
 // ---- commit data ----------------------------------------------------------------------
 
 /// Commits with a record separator in them used to vanish, or lose their body.
@@ -640,7 +712,7 @@ fn a_broken_submodule_mapping_is_an_error_not_an_empty_list() {
     let sha = git().run(Some(inner.path()), &["rev-parse", "HEAD"]).unwrap().text().trim().to_string();
     f.q(&["update-index", "--add", "--cacheinfo", &format!("160000,{sha},lib")]);
     f.write(".gitmodules", "[submodule \"other\"]\n\tpath = elsewhere\n\turl = https://example.invalid/x\n");
-    let e = f.repo.submodules().err().expect("the mapping is broken").to_string();
+    let e = f.repo.submodules().unwrap_err().to_string();
     assert!(e.contains("lib"), "{e}");
 }
 

@@ -103,11 +103,15 @@ impl RebaseView {
         if self.loaded.poll()
             && let Some(v) = self.loaded.value.take() {
                 self.items = v;
-                if let Some((sha, action)) = self.pending.take()
-                    && let Some(i) = self.items.iter().position(|x| x.sha == sha)
-                {
-                    self.items[i].action = action;
-                    self.selected = i;
+                if let Some((sha, action)) = self.pending.take() {
+                    match self.items.iter().position(|x| x.sha == sha) {
+                        Some(i) => {
+                            self.items[i].action = action;
+                            self.selected = i;
+                        }
+                        // Better said than a plan that looks as if it will do what was asked.
+                        None => cx.error(format!("{} isn't one of these commits, so \"{}\" hasn't been set on anything.", gitem_core::util::prefix(&sha, 8), action.keyword())),
+                    }
                 }
             }
         self.planned_head.poll();

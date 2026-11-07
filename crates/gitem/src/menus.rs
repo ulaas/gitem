@@ -75,8 +75,9 @@ pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
         && item(ui, "Push up to this commit…") {
             cx.confirm("Push to commit", &format!("Push {branch} to {remote} only up to {short}?"), "Push", ops::push_to_commit(&remote, &sha, &branch));
         }
-    if item(ui, "Squash fixups from here")
-        && let Some(p) = c.parents.first() {
+    // Not on a first commit: there's nothing before it to rebase onto.
+    if let Some(p) = c.parents.first()
+        && item(ui, "Squash fixups from here") {
             cx.run(ops::squash_fixups(p));
         }
     if item(ui, "Recompose from here…") {
@@ -157,6 +158,16 @@ pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
 /// Open the rebase editor with one commit's action already chosen, for review.
 fn open_plan(cx: &mut Cx, c: &Commit, action: gitem_core::rebase::RebaseAction, needs_previous: bool) {
     use crate::views::rebase::RebaseView;
+    // Neither can be in a plan: a rebase replays merges as linear history, and starting one
+    // from another branch's commit would rebase this branch onto that commit, unasked.
+    if c.is_merge() {
+        cx.error(format!("{} is a merge commit, and a rebase can't change one on its own. It replays merges as plain history.", c.short()));
+        return;
+    }
+    if !cx.repo.is_ancestor(&c.sha, "HEAD") {
+        cx.error(format!("{} isn't on the current branch, so rebasing can't change it. Switch to a branch that has it first.", c.short()));
+        return;
+    }
     // A squash also rewrites the commit it folds into, so the plan starts one earlier.
     let base = if needs_previous { c.parents.first().map(|p| format!("{p}~1")).filter(|b| cx.repo.resolve(b).is_ok()) } else { c.parents.first().cloned() };
     let mut view = match base {
@@ -168,12 +179,15 @@ fn open_plan(cx: &mut Cx, c: &Commit, action: gitem_core::rebase::RebaseAction, 
 }
 
 fn recompose(cx: &mut Cx, base: &str) {
-    cx.confirm("Recompose", &format!("Undo the commits after {}, keeping all their changes in the working tree, then arrange them into new commits? Commit messages are not kept. The reflog can restore them.", gitem_core::util::prefix(base, 10)), "Recompose", ops::recompose_reset(base));
-    cx.open(Tab::Composer(Box::default()));
+    let base = base.to_string();
+    // Its tab comes with the go-ahead: saying no leaves everything as it was.
+    cx.form(forms::FormDialog::new("Recompose", "Recompose").info(format!("Undo the commits after {}, keeping all their changes in the working tree, then arrange them into new commits? Commit messages are not kept. The reflog can restore them.", gitem_core::util::prefix(&base, 10))).on_submit(move |_| Ok(vec![Action::Run(ops::recompose_reset(&base)), Action::OpenTab(Tab::Composer(Box::default()))])));
 }
 
 pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
     let name = b.name.clone();
+    // The short name would mean a tag of the same name, if there is one.
+    let rev = b.rev_among(cx.data.tags());
     if !b.is_current {
         if b.is_remote {
             if item(ui, "Check out as local branch") {
@@ -183,18 +197,18 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             cx.run(ops::checkout(&name));
         }
         if item(ui, "Merge into current…") {
-            cx.form(forms::merge_form(name.clone()));
+            cx.form(forms::merge_form(rev.clone()));
         }
         if item(ui, "Rebase current onto this…") {
-            cx.form(forms::rebase_form(name.clone()));
+            cx.form(forms::rebase_form(rev.clone()));
         }
         if item(ui, "Interactive rebase onto this…") {
-            cx.open(Tab::rebase(Some(name.clone())));
+            cx.open(Tab::rebase(Some(rev.clone())));
         }
         ui.separator();
     }
     if item(ui, "Focus in graph") {
-        cx.out.push(Action::GraphFocus(name.clone()));
+        cx.out.push(Action::GraphFocus(rev.clone()));
     }
     if item(ui, "Hide in graph") {
         cx.out.push(Action::GraphHide(name.clone()));
@@ -212,17 +226,17 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
     }
     ui.separator();
     if item(ui, "Compare with HEAD") {
-        cx.open(Tab::compare("HEAD", &name));
+        cx.open(Tab::compare("HEAD", &rev));
     }
     if item(ui, "Compare with working tree") {
-        cx.diff(DiffSource::WorkingVs(name.clone()), None);
+        cx.diff(DiffSource::WorkingVs(rev.clone()), None);
     }
     if !b.is_current {
         if item(ui, "Open all changes with common base") {
-            cx.diff(DiffSource::MergeBase("HEAD".to_string(), name.clone()), None);
+            cx.diff(DiffSource::MergeBase("HEAD".to_string(), rev.clone()), None);
         }
         if item(ui, "Auto-rebase current onto this with AI…") {
-            let (n, r, cfg) = (name.clone(), cx.repo.clone(), cx.settings.ai.clone());
+            let (n, r, cfg) = (rev.clone(), cx.repo.clone(), cx.settings.ai.clone());
             let title = format!("Auto-rebase onto {name}");
             let jobs = cx.data.jobs.clone();
             cx.form(forms::FormDialog::new(title.clone(), "Start").info("Rebases the current branch, sending each conflict to your AI provider. It stops and leaves the rebase to you if the model is unsure, and also once it has resolved a commit's conflicts, so you can read the result before anything is committed from it. You can undo it afterwards, unless your uncommitted changes are in a file the undo has to change: then it stops and changes nothing.").check("unattended", "Don't stop for review: commit the model's answers and carry on", false).on_submit(move |v| {
@@ -250,7 +264,7 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             }));
         }
         if item(ui, "Check for conflicts with current") {
-            let (r, n) = (cx.repo.clone(), name.clone());
+            let (r, n) = (cx.repo.clone(), rev.clone());
             cx.out.push(Action::Background(Box::new(move || {
                 let files = r.predict_conflicts("HEAD", &n).map_err(|e| e.to_string())?;
                 Ok(if files.is_empty() { format!("{n} would merge cleanly.") } else { format!("{n} would conflict in {} file(s): {}", files.len(), files.join(", ")) })
@@ -258,7 +272,7 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         }
     }
     if item(ui, "Explain with AI") {
-        let (n, base) = (name.clone(), cx.data.base_branch());
+        let (n, base) = (rev.clone(), cx.data.base_branch());
         crate::views::textview::ai_tab(cx, &format!("Explain {n}"), move |r| {
             let e = |x: gitem_core::Error| x.to_string();
             let commits = r.log(&LogQuery { revs: vec![format!("{base}..{n}")], limit: 200, ..Default::default() }).map_err(e)?;
@@ -276,17 +290,17 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         }
     }
     if item(ui, "Search commits on this branch") {
-        cx.open(Tab::search(&format!("ref:{name}")));
+        cx.open(Tab::search(&format!("ref:{rev}")));
     }
     if item(ui, "Create branch from this…") {
-        cx.form(forms::new_branch(Some(name.clone())));
+        cx.form(forms::new_branch(Some(rev.clone())));
     }
     if item(ui, "Create worktree…") {
         let refs = cx.data.ref_names();
         cx.form(forms::add_worktree(cx.repo, refs, Some(name.clone())));
     }
     if item(ui, "Create tag…") {
-        cx.form(forms::new_tag(Some(name.clone())));
+        cx.form(forms::new_tag(Some(rev.clone())));
     }
     ui.separator();
     if !b.is_remote {
@@ -386,6 +400,17 @@ pub fn stash_menu(ui: &mut Ui, cx: &mut Cx, s: &Stash) {
     }
     if item(ui, "Open changes") {
         cx.diff(DiffSource::Commit(s.sha.clone()), None);
+    }
+    if item(ui, "Open untracked files") {
+        // Kept in a third parent commit of its own, which only some stashes have.
+        let (repo, sha) = (cx.repo.clone(), s.sha.clone());
+        cx.out.push(Action::Later(Box::new(move || {
+            let third = format!("{sha}^3");
+            Ok(match repo.resolve(&third) {
+                Ok(found) => crate::action::Later::Diff(DiffSource::Commit(found), None),
+                Err(_) => crate::action::Later::Toast("This stash has no untracked files.".to_string()),
+            })
+        })));
     }
     if item(ui, "Apply") {
         cx.run(ops::only_if_stash_is(ops::stash_apply(&sel, false, false), &sel, &s.sha));

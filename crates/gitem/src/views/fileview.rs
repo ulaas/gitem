@@ -43,6 +43,10 @@ struct FileData {
     /// The widest line as drawn. Worked out once: there can be a million lines.
     max_chars: usize,
     syntax: Vec<Spans>,
+    /// The encoding the text was read in, if not UTF-8.
+    encoding: Option<&'static str>,
+    /// The picture, until it becomes a texture.
+    image: Option<egui::ColorImage>,
     blame: Vec<BlameLine>,
     /// 0-based new-file line -> change kind compared with HEAD.
     changes: HashMap<usize, LineKind>,
@@ -72,7 +76,8 @@ pub struct FileView {
     pub rev: Option<String>,
     target_line: Option<u32>,
     data: Task<FileData>,
-    nav: Task<Option<(String, String)>>,
+    /// A revision to go to, and whether it's further back (so "Newer" can retrace it).
+    nav: Task<Option<(String, String, bool)>>,
     /// Where "Older" came from, so "Newer" retraces it even across renames.
     trail: Vec<(Option<String>, String)>,
     annot: Annot,
@@ -93,7 +98,11 @@ pub struct FileView {
     /// Long lines' jobs, by line: they're what a frame of a minified file spends its time on.
     /// Jobs and not galleys, which are tied to the font atlas of the moment.
     long_jobs: HashMap<(usize, u32), egui::text::LayoutJob>,
+    picture: Option<egui::TextureHandle>,
 }
+
+/// Bigger than this isn't decoded for showing. As in the diff view.
+const MAX_SHOWN_IMAGE: usize = 32 * 1024 * 1024;
 
 fn symbol_regex() -> Regex {
     Regex::new(r"^\s*(pub(\([a-z]+\))?\s+)?(async\s+)?(export\s+)?(default\s+)?(public\s+|private\s+|protected\s+|internal\s+|static\s+)*(fn|func|function|def|class|struct|enum|trait|impl|interface|module|namespace|type|sub)\s+\w+").expect("valid regex")
@@ -164,6 +173,7 @@ impl FileView {
             code_lens: None,
             force_blame: false,
             long_jobs: HashMap::new(),
+            picture: None,
         }
     }
 
@@ -185,8 +195,21 @@ impl FileView {
         let dark = cx.pal.dark;
         let force_blame = self.force_blame;
         self.long_jobs.clear();
+        self.picture = None;
         self.data.spawn_git(ctx, cx.repo, move |repo| -> Result<FileData, String> {
-            let empty = |binary| FileData { lines: Vec::new(), binary, blame_skipped: false, lens_rows: Vec::new(), max_chars: 0, syntax: Vec::new(), blame: Vec::new(), changes: HashMap::new(), deletions: HashMap::new(), newest: 0, oldest: 0, lens: Vec::new() };
+            let empty = |binary| FileData { lines: Vec::new(), binary, blame_skipped: false, lens_rows: Vec::new(), max_chars: 0, syntax: Vec::new(), encoding: None, image: None, blame: Vec::new(), changes: HashMap::new(), deletions: HashMap::new(), newest: 0, oldest: 0, lens: Vec::new() };
+            let lower = path.to_lowercase();
+            if [".png", ".jpg", ".jpeg"].iter().any(|e| lower.ends_with(e)) {
+                let bytes = match &rev {
+                    Some(r) => repo.file_at(r, &path),
+                    None => repo.worktree_file(&path),
+                }
+                .map_err(|e| e.to_string())?;
+                // One that can't be decoded falls through to be told as binary, or shown as text.
+                if let Some(image) = Some(&bytes).filter(|b| b.len() < MAX_SHOWN_IMAGE).and_then(|b| decode_image(b)) {
+                    return Ok(FileData { image: Some(image), ..empty(true) });
+                }
+            }
             // A huge binary doesn't need reading to be told it's one.
             if rev.is_none() && repo.worktree_file_is_binary(&path) {
                 return Ok(empty(true));
@@ -196,15 +219,16 @@ impl FileView {
                 None => repo.worktree_file(&path),
             }
             .map_err(|e| e.to_string())?;
-            if util::is_binary(&bytes) {
+            if util::is_binary(&bytes) && !util::has_utf16_bom(&bytes) {
                 return Ok(empty(true));
             }
             let blame_skipped = bytes.len() > MAX_BLAME_BYTES && !force_blame;
-            let text = util::text(&bytes);
+            let (text, encoding) = util::text_for_viewing(&bytes);
             drop(bytes);
-            let lines = util::split_lines(&text);
+            let lines = util::lines_for_viewing(&text);
             drop(text);
-            let max_chars = lines.iter().map(|l| l.len().min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
+            // Bytes, an upper limit on the characters there are, plus the room tabs take.
+            let max_chars = lines.iter().map(|l| (l.len() + 3 * l.bytes().filter(|b| *b == b'\t').count()).min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
             let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
             let syntax = syntax::highlight(&path, &refs, dark);
             // An untracked file simply has no blame; everything else surfaces errors.
@@ -235,7 +259,7 @@ impl FileView {
             let oldest = committed.map(|b| b.author_time).min().unwrap_or(0);
             let lens = build_lenses(&lines, &blame);
             let lens_rows = lens_rows(lines.len(), &lens);
-            Ok(FileData { lines, binary: false, blame_skipped, lens_rows, max_chars, syntax, blame, changes, deletions, newest, oldest, lens })
+            Ok(FileData { lines, binary: false, blame_skipped, lens_rows, max_chars, syntax, encoding, image: None, blame, changes, deletions, newest, oldest, lens })
         });
     }
 
@@ -251,8 +275,12 @@ impl FileView {
         }
         if self.nav.poll() {
             match self.nav.value.take() {
-                Some(Some((sha, path))) => {
-                    self.trail.push((self.rev.clone(), self.path.clone()));
+                Some(Some((sha, path, older))) => {
+                    // Only going back leaves a way to retrace. Going forward with one would
+                    // make the next "Newer" step straight back here, and so on for ever.
+                    if older {
+                        self.trail.push((self.rev.clone(), self.path.clone()));
+                    }
                     self.rev = Some(sha);
                     self.path = path;
                 }
@@ -278,11 +306,21 @@ impl FileView {
         if let Some(e) = &self.data.error {
             error_box(ui, e, &pal);
         }
-        let Some(d) = self.data.value.take() else {
+        let Some(mut d) = self.data.value.take() else {
             spinner_row(ui, "Loading file and blame…", &pal);
             return;
         };
-        if d.binary {
+        if let Some(image) = d.image.take() {
+            self.picture = Some(ui.ctx().load_texture("file-view-picture", image, egui::TextureOptions::LINEAR));
+        }
+        if d.binary && let Some(t) = &self.picture {
+            let size = t.size_vec2();
+            ui.label(RichText::new(format!("{} × {} px", size.x as u32, size.y as u32)).small().color(pal.faint));
+            egui::ScrollArea::both().id_salt("file-picture").auto_shrink([false, false]).show(ui, |ui| {
+                let fit = (ui.available_width() / size.x).min(ui.available_height() / size.y).min(1.0);
+                ui.image((t.id(), size * fit));
+            });
+        } else if d.binary {
             empty_state(ui, "Binary file", "This file can't be shown as text.", &pal);
         } else {
             if d.blame_skipped {
@@ -323,12 +361,12 @@ impl FileView {
                 let at_worktree = self.rev.is_none();
                 let c = cur.clone();
                 let p = path.clone();
-                self.nav.spawn(ui.ctx(), move || -> Result<Option<(String, String)>, String> {
+                self.nav.spawn(ui.ctx(), move || -> Result<Option<(String, String, bool)>, String> {
                     if at_worktree {
                         let found = repo.log(&LogQuery { revs: vec!["HEAD".into()], paths: vec![p.clone()], limit: 1, literal_paths: true, ..Default::default() }).map_err(|e| e.to_string())?;
-                        return Ok(found.first().map(|c| (c.sha.clone(), p.clone())));
+                        return Ok(found.first().map(|c| (c.sha.clone(), p.clone(), true)));
                     }
-                    Ok(repo.prev_revision(&p, &c))
+                    Ok(repo.prev_revision(&p, &c).map(|(sha, path)| (sha, path, true)))
                 });
             }
             let repo = cx.repo.clone();
@@ -339,7 +377,7 @@ impl FileView {
                 } else {
                     let c = cur.clone();
                     let p = path.clone();
-                    self.nav.spawn(ui.ctx(), move || -> Result<Option<(String, String)>, String> { Ok(repo.next_revision(&p, &c).map(|s| (s, p.clone()))) });
+                    self.nav.spawn(ui.ctx(), move || -> Result<Option<(String, String, bool)>, String> { Ok(repo.next_revision(&p, &c).map(|s| (s, p.clone(), false))) });
                 }
             }
             if self.rev.is_some() && ui.small_button("Working tree").clicked() {
@@ -358,7 +396,8 @@ impl FileView {
             }
             if let Some((a, b)) = self.selected_range()
                 && ui.small_button(format!("Line history {}-{}", a + 1, b + 1)).clicked() {
-                    cx.open(Tab::line_history(&self.path, a as u32 + 1, b as u32 + 1));
+                    let d = self.data.get();
+                    cx.open(self.line_history_tab(a as u32 + 1, b as u32 + 1, d));
                 }
             ui.menu_button("Compare ▾", |ui| self.compare_menu(ui, cx));
             ui.menu_button("More ▾", |ui| menus::file_menu(ui, cx, &self.path, self.rev.as_deref()));
@@ -373,6 +412,9 @@ impl FileView {
             ui.label(RichText::new(&self.path).strong());
             if let Some(r) = &self.rev {
                 chip(ui, &format!("at {}", gitem_core::util::prefix(r, 8)), pal.series[3]);
+            }
+            if let Some(e) = self.data.get().and_then(|d| d.encoding) {
+                chip(ui, e, pal.warn);
             }
         });
         if self.find_open {
@@ -393,6 +435,14 @@ impl FileView {
                 }
             });
         }
+    }
+
+    /// Line history for lines as numbered on screen. That's the revision shown, or for the
+    /// working file HEAD, which edits not yet committed may have put out of step with it.
+    fn line_history_tab(&self, a: u32, b: u32, d: Option<&FileData>) -> Tab {
+        let edited = self.rev.is_none() && d.is_some_and(|d| !d.changes.is_empty() || !d.deletions.is_empty());
+        let note = edited.then(|| "This file has uncommitted changes, so these line numbers may not match the last commit, which is what this follows.".to_string());
+        Tab::line_history_at(&self.path, a, b, self.rev.clone(), note)
     }
 
     fn compare_menu(&self, ui: &mut Ui, cx: &mut Cx) {
@@ -507,7 +557,7 @@ impl FileView {
                         }
                         resp.context_menu(|ui| {
                             if ui.button("Line history of this block").clicked() {
-                                cx.open(Tab::line_history(&self.path, lens.line as u32 + 1, lens.end as u32));
+                                cx.open(self.line_history_tab(lens.line as u32 + 1, lens.end as u32, Some(d)));
                                 ui.close();
                             }
                             if ui.button("Open most recent commit").clicked() {
@@ -635,13 +685,18 @@ impl FileView {
                 self.selection_end = None;
             }
         }
+        // A right click outside the selection is about that line, not what was selected before.
+        if resp.secondary_clicked() && !self.selected_range().is_some_and(|(a, b)| i >= a && i <= b) {
+            self.current = Some(i);
+            self.selection_end = None;
+        }
         resp.context_menu(|ui| {
             self.current.get_or_insert(i);
             // The file may have shrunk since the selection was made.
             let last = d.lines.len().saturating_sub(1);
             let (a, b) = self.selected_range().map(|(a, b)| (a.min(last), b.min(last))).unwrap_or((i, i));
             if ui.button(format!("Line history ({}-{})", a + 1, b + 1)).clicked() {
-                cx.open(Tab::line_history(&self.path, a as u32 + 1, b as u32 + 1));
+                cx.open(self.line_history_tab(a as u32 + 1, b as u32 + 1, Some(d)));
                 ui.close();
             }
             if ui.button("Copy selected lines").clicked() {
@@ -684,7 +739,9 @@ impl FileView {
             ui.close();
         }
         if ui.button("Restore this file from the commit…").clicked() {
-            cx.confirm("Restore file", &format!("Replace {} with its version from {}?", self.path, gitem_core::util::prefix(&b.sha, 8)), "Restore", ops::restore_file_from(&b.sha, &self.path));
+            // That commit may have known it by another name. It comes back under that name.
+            let then = b.orig_path.as_deref().unwrap_or(&self.path);
+            cx.confirm("Restore file", &format!("Replace {then} with its version from {}?", gitem_core::util::prefix(&b.sha, 8)), "Restore", ops::restore_file_from(&b.sha, then));
             ui.close();
         }
         if ui.button("Copy SHA").clicked() {
