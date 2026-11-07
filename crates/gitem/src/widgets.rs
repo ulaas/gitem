@@ -332,8 +332,7 @@ pub fn paint_path(ui: &Ui, rect: Rect, path: &str, p: &Palette) {
         Some(i) => (&path[..=i], &path[i + 1..]),
         None => ("", path),
     };
-    let mut job = LayoutJob::default();
-    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width().max(1.0));
+    let mut job = LayoutJob { wrap: egui::text::TextWrapping::truncate_at_width(rect.width().max(1.0)), ..Default::default() };
     job.append(name, 0.0, TextFormat { font_id: prop(13.0), color: p.text, ..Default::default() });
     if !dir.is_empty() {
         // About what fits after the name, at this font's average width.

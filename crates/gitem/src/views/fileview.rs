@@ -681,7 +681,7 @@ impl FileView {
                     Stroke::NONE,
                 ));
                 let id = ui.id().with(("del", i));
-                ui.interact(Rect::from_center_size(pos2(rect.left() + gutter + 3.0, y), vec2(8.0, 8.0)), id, Sense::hover()).on_hover_text(format!("{n} line(s) deleted here"));
+                ui.interact(Rect::from_center_size(pos2(rect.left() + gutter + 3.0, y), vec2(8.0, 8.0)), id, Sense::hover()).on_hover_text(format!("{} deleted here", plural(*n, "line", "lines")));
             }
 
         // Line number
