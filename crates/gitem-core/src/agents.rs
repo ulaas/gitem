@@ -51,14 +51,18 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    /// Command that reopens this session in a terminal.
-    pub fn resume_command(&self) -> String {
-        match self.agent {
+    /// Command that reopens this session in a terminal. The id comes from a transcript file
+    /// and the command goes to `cmd /K`, so anything but a plain id means there's no command.
+    pub fn resume_command(&self) -> Option<String> {
+        if self.id.is_empty() || !self.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return None;
+        }
+        Some(match self.agent {
             "Codex" => format!("codex resume {}", self.id),
             "Copilot" => format!("copilot --resume {}", self.id),
             "OpenCode" => format!("opencode --session {}", self.id),
             _ => format!("claude --resume {}", self.id),
-        }
+        })
     }
 }
 
@@ -336,6 +340,16 @@ pub fn scan_all(worktrees: &[String], now: i64) -> Vec<AgentSession> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_session_id_that_is_not_plain_has_no_resume_command() {
+        let with = |id: &str| AgentSession { agent: "Claude", id: id.to_string(), path: Default::default(), cwd: String::new(), branch: String::new(), modified: 0, state: AgentState::Idle, last_text: String::new(), files: Vec::new() };
+        assert_eq!(with("abc-123_X").resume_command().as_deref(), Some("claude --resume abc-123_X"));
+        for bad in ["", "x & calc", "x|y", "a b", "x\"y", "%PATH%", "x^y"] {
+            assert_eq!(with(bad).resume_command(), None, "{bad}");
+        }
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"cut off first line
@@ -374,7 +388,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "s1");
         assert_eq!(found[0].state, AgentState::NeedsInput);
-        assert_eq!(found[0].resume_command(), "claude --resume s1");
+        assert_eq!(found[0].resume_command().as_deref(), Some("claude --resume s1"));
     }
 
     #[test]
@@ -421,7 +435,7 @@ mod tests {
         assert_eq!((s.id.as_str(), s.branch.as_str(), s.last_text.as_str()), ("abc", "dev", "Looking"));
         assert_eq!(s.state, AgentState::NeedsInput, "t2 is unfinished");
         assert_eq!(s.files, vec![("C:/repo/a.rs".to_string(), 1)]);
-        assert_eq!(s.resume_command(), "copilot --resume abc");
+        assert_eq!(s.resume_command().as_deref(), Some("copilot --resume abc"));
     }
 
     #[test]
@@ -465,7 +479,7 @@ mod tests {
         assert_eq!((s.id.as_str(), s.modified, s.last_text.as_str()), ("ses1", 1000, "Fixing now"));
         assert_eq!(s.state, AgentState::NeedsInput);
         assert_eq!(s.files, vec![("C:/repo/a.rs".to_string(), 1)]);
-        assert_eq!(s.resume_command(), "opencode --session ses1");
+        assert_eq!(s.resume_command().as_deref(), Some("opencode --session ses1"));
     }
 
     #[test]

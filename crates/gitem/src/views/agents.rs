@@ -84,8 +84,10 @@ impl AgentsView {
                 ui.add(egui::Label::new(RichText::new(&s.last_text).small().color(p.dim)).truncate());
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.small_button("Resume").on_hover_text(s.resume_command()).clicked() {
-                    cx.out.push(Action::OpenTerminal(s.cwd.clone().into(), Some(s.resume_command())));
+                if let Some(command) = s.resume_command()
+                    && ui.small_button("Resume").on_hover_text(&command).clicked()
+                {
+                    cx.out.push(Action::OpenTerminal(s.cwd.clone().into(), Some(command)));
                 }
                 if ui.small_button("Activity").clicked() {
                     self.selected = Some(s.id.clone());
