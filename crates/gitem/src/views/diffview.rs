@@ -138,6 +138,9 @@ struct ImagePair {
     decoding: Task<(Option<egui::ColorImage>, Option<egui::ColorImage>)>,
 }
 
+/// Side by side or not, the width and file they were worked out for, and each row's top.
+type WrappedTops = (bool, (u32, u32), usize, std::sync::Arc<Vec<f32>>);
+
 pub struct DiffView {
     pub src: DiffSource,
     pub path: Option<String>,
@@ -175,7 +178,7 @@ pub struct DiffView {
     wrap: bool,
     /// Top of each row and the end of the last, while wrapping, with what they're for:
     /// side by side or not, the text's width in points and font size, and the file.
-    wrapped_tops: Option<(bool, (u32, u32), usize, std::sync::Arc<Vec<f32>>)>,
+    wrapped_tops: Option<WrappedTops>,
 }
 
 impl DiffView {
