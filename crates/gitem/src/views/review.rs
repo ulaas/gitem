@@ -42,6 +42,8 @@ pub struct ReviewView {
     new_comment: String,
     replies: Vec<String>,
     findings: Task<String>,
+    /// New review was clicked with notes to lose, and awaits a yes.
+    confirm_new: bool,
 }
 
 fn store_path(cx: &Cx) -> PathBuf {
@@ -57,9 +59,26 @@ impl ReviewView {
     }
 
     fn save(&self, cx: &mut Cx) {
-        let written = serde_json::to_vec_pretty(&self.saved).map_err(std::io::Error::other).and_then(|b| std::fs::write(store_path(cx), b));
+        let written = serde_json::to_vec_pretty(&self.saved).map_err(std::io::Error::other).and_then(|b| gitem_core::util::write_atomic(&store_path(cx), &b));
         if let Err(e) = written {
             cx.error(format!("Could not save the review: {e}"));
+        }
+    }
+
+    /// A file that won't read is moved aside and reported, or the next save would finish it off.
+    fn load(cx: &mut Cx) -> Saved {
+        let path = store_path(cx);
+        let Ok(bytes) = std::fs::read(&path) else { return Saved::default() };
+        match serde_json::from_slice(&bytes) {
+            Ok(saved) => saved,
+            Err(e) => {
+                let copy = path.with_file_name(format!("gitem-review.json.bad-{}", gitem_core::util::now_ts()));
+                match std::fs::rename(&path, &copy) {
+                    Ok(()) => cx.error(format!("The saved review couldn't be read ({e}), so this starts a new one. The old file is kept at {}.", copy.display())),
+                    Err(move_failed) => cx.error(format!("The saved review couldn't be read ({e}) or moved aside ({move_failed}), so saving this one will replace {}.", path.display())),
+                }
+                Saved::default()
+            }
         }
     }
 
@@ -76,7 +95,7 @@ impl ReviewView {
         }
         if !self.loaded {
             self.loaded = true;
-            self.saved = std::fs::read(store_path(cx)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            self.saved = Self::load(cx);
             if self.saved.base.is_empty() {
                 self.saved.base = cx.data.base_branch();
             }
@@ -128,11 +147,26 @@ impl ReviewView {
                 self.hand_off(cx, &agent);
             }
             if ui.button("New review").on_hover_text("Clear the checklist and threads").clicked() {
-                self.saved.reviewed.clear();
-                self.saved.threads.clear();
-                self.save(cx);
+                self.confirm_new = true;
             }
         });
+        // Nothing to lose means nothing to ask. On its own row: this one is often full.
+        let mut clear = self.confirm_new && self.saved.reviewed.is_empty() && self.saved.threads.is_empty();
+        if self.confirm_new && !clear {
+            ui.horizontal(|ui| {
+                ui.colored_label(p.warn, "Clear the checklist and every note?");
+                clear = ui.button("Clear them").clicked();
+                if ui.button("Keep them").clicked() {
+                    self.confirm_new = false;
+                }
+            });
+        }
+        if clear {
+            self.confirm_new = false;
+            self.saved.reviewed.clear();
+            self.saved.threads.clear();
+            self.save(cx);
+        }
         ui.separator();
         if let Some(e) = &self.files.error {
             error_box(ui, e, &p);

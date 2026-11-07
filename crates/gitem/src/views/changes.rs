@@ -535,8 +535,8 @@ fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf) {
     let code = e.conflict.clone().unwrap_or_default();
     let (rect, resp) = row(ui, 24.0, false, &p);
     let (depth, shown) = leaf.unwrap_or((0, &e.path));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, e.path.as_str()));
     if leaf.is_some() {
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, e.path.as_str()));
         tree_guides(ui, rect, depth, &p);
     }
     let tr = egui::Rect::from_min_max(rect.min + egui::vec2(8.0 + depth as f32 * TREE_INDENT, 0.0), egui::pos2(rect.right() - 40.0, rect.bottom()));
@@ -563,7 +563,13 @@ fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf) {
             ui.close();
         }
         if ui.button("Mark as resolved").clicked() {
-            cx.run(ops::mark_resolved(&e.path));
+            let text = std::fs::read(cx.repo.root.join(&e.path)).unwrap_or_default();
+            if gitem_core::merge::has_conflict_markers(&String::from_utf8_lossy(&text)) {
+                // Always asked, whatever the setting: this is how markers get committed.
+                cx.out.push(Action::Confirm { title: format!("{} still has conflict markers", e.path), body: "Marking it resolved stages the markers too, and the next commit would include them.".into(), label: "Mark resolved anyway".into(), op: ops::mark_resolved(&e.path) });
+            } else {
+                cx.run(ops::mark_resolved(&e.path));
+            }
             ui.close();
         }
         if ui.button("Delete file…").clicked() {

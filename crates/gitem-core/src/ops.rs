@@ -904,6 +904,10 @@ pub fn bisect_mark(verdict: &str) -> GitOp {
     GitOp::new(format!("Bisect: {verdict}")).step(&["bisect", verdict])
 }
 
+pub fn bisect_mark_commit(verdict: &str, sha: &str) -> GitOp {
+    GitOp::new(format!("Bisect: {verdict}")).step(&["bisect", verdict, sha])
+}
+
 pub fn bisect_reset() -> GitOp {
     GitOp::new("End bisect").step(&["bisect", "reset"])
 }

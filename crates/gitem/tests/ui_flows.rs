@@ -1918,6 +1918,151 @@ fn a_multi_commit_pick_finished_by_hand_offers_to_carry_on_from_the_banner() {
     assert!(h.query_by_label("Cherry-picking 1 commit(s) left").is_none());
 }
 
+/// Marking a file resolved with its markers still in is how they get committed.
+#[test]
+fn marking_a_file_resolved_with_markers_left_asks_first() {
+    let f = Fx::new();
+    make_conflict(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "c.txt");
+    h.get_by_label("c.txt").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Mark as resolved");
+    pump_for_label(&mut h, "Mark resolved anyway");
+    assert_no_op_started(&mut h, "nothing is marked before answering");
+    assert!(f.git(&["status", "--short"]).contains("UU c.txt"));
+    click(&mut h, "Cancel");
+    assert!(f.git(&["status", "--short"]).contains("UU c.txt"));
+
+    // With the markers gone, it just marks it.
+    f.write("c.txt", "fixed by hand\nmiddle\nbottom\n");
+    h.get_by_label("c.txt").click_secondary();
+    h.step();
+    h.step();
+    click(&mut h, "Mark as resolved");
+    wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
+    assert!(h.query_by_label("Mark resolved anyway").is_none());
+    assert_eq!(std::fs::read_to_string(f.root.join("c.txt")).unwrap(), "fixed by hand\nmiddle\nbottom\n");
+}
+
+fn start_bisect(f: &Fx) -> Vec<String> {
+    let mut shas = Vec::new();
+    for n in 0..16 {
+        f.write("n.txt", &format!("{n}\n"));
+        f.commit(&format!("c{n}"));
+        shas.push(f.git(&["rev-parse", "HEAD"]).trim().to_string());
+    }
+    f.git(&["bisect", "start", &shas[15], &shas[0]]);
+    shas
+}
+
+/// Double-clicking marked two commits, the second one never tested.
+#[test]
+fn a_bisect_mark_applies_to_the_commit_shown_however_often_it_is_clicked() {
+    let f = Fx::new();
+    let _ = start_bisect(&f);
+    let tested = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Bisect(Box::default()));
+    pump_for_label(&mut h, "Bisect in progress");
+    wait_until_quiet(&mut h);
+    // Two clicks before the first has run: the same as the worst double-click.
+    h.get_by_label("✔ Good").click();
+    h.get_by_label("✔ Good").click();
+    h.step();
+    h.step();
+    let t = Instant::now();
+    while !quiet(&h) {
+        h.step();
+        assert!(t.elapsed() < PATIENCE);
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    let log = f.git(&["bisect", "log"]);
+    let goods: Vec<&str> = log.lines().filter(|l| l.starts_with("git bisect good")).collect();
+    assert!(goods.iter().all(|l| l.contains(&tested)), "only the commit shown was marked: {log}");
+}
+
+#[test]
+fn deleting_a_hook_asks_first() {
+    let f = Fx::new();
+    sample_history(&f);
+    let hook = f.root.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Tools(Box::default()));
+    click(&mut h, "Hooks");
+    click(&mut h, "Delete…");
+    pump_for_label(&mut h, "Delete it");
+    assert!(hook.exists());
+    click(&mut h, "Keep it");
+    assert!(hook.exists());
+    click(&mut h, "Delete…");
+    click(&mut h, "Delete it");
+    assert!(!hook.exists());
+    no_errors(&h);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_new_hook_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Tools(Box::default()));
+    click(&mut h, "Hooks");
+    click_nth(&mut h, "Create", 0);
+    let made = std::fs::read_dir(f.root.join(".git/hooks")).unwrap().flatten().find(|e| !e.file_name().to_string_lossy().ends_with(".sample")).expect("a hook");
+    assert_ne!(made.metadata().unwrap().permissions().mode() & 0o111, 0);
+}
+
+fn review_file(f: &Fx) -> PathBuf {
+    f.root.join(".git/gitem-review.json")
+}
+
+/// A damaged review file used to read as empty, and the next save destroyed it.
+#[test]
+fn a_damaged_review_file_is_kept_and_reported() {
+    let f = Fx::new();
+    sample_history(&f);
+    std::fs::write(review_file(&f), "{ not json").unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Review(Box::default()));
+    pump_for_label(&mut h, "Something went wrong");
+    let kept = std::fs::read_dir(f.root.join(".git")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("gitem-review.json.bad-")).count();
+    assert_eq!(kept, 1);
+}
+
+#[test]
+fn starting_a_new_review_asks_when_there_are_notes_to_lose() {
+    let f = Fx::new();
+    sample_history(&f);
+    let saved = r#"{"base":"HEAD~1","reviewed":["a.txt"],"threads":[{"path":"a.txt","text":"a note","author":"me","dismissed":false}]}"#;
+    std::fs::write(review_file(&f), saved).unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Review(Box::default()));
+    click(&mut h, "New review");
+    pump_for_label(&mut h, "Clear them");
+    assert!(std::fs::read_to_string(review_file(&f)).unwrap().contains("a note"));
+    click(&mut h, "Keep them");
+    assert!(std::fs::read_to_string(review_file(&f)).unwrap().contains("a note"));
+    click(&mut h, "New review");
+    click(&mut h, "Clear them");
+    assert!(!std::fs::read_to_string(review_file(&f)).unwrap().contains("a note"));
+    // Nothing left to lose, so nothing to ask.
+    click(&mut h, "New review");
+    assert!(h.query_by_label("Clear them").is_none());
+}
+
 const CLOSE_TITLE: &str = "Close with work not saved?";
 
 fn close_commands(h: &Harness<GitemApp>) -> Vec<egui::ViewportCommand> {

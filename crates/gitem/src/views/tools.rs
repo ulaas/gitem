@@ -21,10 +21,23 @@ enum Page {
     Maintenance,
 }
 
+/// A hook does nothing on Unix without the executable bit.
+fn create_hook(path: &str) -> std::io::Result<()> {
+    std::fs::write(path, "#!/bin/sh\n\nexit 0\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct ToolsView {
     page: Page,
     hooks: Option<Vec<HookInfo>>,
+    /// The hook whose Delete was clicked and awaits a yes.
+    confirm_delete_hook: Option<String>,
     ignore_text: Option<String>,
     ignore_test: String,
     ignore_result: Option<Option<String>>,
@@ -146,14 +159,23 @@ impl ToolsView {
                     if ui.small_button("Show").clicked() {
                         cx.out.push(crate::action::Action::OpenFile(h.path.clone().into()));
                     }
-                    if ui.small_button("Delete").clicked() {
-                        if let Err(e) = std::fs::remove_file(&h.path) {
-                            cx.error(format!("Could not delete the hook: {e}"));
+                    if self.confirm_delete_hook.as_deref() == Some(h.path.as_str()) {
+                        ui.colored_label(p.warn, "Delete for good?");
+                        if ui.small_button("Delete it").clicked() {
+                            if let Err(e) = std::fs::remove_file(&h.path) {
+                                cx.error(format!("Could not delete the hook: {e}"));
+                            }
+                            self.confirm_delete_hook = None;
+                            reload = true;
                         }
-                        reload = true;
+                        if ui.small_button("Keep it").clicked() {
+                            self.confirm_delete_hook = None;
+                        }
+                    } else if ui.small_button("Delete…").clicked() {
+                        self.confirm_delete_hook = Some(h.path.clone());
                     }
                 } else if ui.small_button("Create").clicked() {
-                    if let Err(e) = std::fs::write(&h.path, "#!/bin/sh\n\nexit 0\n") {
+                    if let Err(e) = create_hook(&h.path) {
                         cx.error(format!("Could not create the hook: {e}"));
                     }
                     reload = true;

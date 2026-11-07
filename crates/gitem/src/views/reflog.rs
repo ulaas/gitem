@@ -178,15 +178,20 @@ impl BisectView {
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(RichText::new("✔ Good").color(egui::Color32::WHITE)).fill(p.good)).clicked() {
-                cx.run(ops::bisect_mark("good"));
-            }
-            if ui.add(egui::Button::new(RichText::new("✖ Bad").color(egui::Color32::WHITE)).fill(p.danger)).clicked() {
-                cx.run(ops::bisect_mark("bad"));
-            }
-            if ui.button("Skip").clicked() {
-                cx.run(ops::bisect_mark("skip"));
-            }
+            // A verdict names the commit it's about. Git checks out the next one to test as
+            // soon as it gets one, so a second click would otherwise land on a commit never
+            // looked at. While the last mark runs, the commit shown is out of date as well.
+            let shown = self.current.get().map(|c| c.sha.clone()).filter(|_| !self.current.busy() && !cx.data.ops_busy);
+            let mut mark = |ui: &mut Ui, button: egui::Button, verdict: &str| {
+                if ui.add_enabled(shown.is_some(), button).clicked()
+                    && let Some(sha) = &shown
+                {
+                    cx.run(ops::bisect_mark_commit(verdict, sha));
+                }
+            };
+            mark(ui, egui::Button::new(RichText::new("✔ Good").color(egui::Color32::WHITE)).fill(p.good), "good");
+            mark(ui, egui::Button::new(RichText::new("✖ Bad").color(egui::Color32::WHITE)).fill(p.danger), "bad");
+            mark(ui, egui::Button::new("Skip"), "skip");
             if ui.button("End bisect").clicked() {
                 cx.run(ops::bisect_reset());
             }
