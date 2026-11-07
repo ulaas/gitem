@@ -78,7 +78,7 @@ impl ReflogView {
             ui.spacing_mut().item_spacing.y = 0.0;
             for i in range {
                 let e = shown[i];
-                let (rect, resp) = row(ui, 24.0, false, &p);
+                let (rect, resp) = keyed_row(ui, 24.0, false, &p, ("reflog", &e.selector));
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, e.selector.as_str()));
                 let x = rect.left();
                 let cell = |a: f32, w: f32| egui::Rect::from_min_size(egui::pos2(x + a, rect.top()), egui::vec2(w, 24.0));

@@ -51,7 +51,8 @@ impl TreeView {
             ui.spacing_mut().item_spacing.y = 0.0;
             for i in range {
                 let f = shown[i];
-                let (rect, resp) = row(ui, 22.0, false, &p);
+                let (rect, resp) = keyed_row(ui, 22.0, false, &p, ("tree", &f));
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, f.as_str()));
                 paint_path(ui, egui::Rect::from_min_max(rect.min + egui::vec2(8.0, 0.0), rect.max), f, &p);
                 if resp.clicked() {
                     cx.open(Tab::file(f, Some(self.rev.clone()), None));

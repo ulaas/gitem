@@ -258,9 +258,12 @@ impl FilesView {
             ui.spacing_mut().item_spacing.y = 0.0;
             for row in &rows[range] {
                 let is_selected = selected.as_deref() == Some(row.path.as_str());
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
+                let resp = ui.interact(rect, egui::Id::new(("sidebar file", &row.path)), Sense::click());
                 resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, row.name.as_str()));
                 paint_row(ui, row, rect, is_selected, resp.hovered(), &p);
+                focus_ring(ui, &resp, &p);
+                keep_neighbours_in_view(ui, rect, &resp);
                 if resp.clicked() {
                     if row.dir.is_some() {
                         toggled = Some(row.path.clone());

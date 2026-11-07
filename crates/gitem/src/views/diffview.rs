@@ -380,7 +380,7 @@ impl DiffView {
             ui.spacing_mut().item_spacing.y = 0.0;
             for i in hits[range].iter().copied() {
                 let ch = &loaded.rows[i];
-                if file_row(ui, ch, i == self.selected_file, &p).on_hover_text(ch.path.as_str()).clicked() {
+                if keyed_file_row(ui, ch, i == self.selected_file, &p, "diff files").on_hover_text(ch.path.as_str()).clicked() {
                     self.selected_file = i;
                     self.selected_lines.clear();
                     self.scroll_to_row = None;

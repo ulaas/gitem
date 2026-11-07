@@ -7893,3 +7893,35 @@ fn a_finished_op_says_what_happened() {
     assert!(h.query_by_label_contains(": done").is_none());
 }
 
+/// The other long lists, which draw only what's on screen: a held arrow key goes on past the end
+/// of the view. Keys are kittest's.
+#[test]
+fn arrow_keys_go_down_the_other_long_lists() {
+    use egui_kittest::kittest::NodeT;
+    let f = Fx::new();
+    for i in 0..60 {
+        f.write(&format!("dir/f{i:02}.txt"), "x
+");
+    }
+    f.commit("many files");
+    let mut h = sized_harness(&f, vec2(1100.0, 500.0), no_details());
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::tree("HEAD"));
+    wait_until_quiet(&mut h);
+    let focused = |h: &Harness<GitemApp>| h.query_all_by_label_contains("").find(|n| n.accesskit_node().is_focused()).map(|n| n.accesskit_node().label().unwrap_or_default());
+    // Rows of the commit's file tree, labelled by their path.
+    pump_for_any(&mut h, "dir/f00.txt");
+    let first = h.query_all_by_label_contains("dir/f00.txt").next().unwrap();
+    first.focus();
+    h.step();
+    h.step();
+    let start = focused(&h);
+    assert!(start.is_some(), "the first row took focus");
+    for _ in 0..30 {
+        h.key_press(egui::Key::ArrowDown);
+        h.step();
+        h.step();
+    }
+    assert!(focused(&h).unwrap_or_default().contains("dir/f30.txt"), "{:?}", focused(&h));
+}
+

@@ -300,7 +300,7 @@ impl InspectPanel {
         visible_rows(ui, 22.0, d.files.len(), |ui, range| {
             for f in &d.files[range] {
                 let sel = self.selected_file.as_deref() == Some(&f.path);
-                let resp = file_row(ui, f, sel, &p).on_hover_text(&f.path);
+                let resp = keyed_file_row(ui, f, sel, &p, "details files").on_hover_text(&f.path);
                 if resp.clicked() {
                     self.selected_file = Some(f.path.clone());
                     cx.diff(DiffSource::Commit(c.sha.clone()), Some(&f.path));

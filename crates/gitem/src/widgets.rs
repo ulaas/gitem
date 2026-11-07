@@ -195,16 +195,10 @@ pub fn keyed_row(ui: &mut Ui, h: f32, selected: bool, p: &Palette, key: impl std
     row_look(ui, rect, resp, selected, p)
 }
 
-fn row_look(ui: &mut Ui, rect: Rect, resp: Response, selected: bool, p: &Palette) -> (Rect, Response) {
-    if selected {
-        ui.painter().rect_filled(rect, 0.0, p.selection);
-    } else if resp.hovered() {
-        ui.painter().rect_filled(rect, 0.0, p.hover);
-    }
-    focus_ring(ui, &resp, p);
-    // Keys move focus among what's drawn, and long lists only draw what's on screen, so rows
-    // beyond this one have to be there by the next key. A held key leaves about two frames.
-    // Not `gained_focus`, which an arrow key's move doesn't set.
+/// Keys move focus among what's drawn, and long lists only draw what's on screen, so rows beyond
+/// a focused one have to be there by the next key. A held key leaves about two frames. This
+/// isn't `gained_focus`, which an arrow key's move doesn't set.
+pub fn keep_neighbours_in_view(ui: &Ui, rect: Rect, resp: &Response) {
     if resp.has_focus() {
         let seen = egui::Id::new("row-with-focus");
         if ui.data(|d| d.get_temp::<egui::Id>(seen)) != Some(resp.id) {
@@ -212,6 +206,16 @@ fn row_look(ui: &mut Ui, rect: Rect, resp: Response, selected: bool, p: &Palette
             ui.scroll_to_rect_animation(rect.expand2(vec2(0.0, rect.height() * 3.5)), None, egui::style::ScrollAnimation::none());
         }
     }
+}
+
+fn row_look(ui: &mut Ui, rect: Rect, resp: Response, selected: bool, p: &Palette) -> (Rect, Response) {
+    if selected {
+        ui.painter().rect_filled(rect, 0.0, p.selection);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 0.0, p.hover);
+    }
+    focus_ring(ui, &resp, p);
+    keep_neighbours_in_view(ui, rect, &resp);
     (rect, resp)
 }
 
@@ -374,6 +378,17 @@ pub fn paint_path(ui: &Ui, rect: Rect, path: &str, p: &Palette) {
 /// Row showing a changed file. Returns its response for click and context menu.
 pub fn file_row(ui: &mut Ui, change: &FileChange, selected: bool, p: &Palette) -> Response {
     let (rect, resp) = row(ui, 22.0, selected, p);
+    file_row_body(ui, rect, resp, change, p)
+}
+
+/// The same in a list that only draws what's on screen. See [`keyed_row`]. `list` tells it from
+/// another list on screen that could show the same file.
+pub fn keyed_file_row(ui: &mut Ui, change: &FileChange, selected: bool, p: &Palette, list: &str) -> Response {
+    let (rect, resp) = keyed_row(ui, 22.0, selected, p, (list, change.path.as_str()));
+    file_row_body(ui, rect, resp, change, p)
+}
+
+fn file_row_body(ui: &mut Ui, rect: Rect, resp: Response, change: &FileChange, p: &Palette) -> Response {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, change.path.as_str()));
     let letter = change.status.letter().to_string();
     ui.painter().text(pos2(rect.left() + 10.0, rect.center().y), Align2::CENTER_CENTER, letter, mono(12.0), status_color(change.status, p));

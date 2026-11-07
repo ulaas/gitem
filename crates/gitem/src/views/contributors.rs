@@ -106,7 +106,7 @@ impl ContributorsView {
             for i in range {
                 let c = shown[i];
                 let sel = self.selected.as_deref() == Some(&c.email);
-                let (rect, resp) = row(ui, 34.0, sel, &p);
+                let (rect, resp) = keyed_row(ui, 34.0, sel, &p, ("contributor", &c.email));
                 paint_avatar(ui, pos2(rect.left() + 18.0, rect.center().y), 11.0, &c.name, &c.email, &p, cx.settings.gravatar);
                 let name = if c.is_you { format!("{} (you)", c.name) } else { c.name.clone() };
                 paint_text(ui, Rect::from_min_size(pos2(rect.left() + 36.0, rect.top() + 2.0), vec2(230.0, 16.0)), &name, prop(13.0), p.text);

@@ -168,7 +168,7 @@ pub fn commit_list(ui: &mut Ui, cx: &mut Cx, list: &[Commit], selected: &mut Opt
         ui.spacing_mut().item_spacing.y = 0.0;
         for i in range {
             let c = &list[i];
-            let (rect, resp) = row(ui, row_h, selected.as_deref() == Some(&c.sha), &p);
+            let (rect, resp) = keyed_row(ui, row_h, selected.as_deref() == Some(&c.sha), &p, ("history", &c.sha));
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, c.subject.as_str()));
             paint_avatar(ui, egui::pos2(rect.left() + 18.0, rect.center().y), 11.0, &c.author_name, &c.author_email, &p, cx.settings.gravatar);
             let right = rect.right() - 76.0;
