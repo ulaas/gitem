@@ -305,10 +305,17 @@ pub fn run(mode: Mode, title: &str, size: [f32; 2]) -> i32 {
     EXIT_CODE.load(Ordering::SeqCst)
 }
 
+/// Hidden unless git is plainly asking for a username, which it does by starting with the
+/// word. Guessing from words anywhere in it showed unusual prompts in clear, and went by the
+/// host's name too: `Password for 'https://username.example'`, or a host containing "pin".
+fn prompt_is_secret(prompt: &str) -> bool {
+    !prompt.trim_start().to_lowercase().starts_with("username")
+}
+
 pub fn askpass(prompt: String) -> i32 {
     let low = prompt.to_lowercase();
     let confirm = low.contains("(yes/no");
-    let secret = low.contains("password") || low.contains("passphrase") || low.contains("token") || low.contains("pin");
+    let secret = prompt_is_secret(&prompt);
     // Closing the window is a cancel.
     EXIT_CODE.store(1, Ordering::SeqCst);
     run(Mode::Askpass { prompt, value: String::new(), secret, confirm }, "gitem: git needs your input", [460.0, 204.0])
@@ -337,6 +344,15 @@ pub fn difftool(a: String, b: String) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_username_prompt_is_shown_as_typed() {
+        assert!(!prompt_is_secret("Username for 'https://host': "));
+        assert!(!prompt_is_secret("Username for 'https://shopping.example': "), "\"pin\" in a host name means nothing");
+        for p in ["Password for 'https://me@host': ", "Password for 'https://username.example': ", "Enter passphrase for key 'x': ", "me@host's password: ", "Verification code: ", "One-time code: ", "Enter PIN for 'key': "] {
+            assert!(prompt_is_secret(p), "{p}");
+        }
+    }
 
     #[test]
     fn eframe_storage_follows_the_config_folder() {

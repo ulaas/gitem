@@ -410,9 +410,12 @@ impl CredentialsView {
         ui.label(RichText::new("Signing status appears on each commit in the Inspect panel.").small().color(p.faint));
         section(ui, "SSH allowed signers", &p);
         ui.label(RichText::new("Whose SSH signatures to trust, one per line: email, then the public key.").small().color(p.faint));
-        let configured = self.signers_file.get_or_insert_with(|| cx.repo.config_get("gpg.ssh.allowedSignersFile")).clone();
+        // Global config only. A repository's own config could otherwise pick which file
+        // this page shows and overwrites.
+        let configured = self.signers_file.get_or_insert_with(|| cx.repo.global_config_path("gpg.ssh.allowedSignersFile")).clone();
         let path = configured.clone().map(std::path::PathBuf::from).unwrap_or_else(|| cred::ssh_dir().join("allowed_signers"));
         let text = self.signers.get_or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
+        ui.add(egui::Label::new(RichText::new(path.display().to_string()).monospace().small().color(p.dim)).selectable(true));
         ui.add(crate::widgets::text_area(text).code_editor().desired_rows(5).desired_width(f32::INFINITY));
         if ui.button("Save allowed signers").clicked() {
             match std::fs::write(&path, text.as_bytes()) {

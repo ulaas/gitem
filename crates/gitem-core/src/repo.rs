@@ -815,6 +815,11 @@ impl Repo {
         self.git.run_raw(Some(&self.root), &["config", "--get", key]).ok().filter(|o| o.ok()).map(|o| o.text().trim().to_string())
     }
 
+    /// A path from the user's own config, whatever this repository says.
+    pub fn global_config_path(&self, key: &str) -> Option<String> {
+        self.git.run_raw(Some(&self.root), &["config", "--global", "--type=path", "--get", key]).ok().filter(|o| o.ok()).map(|o| o.text().trim().to_string())
+    }
+
     pub fn hooks(&self) -> Vec<HookInfo> {
         const NAMES: &[&str] = &[
             "applypatch-msg",
