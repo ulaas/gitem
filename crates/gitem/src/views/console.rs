@@ -29,7 +29,7 @@ impl ConsoleView {
         "console".into()
     }
     pub fn title(&self) -> String {
-        "Git Console".into()
+        "Console".into()
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {

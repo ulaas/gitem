@@ -213,7 +213,7 @@ impl InspectPanel {
         let info = self.refs_info.get().filter(|_| self.refs_info_for.as_deref() == Some(&c.sha));
         ui.horizontal(|ui| {
             let text = match info {
-                Some(i) => format!("On {} branch(es), {} tag(s)", i.branches.len(), i.tags.len()),
+                Some(i) => format!("On {}, {}", plural(i.branches.len(), "branch", "branches"), plural(i.tags.len(), "tag", "tags")),
                 None => "Branches and tags with this commit".to_string(),
             };
             if ui.selectable_label(self.show_refs, RichText::new(text).small().color(p.dim)).clicked() {

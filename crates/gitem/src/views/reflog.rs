@@ -209,7 +209,7 @@ impl BisectView {
         if st.only_skipped {
             ui.label(RichText::new("Only skipped commits are left, so git can't narrow it down any further. Its log below names the candidates.").color(p.warn));
         } else if let Some(n) = self.remaining.get() {
-            ui.label(RichText::new(format!("About {n} commit(s) left to check")).color(p.dim));
+            ui.label(RichText::new(format!("About {} left to check", plural(n.parse().unwrap_or(0), "commit", "commits"))).color(p.dim));
         }
         if let Some(c) = self.current.get() {
             ui.add_space(6.0);

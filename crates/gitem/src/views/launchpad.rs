@@ -36,6 +36,8 @@ pub struct LaunchpadView {
     head: String,
     base: String,
     title: String,
+    /// The title it came with, which is no loss.
+    title_given: String,
     body: String,
     draft: bool,
     ai_text: Task<String>,
@@ -57,6 +59,7 @@ impl Default for LaunchpadView {
             head: String::new(),
             base: String::new(),
             title: String::new(),
+            title_given: String::new(),
             body: String::new(),
             draft: false,
             ai_text: Task::default(),
@@ -94,6 +97,18 @@ pub fn token_form(repo: &RemoteRepo) -> FormDialog {
 impl LaunchpadView {
     pub fn create_pr_for(head: &str, base: &str) -> Self {
         Self { page: Page::Create, head: head.to_string(), base: base.to_string(), title: head.replace(['-', '_', '/'], " "), ..Default::default() }
+    }
+
+    /// Fills in the pull request form, as typing would. For tests.
+    pub fn write_for_test(&mut self, title: &str, body: &str) {
+        self.title = title.to_string();
+        self.body = body.to_string();
+    }
+
+    /// What closing this tab would lose: what's been written for a pull request. It's cleared
+    /// once the pull request is made.
+    pub fn unsaved(&self) -> Option<String> {
+        (!self.body.trim().is_empty() || (!self.title.trim().is_empty() && self.title != self.title_given)).then(|| "A pull request you're writing.".to_string())
     }
 
     pub fn key(&self) -> String {
@@ -393,7 +408,7 @@ impl LaunchpadView {
                                 return Err("There are no edits to existing lines to suggest.".to_string());
                             }
                             resolve_client(&g, &r2)?.suggest_changes(n, &s).map_err(|e| e.to_string())?;
-                            Ok(format!("Posted {} suggestion(s) on #{n}", s.len()))
+                            Ok(format!("Posted {} on #{n}", plural(s.len(), "suggestion", "suggestions")))
                         })));
                     }
                 if let Some(parent) = all.iter().find(|x| x.head == pr.base)

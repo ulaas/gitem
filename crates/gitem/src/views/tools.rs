@@ -63,7 +63,7 @@ impl ToolsView {
         "tools".into()
     }
     pub fn title(&self) -> String {
-        "Repository Tools".into()
+        "Tools".into()
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -258,10 +258,10 @@ impl ToolsView {
             self.clean_list.spawn(ui.ctx(), move || -> gitem_core::Result<_> { Ok((r.clean_preview(d, i)?, r.clean_left_alone()?)) });
         }
         let (list, left_alone) = self.clean_list.get().cloned().unwrap_or_default();
-        ui.label(RichText::new(format!("{} item(s) would be deleted", list.len())).color(p.dim));
+        ui.label(RichText::new(format!("{} would be deleted", plural(list.len(), "item", "items"))).color(p.dim));
         let b = egui::Button::new(RichText::new("Delete these…").color(crate::theme::ink_on(p.danger))).fill(p.danger);
         if ui.add_enabled(!list.is_empty(), b).clicked() {
-            cx.confirm("Clean working tree", &format!("Permanently delete {} untracked item(s)? This cannot be undone.", list.len()), "Delete", ops::clean(self.clean_dirs, self.clean_ignored));
+            cx.confirm("Clean working tree", &format!("Permanently delete {}? This cannot be undone.", plural(list.len(), "untracked item", "untracked items")), "Delete", ops::clean(self.clean_dirs, self.clean_ignored));
         }
         if !left_alone.is_empty() {
             ui.add_space(4.0);
@@ -306,7 +306,7 @@ impl ToolsView {
             return;
         }
         let list = self.lfs.get().cloned().unwrap_or_default();
-        ui.label(RichText::new(format!("{} tracked file(s)", list.len())).color(p.dim));
+        ui.label(RichText::new(plural(list.len(), "tracked file", "tracked files")).color(p.dim));
         for f in &list {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(gitem_core::util::prefix(&f.oid, 10)).monospace().small().color(p.faint));
@@ -402,7 +402,7 @@ impl ConfigView {
         "config".into()
     }
     pub fn title(&self) -> String {
-        "Git Config".into()
+        "Config".into()
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {

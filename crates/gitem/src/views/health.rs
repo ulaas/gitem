@@ -29,7 +29,7 @@ impl HealthView {
         "health".into()
     }
     pub fn title(&self) -> String {
-        "Repository Health".into()
+        "Health".into()
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -76,7 +76,7 @@ impl HealthView {
                                         cx.run(ops::maintenance_unregister());
                                     }
                                 } else if ui.small_button("Enable").clicked() {
-                                    cx.confirm("Turn on scheduled maintenance", "Git will add this repository to its list and add a task to your system's scheduler, if it isn't there yet. That task keeps running after gitem closes.", "Turn on", ops::maintenance_start());
+                                    cx.confirm("Turn on scheduled maintenance", "Git will add this repository to its list and add a task to your system's scheduler, if it isn't there yet. That task keeps running after gitem closes.", "Turn on", ops::maintenance_start().lossless());
                                 }
                             } else if item.set_elsewhere.is_some() {
                                 let why = "It's turned on outside this repository, so turning it off here wouldn't change anything. Change it where it's set.";

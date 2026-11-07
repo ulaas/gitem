@@ -9,6 +9,7 @@ use gitem_core::{ops, util};
 
 use crate::action::Cx;
 use crate::task::Task;
+use crate::views::Tab;
 use crate::theme::Palette;
 use crate::widgets::*;
 
@@ -307,8 +308,8 @@ impl MergeView {
         };
         if self.resolved {
             ui.add_space(12.0);
-            chip(ui, "✔ This file is no longer in conflict", pal.good);
-            ui.label(RichText::new("You can close this tab. It updates by itself if the file conflicts again.").color(pal.dim));
+            chip(ui, "This file is no longer in conflict", pal.good);
+            self.after_resolved(ui, cx);
             self.doc.value = Some(loaded);
             return;
         }
@@ -425,30 +426,51 @@ impl MergeView {
         let pal = cx.pal.clone();
         let unresolved = doc.unresolved_count();
         let total = doc.conflict_count();
-        // Wraps so Save stays reachable in a narrow panel.
-        ui.horizontal_wrapped(|ui| {
+        // The first row has where you are and how to finish, and stays one row.
+        ui.horizontal(|ui| {
             if unresolved == 0 {
-                chip(ui, &format!("✔ All {total} conflict(s) resolved"), pal.good);
+                chip(ui, &format!("All {} resolved", plural(total, "conflict", "conflicts")), pal.good);
             } else {
-                chip(ui, &format!("{unresolved} of {total} conflict(s) left"), pal.warn);
+                chip(ui, &format!("{unresolved} of {} left in this file", plural(total, "conflict", "conflicts")), pal.warn);
             }
+            self.file_progress(ui, cx);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if matches!(self.source, MergeSource::Files { .. }) && ui.small_button("Cancel merge").clicked() {
+                    self.finished = Some(false);
+                }
+                if ui.small_button("Save with markers").on_hover_text("Write the file with conflict markers for what's left, and keep it unresolved, to finish it later or elsewhere").clicked() {
+                    self.save(cx, doc, false);
+                }
+                let done = if self.raw_mode { !has_conflict_markers(&self.raw_text) } else { unresolved == 0 };
+                let label = if matches!(self.source, MergeSource::Repo(_)) { "Save and mark resolved" } else { "Save and finish" };
+                let b = egui::Button::new(RichText::new(label).color(if done { pal.on_accent } else { pal.faint })).fill(if done { pal.accent } else { pal.panel2 });
+                if ui.add_enabled(done, b).on_disabled_hover_text("Resolve every conflict first").clicked() {
+                    self.save(cx, doc, true);
+                }
+                if self.saved {
+                    ui.label(RichText::new("Saved").small().color(pal.good));
+                }
+            });
+        });
+        // Wraps, as a narrow panel can't hold all these on one row.
+        ui.horizontal_wrapped(|ui| {
             let indices = Self::conflict_indices(doc);
-            if ui.small_button("▲").on_hover_text("Previous conflict").clicked() && !indices.is_empty() {
+            if ui.small_button(crate::chrome::icon::CARET_UP).on_hover_text("Previous conflict").clicked() && !indices.is_empty() {
                 let at = self.current.map_or(indices.len() - 1, |c| (c + indices.len() - 1) % indices.len());
                 self.current = Some(at);
                 self.scroll_to = Some(indices[at]);
             }
-            if ui.small_button("▼").on_hover_text("Next conflict").clicked() && !indices.is_empty() {
+            if ui.small_button(crate::chrome::icon::CARET_DOWN).on_hover_text("Next conflict").clicked() && !indices.is_empty() {
                 // The first press goes to the first conflict: nothing has been visited yet.
                 let at = self.current.map_or(0, |c| (c + 1) % indices.len());
                 self.current = Some(at);
                 self.scroll_to = Some(indices[at]);
             }
             ui.separator();
-            if ui.small_button(format!("All {}", self.sides.0)).on_hover_text(format!("Resolve remaining conflicts with {}", self.sides.0)).clicked() {
+            if ui.small_button(format!("All {}", self.sides.0)).on_hover_text(format!("Take {} for every conflict still open in this file. Nothing is written until you save.", self.sides.0)).clicked() {
                 doc.resolve_all(Resolution::Ours);
             }
-            if ui.small_button(format!("All {}", self.sides.1)).on_hover_text(format!("Resolve remaining conflicts with {}", self.sides.1)).clicked() {
+            if ui.small_button(format!("All {}", self.sides.1)).on_hover_text(format!("Take {} for every conflict still open in this file. Nothing is written until you save.", self.sides.1)).clicked() {
                 doc.resolve_all(Resolution::Theirs);
             }
             if self.ai.poll() {
@@ -492,29 +514,59 @@ impl MergeView {
             }
             if ui.small_button("Whitespace").on_hover_text("Auto-resolve conflicts that differ only in whitespace").clicked() {
                 let n = doc.resolve_whitespace_only();
-                cx.toast(format!("Resolved {n} whitespace-only conflict(s)"));
+                cx.toast(format!("Resolved {} that differed only in whitespace", plural(n, "conflict", "conflicts")));
             }
-            toggle(ui, &mut self.show_base, "Base", "Show the common ancestor");
+            toggle(ui, &mut self.show_base, "Base", "Also show the common ancestor: the file as it was before either side changed it");
             if ui.selectable_label(self.raw_mode, "Edit text").on_hover_text("Edit the merged result as plain text").clicked() {
                 self.toggle_raw(cx, doc);
             }
-            ui.separator();
-            let done = if self.raw_mode { !has_conflict_markers(&self.raw_text) } else { unresolved == 0 };
-            let label = if matches!(self.source, MergeSource::Repo(_)) { "Save and mark resolved" } else { "Save and finish" };
-            let b = egui::Button::new(RichText::new(label).color(if done { pal.on_accent } else { pal.faint })).fill(if done { pal.accent } else { pal.panel2 });
-            if ui.add_enabled(done, b).on_disabled_hover_text("Resolve every conflict first").clicked() {
-                self.save(cx, doc, true);
-            }
-            if ui.small_button("Save with markers").on_hover_text("Write the file with conflict markers for what's left, and keep it unresolved").clicked() {
-                self.save(cx, doc, false);
-            }
-            if matches!(self.source, MergeSource::Files { .. }) && ui.small_button("Cancel merge").clicked() {
-                self.finished = Some(false);
-            }
-            if self.saved {
-                ui.label(RichText::new("Saved").small().color(pal.good));
-            }
         });
+    }
+
+    /// Which file this is of those in conflict, and the way to the next.
+    fn file_progress(&self, ui: &mut Ui, cx: &mut Cx) {
+        let MergeSource::Repo(path) = &self.source else { return };
+        let Some(st) = cx.status() else { return };
+        let files: Vec<String> = st.conflicts().map(|e| e.path.clone()).collect();
+        let Some(at) = files.iter().position(|f| f == path) else { return };
+        if files.len() > 1 {
+            ui.label(RichText::new(format!("File {} of {}", at + 1, files.len())).color(cx.pal.dim));
+            let next = files[(at + 1) % files.len()].clone();
+            if ui.small_button("Next file").on_hover_text(next.as_str()).clicked() {
+                cx.open(Tab::merge(&next));
+            }
+        }
+    }
+
+    /// With this file done: on to the next one, or on with what was going on.
+    fn after_resolved(&self, ui: &mut Ui, cx: &mut Cx) {
+        let Some(st) = cx.status().cloned() else { return };
+        ui.add_space(6.0);
+        let left: Vec<String> = st.conflicts().map(|e| e.path.clone()).collect();
+        if let Some(next) = left.first() {
+            ui.label(RichText::new(format!("{} still in conflict.", plural(left.len(), "file", "files"))).color(cx.pal.dim));
+            if ui.button(format!("Next file: {next}")).clicked() {
+                cx.open(Tab::merge(next));
+            }
+            return;
+        }
+        match st.op {
+            RepoOp::None => {}
+            RepoOp::Merge => {
+                ui.label(RichText::new("That was the last one. Commit the merge to finish it.").color(cx.pal.dim));
+                if ui.button("Commit merge…").clicked() {
+                    cx.open(Tab::changes());
+                }
+            }
+            op => {
+                if let Some(cmd) = op.command() {
+                    ui.label(RichText::new("That was the last one.").color(cx.pal.dim));
+                    if ui.button(format!("Continue {cmd}")).clicked() {
+                        cx.run(ops::op_continue(cmd));
+                    }
+                }
+            }
+        }
     }
 
     /// Leaving plain editing keeps what was typed: the text becomes the document, its

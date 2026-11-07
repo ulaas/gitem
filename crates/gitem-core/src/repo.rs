@@ -238,14 +238,20 @@ impl Repo {
             st.op = if g.join("rebase-merge/interactive").exists() { RepoOp::RebaseInteractive } else { RepoOp::Rebase };
             st.op_progress = num("rebase-merge/msgnum").zip(num("rebase-merge/end"));
             st.op_target = read("rebase-merge/onto").map(|s| crate::util::prefix(&s, 8).to_string());
+            st.op_branch = read("rebase-merge/head-name").and_then(|s| s.strip_prefix("refs/heads/").map(String::from));
             // With no pick under way the rebase is waiting on you, as at an edit step.
-            st.op_allows_commits = !g.join("CHERRY_PICK_HEAD").exists() && !g.join("MERGE_HEAD").exists();
+            // A stop for a conflict leaves REBASE_HEAD with no `amend`, and what comes next
+            // is Continue, which keeps the commit's message.
+            let conflict_stop = g.join("REBASE_HEAD").exists() && !g.join("rebase-merge/amend").exists();
+            st.op_allows_commits = !conflict_stop && !g.join("CHERRY_PICK_HEAD").exists() && !g.join("MERGE_HEAD").exists();
         } else if g.join("rebase-apply").is_dir() {
             st.op = if g.join("rebase-apply/applying").exists() { RepoOp::Am } else { RepoOp::Rebase };
             st.op_progress = num("rebase-apply/next").zip(num("rebase-apply/last"));
+            st.op_branch = read("rebase-apply/head-name").and_then(|s| s.strip_prefix("refs/heads/").map(String::from));
         } else if g.join("MERGE_HEAD").exists() {
             st.op = RepoOp::Merge;
             st.op_target = read("MERGE_HEAD").map(|s| crate::util::prefix(&s, 8).to_string());
+            st.op_merging = read("MERGE_MSG").and_then(|m| crate::parse::merge_subject_name(m.lines().next().unwrap_or("")));
         } else if g.join("CHERRY_PICK_HEAD").exists() {
             st.op = RepoOp::CherryPick;
             st.op_target = read("CHERRY_PICK_HEAD").map(|s| crate::util::prefix(&s, 8).to_string());
@@ -254,7 +260,7 @@ impl Repo {
             st.op_target = read("REVERT_HEAD").map(|s| crate::util::prefix(&s, 8).to_string());
         } else if let Some((op, left)) = self.sequencer_left() {
             st.op = op;
-            st.op_target = Some(format!("{left} commit(s) left"));
+            st.op_target = Some(format!("{} left", crate::util::count_of(left, "commit")));
         } else if g.join("BISECT_LOG").exists() {
             st.op = RepoOp::Bisect;
         }

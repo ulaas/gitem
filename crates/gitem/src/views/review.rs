@@ -61,6 +61,17 @@ fn store_path(cx: &Cx) -> PathBuf {
 }
 
 impl ReviewView {
+    /// As if typed in the new note's box. For tests.
+    pub fn write_for_test(&mut self, note: &str) {
+        self.new_comment = note.to_string();
+    }
+
+    /// What closing this tab would lose. Notes that have been added are saved; what's still
+    /// in the boxes isn't.
+    pub fn unsaved(&self) -> Option<String> {
+        (!self.new_comment.trim().is_empty() || self.replies.iter().any(|r| !r.trim().is_empty())).then(|| "A review note you're typing.".to_string())
+    }
+
     pub fn key(&self) -> String {
         "review".into()
     }
@@ -174,7 +185,7 @@ impl ReviewView {
             }
             let open = self.saved.threads.iter().filter(|t| !t.dismissed).count();
             let agent = cx.settings.agent_command.clone();
-            if ui.add_enabled(open > 0 && !agent.trim().is_empty(), egui::Button::new(format!("Hand {open} note(s) to agent"))).clicked() {
+            if ui.add_enabled(open > 0 && !agent.trim().is_empty(), egui::Button::new(if open == 0 { "Hand notes to agent".to_string() } else { format!("Hand {} to agent", plural(open, "note", "notes")) })).clicked() {
                 self.hand_off(cx, &agent);
             }
             if ui.button("New review").on_hover_text("Clear the checklist and threads").clicked() {

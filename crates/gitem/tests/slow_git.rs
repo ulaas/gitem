@@ -96,7 +96,9 @@ impl Fx {
         (ev.iter().filter(|e| e.1 == 1).count(), peak)
     }
 
-    fn harness(&self, settings: Settings) -> Harness<'static, GitemApp> {
+    fn harness(&self, mut settings: Settings) -> Harness<'static, GitemApp> {
+        // What these count is what each view starts, not what opening the graph does.
+        settings.details_on_open = false;
         let ctx = egui::Context::default();
         let mut app = GitemApp::with_settings(&ctx, settings);
         app.git = Ok(self.slow());

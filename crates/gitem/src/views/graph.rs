@@ -12,6 +12,7 @@ use gitem_core::repo::parse_search;
 use crate::action::Cx;
 use crate::forms;
 use crate::menus;
+use crate::chrome::icon;
 use crate::task::Task;
 use crate::views::Tab;
 use crate::views::graphcols::Columns;
@@ -88,6 +89,9 @@ pub struct GraphView {
     layout_applied: bool,
     worktree_counts: Task<HashMap<String, usize>>,
     counts_gen: Option<u64>,
+    head_shown: bool,
+    /// Shift+F10 was pressed: the selected row's menu opens on the next frame.
+    menu_key: bool,
 }
 
 const FOLDED_W: f32 = 3.0;
@@ -115,7 +119,7 @@ impl Default for GraphView {
             wip: false,
             match_all: false,
             match_case: false,
-            regex: true,
+            regex: false,
             focus_search: false,
             finder: None,
             stats: Task::default(),
@@ -129,8 +133,45 @@ impl Default for GraphView {
             layout_applied: false,
             worktree_counts: Task::default(),
             counts_gen: None,
+            head_shown: false,
+            menu_key: false,
         }
     }
+}
+
+/// A commit's refs in the order that matters: where you are, your branches, what's on the
+/// remotes, then tags. `origin/HEAD` says nothing `origin/main` doesn't, and a branch level with
+/// its remote twin takes one badge, marked with the bool.
+pub fn badges_for(refs: &[RefLabel]) -> Vec<(RefLabel, bool)> {
+    let rank = |r: &RefLabel| match r.kind {
+        _ if r.current => 0,
+        RefKind::Head => 1,
+        RefKind::Branch => 2,
+        RefKind::Remote => 3,
+        RefKind::Tag => 4,
+        RefKind::Stash => 5,
+    };
+    // A remote's name may hold a slash, so it's the branch's name that's looked for at the end.
+    let twin = |remote: &str| refs.iter().any(|r| r.kind == RefKind::Branch && remote.len() > r.name.len() && remote.ends_with(&r.name) && remote.as_bytes()[remote.len() - r.name.len() - 1] == b'/');
+    let mut out: Vec<(RefLabel, bool)> = refs
+        .iter()
+        .filter(|r| !(r.kind == RefKind::Remote && (r.name.ends_with("/HEAD") || twin(&r.name))))
+        .map(|r| {
+            let has_twin = r.kind == RefKind::Branch && refs.iter().any(|o| o.kind == RefKind::Remote && o.name.ends_with(&format!("/{}", r.name)));
+            (r.clone(), has_twin)
+        })
+        .collect();
+    out.sort_by_key(|(r, _)| rank(r));
+    out
+}
+
+#[cfg(test)]
+#[test]
+fn a_commits_badges_lead_with_the_current_branch_and_drop_the_noise() {
+    let l = |kind, name: &str, current| RefLabel { kind, name: name.into(), current };
+    let refs = [l(RefKind::Tag, "v1", false), l(RefKind::Remote, "origin/HEAD", false), l(RefKind::Remote, "origin/main", false), l(RefKind::Remote, "origin/other", false), l(RefKind::Branch, "side", false), l(RefKind::Branch, "main", true)];
+    let got: Vec<(String, bool)> = badges_for(&refs).into_iter().map(|(r, t)| (r.name, t)).collect();
+    assert_eq!(got, [("main".to_string(), true), ("side".to_string(), false), ("origin/other".to_string(), false), ("v1".to_string(), false)]);
 }
 
 fn build_query(f: &Filters, limit: usize, stash_shas: &[String], cur: Option<&str>) -> LogQuery {
@@ -181,7 +222,7 @@ impl GraphView {
         "graph".into()
     }
     pub fn title(&self) -> String {
-        "Commit Graph".into()
+        "Graph".into()
     }
 
     /// Show only this ref.
@@ -280,7 +321,7 @@ impl GraphView {
         let mut changed = false;
         // Wraps, or a narrow panel would be stretched and clip the rightmost columns.
         ui.horizontal_wrapped(|ui| {
-            let r = ui.add(crate::widgets::input(&mut self.query).hint_text("Search: message, @me, @:author, committer:, file:, change:, #:sha").desired_width(280.0));
+            let r = ui.add(crate::widgets::input(&mut self.query).hint_text("Search commits").desired_width(220.0)).on_hover_text("Words in the message, or @me, @:author, committer:, file:, change:, #:sha");
             if std::mem::take(&mut self.focus_search) {
                 r.request_focus();
             }
@@ -302,16 +343,16 @@ impl GraphView {
             }
             if !self.match_list.is_empty() || self.matches.get().is_some() {
                 ui.label(RichText::new(format!("{} of {}", if self.match_list.is_empty() { 0 } else { self.match_pos + 1 }, self.match_list.len())).color(p.dim));
-                if ui.small_button("▲").on_hover_text("Previous match").clicked() && !self.match_list.is_empty() {
+                if ui.small_button(icon::CARET_UP).on_hover_text("Previous match").clicked() && !self.match_list.is_empty() {
                     self.match_pos = (self.match_pos + self.match_list.len() - 1) % self.match_list.len();
                     self.scroll_to = Some(self.match_list[self.match_pos]);
                 }
-                if ui.small_button("▼").on_hover_text("Next match").clicked() && !self.match_list.is_empty() {
+                if ui.small_button(icon::CARET_DOWN).on_hover_text("Next match").clicked() && !self.match_list.is_empty() {
                     self.match_pos = (self.match_pos + 1) % self.match_list.len();
                     self.scroll_to = Some(self.match_list[self.match_pos]);
                 }
                 toggle(ui, &mut self.filter_to_matches, "Only matches", "Hide commits that don't match");
-                if ui.small_button("✖").on_hover_text("Clear search").clicked() {
+                if ui.small_button(icon::X).on_hover_text("Clear search").clicked() {
                     self.query.clear();
                     self.matches = Task::default();
                     self.match_list.clear();
@@ -319,64 +360,93 @@ impl GraphView {
                 }
             }
             ui.separator();
+            // Everything that narrows the list, with a count so it's clear why commits are missing.
             let f = &mut self.filters;
-            changed |= toggle(ui, &mut f.only_current, "Current", "Only the current branch and its upstream");
-            let mut smart = f.preset.is_some();
-            if toggle(ui, &mut smart, "Smart", "Current branch, its upstream, the default branch, and favorites") {
-                f.preset = smart.then(|| {
-                    let mut v = vec!["HEAD".to_string()];
-                    if let Some(u) = cx.status().and_then(|s| s.upstream.clone()) {
-                        v.push(u);
-                    }
-                    let base = cx.data.base_branch();
-                    if cx.data.branches().iter().any(|b| b.name == base) {
-                        v.push(base);
-                    }
-                    v.extend(cx.settings.favorite_branches.iter().cloned());
-                    v
-                });
-                changed = true;
-            }
-            changed |= toggle(ui, &mut f.remotes, "Remotes", "Show remote branches");
-            changed |= toggle(ui, &mut f.tags, "Tags", "Show tags");
-            changed |= toggle(ui, &mut f.stashes, "Stashes", "Show stashes");
-            changed |= toggle(ui, &mut f.no_merges, "No merges", "Hide merge commits");
-            changed |= toggle(ui, &mut f.first_parent, "First parent", "Follow only first parents");
-            ui.menu_button("Branches ▾", |ui| {
-                ui.set_max_height(400.0);
-                if ui.button("Show all").clicked() {
-                    f.hidden.clear();
-                    f.solo = None;
-                    f.preset = None;
+            let on = [f.only_current, f.preset.is_some(), !f.remotes, !f.tags, !f.stashes, f.no_merges, f.first_parent, !f.hidden.is_empty(), f.solo.is_some()].iter().filter(|x| **x).count();
+            let title = if on > 0 { format!("Filters ({on}) {}", icon::CARET_DOWN) } else { format!("Filters {}", icon::CARET_DOWN) };
+            let keep_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+            egui::containers::menu::MenuButton::new(title).config(keep_open).ui(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.label(RichText::new("Which branches").small().color(p.dim));
+                changed |= toggle(ui, &mut f.only_current, "Current", "Only the current branch and its upstream");
+                let mut smart = f.preset.is_some();
+                if toggle(ui, &mut smart, "Smart", "Current branch, its upstream, the default branch, and favorites") {
+                    f.preset = smart.then(|| {
+                        let mut v = vec!["HEAD".to_string()];
+                        if let Some(u) = cx.status().and_then(|s| s.upstream.clone()) {
+                            v.push(u);
+                        }
+                        let base = cx.data.base_branch();
+                        if cx.data.branches().iter().any(|b| b.name == base) {
+                            v.push(base);
+                        }
+                        v.extend(cx.settings.favorite_branches.iter().cloned());
+                        v
+                    });
                     changed = true;
                 }
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for b in cx.data.branches() {
-                        ui.horizontal(|ui| {
-                            let mut vis = !f.hidden.contains(&b.name);
-                            if ui.checkbox(&mut vis, b.name.as_str()).changed() {
-                                if vis {
-                                    f.hidden.retain(|h| *h != b.name);
-                                } else {
-                                    f.hidden.push(b.name.clone());
-                                }
-                                f.solo = None;
-                                changed = true;
-                            }
-                            if ui.small_button("solo").on_hover_text("Show only this branch").clicked() {
-                                f.solo = Some(b.name.clone());
-                                changed = true;
-                            }
-                        });
+                ui.menu_button("Branches", |ui| {
+                    ui.set_max_height(400.0);
+                    if ui.button("Show all").clicked() {
+                        f.hidden.clear();
+                        f.solo = None;
+                        f.preset = None;
+                        changed = true;
                     }
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for b in cx.data.branches() {
+                            ui.horizontal(|ui| {
+                                let mut vis = !f.hidden.contains(&b.name);
+                                if ui.checkbox(&mut vis, b.name.as_str()).changed() {
+                                    if vis {
+                                        f.hidden.retain(|h| *h != b.name);
+                                    } else {
+                                        f.hidden.push(b.name.clone());
+                                    }
+                                    f.solo = None;
+                                    changed = true;
+                                }
+                                if ui.small_button("solo").on_hover_text("Show only this branch").clicked() {
+                                    f.solo = Some(b.name.clone());
+                                    changed = true;
+                                }
+                            });
+                        }
+                    });
                 });
+                ui.separator();
+                ui.label(RichText::new("What to show").small().color(p.dim));
+                changed |= toggle(ui, &mut f.remotes, "Remotes", "Show remote branches");
+                changed |= toggle(ui, &mut f.tags, "Tags", "Show tags");
+                changed |= toggle(ui, &mut f.stashes, "Stashes", "Show stashes");
+                changed |= toggle(ui, &mut f.no_merges, "No merges", "Hide merge commits");
+                changed |= toggle(ui, &mut f.first_parent, "First parent", "Follow only first parents");
             });
             if self.filters.solo.is_some() {
                 let s = self.filters.solo.clone().unwrap_or_default();
                 chip(ui, &format!("only {s}"), p.accent);
             }
-            ui.menu_button("Columns ▾", |ui| {
+            let mut jump = None;
+            ui.menu_button(format!("Jump {}", icon::CARET_DOWN), |ui| {
+                if ui.button("HEAD").on_hover_text("Jump to the current commit").clicked() {
+                    jump = Some("HEAD".to_string());
+                    ui.close();
+                }
+                if let Some(u) = cx.status().and_then(|s| s.upstream.clone())
+                    && ui.button("Upstream").on_hover_text(format!("Jump to {u}")).clicked() {
+                        jump = Some(u);
+                        ui.close();
+                    }
+                if ui.button("Find ref…").on_hover_text("Find a branch, tag, or worktree (/)").clicked() {
+                    self.finder = Some(String::new());
+                    ui.close();
+                }
+            });
+            if let Some(name) = jump {
+                self.jump_to_ref(&name, cx);
+            }
+            ui.menu_button(format!("Columns {}", icon::CARET_DOWN), |ui| {
                 self.cols.changes = cx.settings.graph_changes_column;
                 self.cols.menu(ui, cx);
                 ui.separator();
@@ -391,16 +461,6 @@ impl GraphView {
                     cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.graph_dim_merges = dim)));
                 }
             });
-            if ui.small_button("HEAD").on_hover_text("Jump to the current commit").clicked() {
-                self.jump_to_ref("HEAD", cx);
-            }
-            if let Some(u) = cx.status().and_then(|s| s.upstream.clone())
-                && ui.small_button("Upstream").on_hover_text(format!("Jump to {u}")).clicked() {
-                    self.jump_to_ref(&u, cx);
-                }
-            if ui.small_button("Find ref").on_hover_text("Find a branch, tag, or worktree (/)").clicked() {
-                self.finder = Some(String::new());
-            }
             if self.data.busy() {
                 ui.add(spinner(14.0));
             }
@@ -412,6 +472,16 @@ impl GraphView {
         let ctx = ui.ctx().clone();
         if self.data.poll() {
             self.recompute_matches();
+            // HEAD is what anyone opening this wants to know about. Once: after that, nothing
+            // selected means the user cleared it.
+            if !std::mem::replace(&mut self.head_shown, true)
+                && cx.settings.details_on_open
+                && let Some(head) = cx.status().map(|s| s.head_sha.clone()).filter(|h| !h.is_empty())
+            {
+                self.selected = vec![head.clone()];
+                self.last_clicked = Some(head.clone());
+                cx.out.push(crate::action::Action::InspectFirst(head));
+            }
         }
         if self.matches.poll() {
             // A failed search has no results, and the last one's highlights aren't its answer.
@@ -473,6 +543,23 @@ impl GraphView {
             spinner_row(ui, "Loading commits…", cx.pal);
             return;
         };
+        // A repository with no commits has no columns worth showing.
+        if g.commits.is_empty() && cx.status().is_some_and(|st| st.head_sha.is_empty()) {
+            empty_state(ui, "No commits yet", "Add files to this folder, then commit them. Publishing needs a remote.", cx.pal);
+            ui.vertical_centered(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space((ui.available_width() - 200.0).max(0.0) / 2.0);
+                    if ui.button("Open Changes").clicked() {
+                        cx.open(Tab::changes());
+                    }
+                    if ui.button("Add remote…").clicked() {
+                        cx.form(forms::add_remote());
+                    }
+                });
+            });
+            self.data.value = Some(g);
+            return;
+        }
         self.table(ui, cx, &g);
         self.data.value = Some(g);
     }
@@ -719,11 +806,23 @@ impl GraphView {
                         let mut x = clip.left() + 4.0;
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(clip));
                         child.set_clip_rect(clip.intersect(ui.clip_rect()));
-                        for lab in &c.refs {
-                            if x > clip.right() - 20.0 {
+                        let badges = badges_for(&c.refs);
+                        for (shown_at, (lab, both)) in badges.iter().enumerate() {
+                            // The last one fits without room for a count after it.
+                            let left = badges.len() - shown_at - 1;
+                            let needs = badge_width(ui, lab) + if left > 0 { 30.0 } else { 0.0 };
+                            if x + needs > clip.right() && shown_at > 0 {
+                                paint_text(&child, Rect::from_min_size(pos2(x + 1.0, rect.top()), vec2(clip.right() - x, ROW_H)), &format!("+{}", badges.len() - shown_at), prop(11.0), p.dim);
+                                resp.clone().on_hover_ui(|ui| {
+                                    for l in &c.refs {
+                                        ui.label(l.name.as_str());
+                                    }
+                                });
                                 break;
                             }
-                            let br = paint_badge(&child, pos2(x, rect.top() + 3.0), ROW_H - 6.0, lab, &p);
+                            // With its remote twin at the same commit, it says so and takes one badge.
+                            let shown = RefLabel { name: if *both { format!("{} {}", lab.name, icon::CLOUD_CHECK) } else { lab.name.clone() }, ..lab.clone() };
+                            let br = paint_badge(&child, pos2(x, rect.top() + 3.0), ROW_H - 6.0, &shown, &p);
                             let id = ui.id().with(("badge", i, &lab.name));
                             let bresp = ui.interact(br.intersect(clip), id, Sense::drag());
                             if lab.kind != RefKind::Stash {
@@ -735,14 +834,6 @@ impl GraphView {
                                 });
                             }
                             x = br.right() + 3.0;
-                        }
-                        let hidden = c.refs.iter().fold(clip.left() + 4.0, |acc, l| acc + badge_width(ui, l) + 3.0) > clip.right();
-                        if hidden {
-                            resp.clone().on_hover_ui(|ui| {
-                                for l in &c.refs {
-                                    ui.label(l.name.as_str());
-                                }
-                            });
                         }
                     }
 
@@ -787,18 +878,19 @@ impl GraphView {
                         let resp = resp.on_hover_ui(|ui| {
                             commit_card(ui, &c.sha, &c.author_name, &c.author_email, c.author_time, &c.subject, &p, cx.settings.gravatar);
                         });
-                        resp.context_menu(|ui| {
-                            let folded = self.folded.contains(&r.column);
-                            if ui.button(if folded { "Unfold this lane" } else { "Fold this lane" }).clicked() {
-                                self.fold_request.set(Some(Some(r.column)));
-                                ui.close();
-                            }
-                            if !self.folded.is_empty() && ui.button("Unfold all lanes").clicked() {
-                                self.fold_request.set(Some(None));
-                                ui.close();
-                            }
-                            ui.separator();
+                        let by_key = self.menu_key && self.selected.last() == Some(&c.sha);
+                        keyed_context_menu(&resp, by_key, |ui| {
                             self.row_menu(ui, cx, c, g);
+                                ui.separator();
+                                let folded = self.folded.contains(&r.column);
+                                if ui.button(if folded { "Unfold this lane" } else { "Fold this lane" }).clicked() {
+                                    self.fold_request.set(Some(Some(r.column)));
+                                    ui.close();
+                                }
+                                if !self.folded.is_empty() && ui.button("Unfold all lanes").clicked() {
+                                    self.fold_request.set(Some(None));
+                                    ui.close();
+                                }
                         });
                         // Drop a dragged ref on this commit.
                         if let Some(name) = resp.dnd_release_payload::<String>() {
@@ -907,7 +999,8 @@ impl GraphView {
     }
 
     fn keyboard(&mut self, ui: &Ui, g: &Graph, cx: &mut Cx, visible: &[usize]) {
-        if ui.ctx().memory(|m| m.focused().is_some()) || visible.is_empty() {
+        self.menu_key = !cx.dialog_open && cx.in_front && ui.ctx().memory(|m| m.focused().is_none()) && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F10));
+        if !cx.in_front || ui.ctx().memory(|m| m.focused().is_some()) || visible.is_empty() {
             return;
         }
         let (down, up) = ui.input(|i| (i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::J), i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::K)));

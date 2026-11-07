@@ -35,6 +35,8 @@ pub struct RebaseView {
     drag: Option<usize>,
     selected: usize,
     pub finished: Option<bool>,
+    /// The plan as it came, to tell whether anyone has changed it.
+    plan_as_loaded: String,
 }
 
 impl RebaseView {
@@ -56,6 +58,7 @@ impl RebaseView {
             drag: None,
             selected: 0,
             finished: None,
+            plan_as_loaded: String::new(),
         }
     }
 
@@ -63,6 +66,7 @@ impl RebaseView {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let mut v = Self::new(None);
         v.items = rebase::parse_todo(&text);
+        v.plan_as_loaded = rebase::render_todo(&v.items);
         v.todo_file = Some(path);
         v.started = true;
         v
@@ -77,12 +81,17 @@ impl RebaseView {
         Self { root: true, ..Self::new(None) }
     }
 
+    /// What closing this tab would lose: a plan someone has changed and not started.
+    pub fn unsaved(&self) -> Option<String> {
+        (self.finished.is_none() && !self.items.is_empty() && rebase::render_todo(&self.items) != self.plan_as_loaded).then(|| "A rebase plan you've changed and not started.".to_string())
+    }
+
     pub fn key(&self) -> String {
         format!("rebase:{:?}:{}", self.base, self.root)
     }
 
     pub fn title(&self) -> String {
-        "Interactive Rebase".to_string()
+        "Rebase".to_string()
     }
 
     fn load(&mut self, ctx: &egui::Context, cx: &Cx) {
@@ -105,6 +114,7 @@ impl RebaseView {
         let p = cx.pal.clone();
         if self.loaded.poll()
             && let Some(v) = self.loaded.value.take() {
+                self.plan_as_loaded = rebase::render_todo(&v);
                 self.items = v;
                 if let Some((sha, action)) = self.pending.take() {
                     match self.items.iter().position(|x| x.sha == sha) {
@@ -206,7 +216,7 @@ impl RebaseView {
             }
             ui.horizontal(|ui| {
                 let ok = errs.is_empty() && !self.items.is_empty() && !self.stale && !self.head_now.busy();
-                let b = egui::Button::new(RichText::new(if self.todo_file.is_some() { "Start rebase".to_string() } else { format!("Rebase {} commit(s)", self.items.len()) }).color(if ok { p.on_accent } else { p.faint })).fill(if ok { p.accent } else { p.panel2 });
+                let b = egui::Button::new(RichText::new(if self.todo_file.is_some() { "Start rebase".to_string() } else { format!("Rebase {}", plural(self.items.len(), "commit", "commits")) }).color(if ok { p.on_accent } else { p.faint })).fill(if ok { p.accent } else { p.panel2 });
                 if ui.add_enabled(ok, b).clicked() {
                     self.start(ui.ctx(), cx);
                 }

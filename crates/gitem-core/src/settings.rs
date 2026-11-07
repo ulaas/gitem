@@ -109,6 +109,12 @@ impl ThemeChoice {
 pub struct Settings {
     pub git_path: String,
     pub theme: ThemeChoice,
+    /// Opening the graph shows the current commit's details.
+    pub details_on_open: bool,
+    /// Every view on the rail, rather than the usual few and a More list.
+    pub rail_full: bool,
+    /// No moving spinners or animated transitions.
+    pub reduce_motion: bool,
     /// A named accent, "#rrggbb", or empty for the theme's own.
     pub accent: String,
     pub ui_scale: f32,
@@ -218,6 +224,9 @@ impl Default for Settings {
         Self {
             git_path: String::new(),
             theme: ThemeChoice::Dark,
+            details_on_open: true,
+            rail_full: false,
+            reduce_motion: false,
             accent: String::new(),
             ui_scale: 1.0,
             editor_font_size: 13.0,

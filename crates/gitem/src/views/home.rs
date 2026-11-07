@@ -261,14 +261,17 @@ impl HomeView {
                     })));
                     self.summaries_for = None;
                 }
-            if ui.small_button("Delete workspace").clicked() {
+            if ui.small_button("Delete workspace…").clicked() {
                 let name = w.name.clone();
-                cx.out.push(Action::Settings(Box::new(move |s| {
-                    // One only: older settings can hold two of the same name.
-                    if let Some(at) = s.workspaces.iter().position(|x| x.name == name) {
-                        s.workspaces.remove(at);
-                    }
-                })));
+                cx.form(FormDialog::new("Delete workspace", "Delete").danger().info(format!("Delete the workspace {name} and its list of {}? The repositories themselves aren't touched.", plural(w.repos.len(), "repository", "repositories"))).on_submit(move |_| {
+                    let name = name.clone();
+                    Ok(vec![Action::Settings(Box::new(move |s| {
+                        // One only: older settings can hold two of the same name.
+                        if let Some(at) = s.workspaces.iter().position(|x| x.name == name) {
+                            s.workspaces.remove(at);
+                        }
+                    }))])
+                }));
             }
             if self.summaries.busy() {
                 ui.add(spinner(13.0));

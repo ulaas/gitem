@@ -50,11 +50,17 @@ pub struct GitOp {
     pub own_config: bool,
     /// Scratch files this op needs only while it runs.
     pub remove_after: Vec<std::path::PathBuf>,
+    /// Nothing is lost by saying yes to this, so a question about it needn't look alarming.
+    pub lossless: bool,
 }
 
 impl GitOp {
     pub fn new(title: impl Into<String>) -> Self {
         Self { title: title.into(), ..Default::default() }
+    }
+    pub fn lossless(mut self) -> Self {
+        self.lossless = true;
+        self
     }
     pub fn step<S: AsRef<str>>(mut self, args: &[S]) -> Self {
         self.steps.push(Step { args: args.iter().map(|s| s.as_ref().to_string()).collect(), ..Default::default() });
@@ -156,7 +162,21 @@ impl GitOp {
     /// Plain-text summary of the commands, shown in confirmation dialogs.
     pub fn preview(&self) -> String {
         let shown = |a: &String| a.strip_prefix(LITERAL).unwrap_or(a).to_string();
-        crate::util::mask_url_credentials(&self.steps.iter().map(|s| format!("git {}", s.args.iter().map(shown).collect::<Vec<_>>().join(" "))).collect::<Vec<_>>().join("\n"))
+        let step = |s: &Step| {
+            // Past a certain length names go over stdin. What matters to whoever's asked is the names.
+            let from_stdin = s.args.iter().any(|a| a == "--pathspec-from-file=-");
+            let args = s.args.iter().filter(|a| !from_stdin || (*a != "--pathspec-from-file=-" && *a != "--pathspec-file-nul")).map(shown).collect::<Vec<_>>().join(" ");
+            let names: Vec<String> = s.stdin.iter().filter(|_| from_stdin).flat_map(|b| b.split(|c| *c == 0)).filter(|n| !n.is_empty()).map(|n| { let n = String::from_utf8_lossy(n); n.strip_prefix(LITERAL).unwrap_or(&n).to_string() }).collect();
+            const SHOWN: usize = 5;
+            let more = names.len().saturating_sub(SHOWN);
+            let tail = names.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(" ");
+            match (names.is_empty(), more) {
+                (true, _) => format!("git {args}"),
+                (false, 0) => format!("git {args} -- {tail}"),
+                (false, n) => format!("git {args} -- {tail} and {n} more"),
+            }
+        };
+        crate::util::mask_url_credentials(&self.steps.iter().map(step).collect::<Vec<_>>().join("\n"))
     }
 
     /// One step, waiting out another program's lock: editors and agents run git beside
@@ -273,7 +293,7 @@ fn step_on_paths(op: GitOp, base: Vec<String>, paths: &[String]) -> GitOp {
 // ---- staging -----------------------------------------------------------------
 
 pub fn stage_paths(paths: &[String]) -> GitOp {
-    step_on_paths(GitOp::new(format!("Stage {} file(s)", paths.len())), v(&["add"]), paths).literal()
+    step_on_paths(GitOp::new(format!("Stage {}", crate::util::count_of(paths.len(), "file"))), v(&["add"]), paths).literal()
 }
 
 pub fn stage_all() -> GitOp {
@@ -282,7 +302,7 @@ pub fn stage_all() -> GitOp {
 
 pub fn unstage_paths(paths: &[String], has_head: bool) -> GitOp {
     let base = if has_head { v(&["restore", "--staged"]) } else { v(&["rm", "--cached", "-r", "--quiet"]) };
-    step_on_paths(GitOp::new(format!("Unstage {} file(s)", paths.len())), base, paths).literal()
+    step_on_paths(GitOp::new(format!("Unstage {}", crate::util::count_of(paths.len(), "file"))), base, paths).literal()
 }
 
 pub fn unstage_all(has_head: bool) -> GitOp {
@@ -298,17 +318,17 @@ pub fn unstage_all(has_head: bool) -> GitOp {
 /// so `paths` must leave out conflicted files. The list goes over stdin, since a large
 /// merge can hold more names than fit on a command line.
 pub fn unstage_during_op(paths: &[String]) -> GitOp {
-    GitOp::new(format!("Unstage {} file(s)", paths.len())).step(&["restore", "--staged", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(nul_separated(paths)).literal()
+    GitOp::new(format!("Unstage {}", crate::util::count_of(paths.len(), "file"))).step(&["restore", "--staged", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(nul_separated(paths)).literal()
 }
 
 /// Discard worktree changes of tracked files.
 pub fn discard_paths(paths: &[String]) -> GitOp {
-    step_on_paths(GitOp::new(format!("Discard changes in {} file(s)", paths.len())), v(&["restore", "--worktree"]), paths).literal()
+    step_on_paths(GitOp::new(format!("Discard changes in {}", crate::util::count_of(paths.len(), "file"))), v(&["restore", "--worktree"]), paths).literal()
 }
 
 /// Delete untracked paths through `git clean`, so nothing else can be affected.
 pub fn delete_untracked(paths: &[String]) -> GitOp {
-    let mut op = GitOp::new(format!("Delete {} untracked file(s)", paths.len()));
+    let mut op = GitOp::new(format!("Delete {}", crate::util::count_of(paths.len(), "untracked file")));
     // `clean` is the one of these that can't read its names from stdin.
     let mut batch: Vec<String> = Vec::new();
     for p in paths {
@@ -408,7 +428,7 @@ pub fn commit(o: &CommitOpts) -> GitOp {
 /// and leaves the old one behind. It goes only to `commit`: it's gone from the disk, so
 /// `add` has nothing to find.
 pub fn compose_commits(plan: &[ComposedCommit]) -> GitOp {
-    let mut op = GitOp::new(format!("Create {} commit(s)", plan.len()));
+    let mut op = GitOp::new(format!("Create {}", crate::util::count_of(plan.len(), "commit")));
     for c in plan {
         let mut all = c.files.clone();
         all.extend(c.renamed_from.iter().cloned());
@@ -608,7 +628,7 @@ pub fn cherry_pick(shas: &[String], no_commit: bool, x_trailer: bool) -> GitOp {
     }
     a.extend_from_slice(shas);
     let names: Vec<&str> = shas.iter().map(String::as_str).collect();
-    GitOp::new(format!("Cherry-pick {} commit(s)", shas.len())).names(&names).step_v(a)
+    GitOp::new(format!("Cherry-pick {}", crate::util::count_of(shas.len(), "commit"))).names(&names).step_v(a)
 }
 
 pub fn revert(sha: &str, no_commit: bool, mainline: Option<u32>) -> GitOp {

@@ -76,7 +76,7 @@ impl VisualView {
     }
 
     pub fn title(&self) -> String {
-        if self.path.is_empty() { format!("{} visual", self.rev) } else { format!("{} visual", self.path.rsplit('/').next().unwrap_or(&self.path)) }
+        if self.path.is_empty() { "Visual".to_string() } else { format!("{} visual", self.path.rsplit('/').next().unwrap_or(&self.path)) }
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {

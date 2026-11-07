@@ -84,6 +84,7 @@ impl Tab {
     /// back as `Some` if it has to be a tab of its own after all.
     pub fn retarget(&mut self, new: Tab) -> Option<Tab> {
         match (self, new) {
+            (Tab::Changes(a), Tab::Changes(b)) => a.retarget(*b),
             (Tab::Search(a), Tab::Search(b)) => a.retarget(*b),
             (Tab::Patches(a), Tab::Patches(b)) => a.retarget(*b),
             (Tab::Launchpad(a), Tab::Launchpad(b)) => a.retarget(*b),
@@ -95,11 +96,20 @@ impl Tab {
     }
 
     /// What closing this tab would lose, in a line for the user. `None` if nothing.
+    /// Whether a commit picked elsewhere has anything to do with this view. The Details panel
+    /// only takes room beside those that do.
+    pub fn shows_commits(&self) -> bool {
+        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_))
+    }
+
     pub fn unsaved(&self) -> Option<String> {
         match self {
             Tab::Merge(v) => v.unsaved(),
             Tab::Changes(v) => v.unsaved(),
             Tab::Composer(v) => v.unsaved(),
+            Tab::Rebase(v) => v.unsaved(),
+            Tab::Launchpad(v) => v.unsaved(),
+            Tab::Review(v) => v.unsaved(),
             _ => None,
         }
     }
@@ -120,7 +130,6 @@ impl Tab {
             Tab::Composer(_) => "composer".into(),
             Tab::Tools(_) => "tools".into(),
             Tab::Config(_) => "config".into(),
-            Tab::Credentials(_) => "credentials".into(),
             Tab::Console(_) => "console".into(),
             Tab::Settings(_) => "settings".into(),
             Tab::Treemap(_) => "treemap".into(),
@@ -146,7 +155,6 @@ impl Tab {
             "composer" => Tab::Composer(Box::default()),
             "tools" => Tab::Tools(Box::default()),
             "config" => Tab::Config(Box::default()),
-            "credentials" => Tab::Credentials(Box::default()),
             "console" => Tab::Console(Box::default()),
             "settings" => Tab::Settings(Box::default()),
             "treemap" => Tab::Treemap(Box::default()),

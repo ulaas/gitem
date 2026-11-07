@@ -520,7 +520,7 @@ fn a_multi_commit_pick_committed_by_hand_still_shows_as_in_progress_and_resumes(
     assert!(!f.has_ref("CHERRY_PICK_HEAD"), "git itself has moved past the first pick");
     let st = f.repo.status().unwrap();
     assert_eq!(st.op, RepoOp::CherryPick, "and this still says it's going");
-    assert_eq!(st.op_target.as_deref(), Some("1 commit(s) left"));
+    assert_eq!(st.op_target.as_deref(), Some("1 commit left"));
     assert!(!f.exists("b.txt"));
 
     f.run(ops::op_continue("cherry-pick"));

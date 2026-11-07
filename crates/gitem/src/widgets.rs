@@ -18,9 +18,33 @@ pub fn prop(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)
 }
 
-/// Clip to the rect and paint left-aligned text, vertically centred.
+/// Left-aligned text, vertically centred, ending in an ellipsis if it doesn't fit, so that a
+/// clipped word can't be taken for the whole of it.
 pub fn paint_text(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
-    ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).text(pos2(rect.left(), rect.center().y), Align2::LEFT_CENTER, text, font, color);
+    let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width().max(1.0));
+    let g = ui.painter().layout_job(job);
+    ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(pos2(rect.left(), rect.center().y - g.size().y / 2.0), g, color);
+}
+
+/// A folder path cut in the middle to about `chars` characters: its two ends say the most.
+pub fn middle_elided(path: &str, chars: usize) -> String {
+    let n = path.chars().count();
+    if n <= chars || chars < 5 {
+        return path.to_string();
+    }
+    let keep = chars - 1;
+    let (head, tail) = (keep / 2, keep - keep / 2);
+    let start: String = path.chars().take(head).collect();
+    let end: String = path.chars().skip(n - tail).collect();
+    format!("{start}\u{2026}{end}")
+}
+
+#[cfg(test)]
+#[test]
+fn a_long_path_keeps_both_its_ends() {
+    assert_eq!(middle_elided("short/", 20), "short/");
+    assert_eq!(middle_elided("src/views/deep/down/here/", 12), "src/v\u{2026}/here/");
 }
 
 pub fn ref_color(kind: RefKind, current: bool, p: &Palette) -> Color32 {
@@ -36,12 +60,13 @@ pub fn ref_color(kind: RefKind, current: bool, p: &Palette) -> Color32 {
     }
 }
 
-pub fn ref_glyph(kind: RefKind) -> &'static str {
+pub fn ref_glyph(kind: RefKind) -> String {
+    use crate::chrome::icon;
     match kind {
-        RefKind::Tag => "◆ ",
-        RefKind::Remote => "☁ ",
-        RefKind::Stash => "▣ ",
-        _ => "",
+        RefKind::Tag => format!("{} ", icon::TAG),
+        RefKind::Remote => format!("{} ", icon::CLOUD),
+        RefKind::Stash => format!("{} ", icon::ARCHIVE),
+        _ => String::new(),
     }
 }
 
@@ -146,7 +171,7 @@ pub fn paint_avatar(ui: &Ui, center: egui::Pos2, radius: f32, name: &str, email:
         }
     let c = p.person(if email.is_empty() { name } else { email });
     ui.painter().circle_filled(center, radius, c);
-    ui.painter().text(center, Align2::CENTER_CENTER, initials(name), prop(radius * 0.95), Color32::WHITE);
+    ui.painter().text(center, Align2::CENTER_CENTER, initials(name), prop(radius * 0.95), crate::theme::ink_on(c));
 }
 
 /// A full-width clickable row with hover and selection fill.
@@ -158,7 +183,37 @@ pub fn row(ui: &mut Ui, h: f32, selected: bool, p: &Palette) -> (Rect, Response)
     } else if resp.hovered() {
         ui.painter().rect_filled(rect, 0.0, p.hover);
     }
+    focus_ring(ui, &resp, p);
     (rect, resp)
+}
+
+/// A line around whatever has the keyboard's attention. It has its own look, so that it
+/// can't be taken for selected or switched on.
+pub fn focus_ring(ui: &Ui, resp: &Response, p: &Palette) {
+    if resp.has_focus() {
+        ui.painter().rect_stroke(resp.rect.shrink(1.0), 2.0, Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
+    }
+}
+
+/// The usual right-click menu, which `by_key` also opens, beside the row rather than at a
+/// pointer that may be anywhere.
+pub fn keyed_context_menu(resp: &Response, by_key: bool, add: impl FnOnce(&mut Ui)) {
+    let id = egui::Popup::default_response_id(resp).with("by-key");
+    let ctx = resp.ctx.clone();
+    if by_key {
+        ctx.data_mut(|d| d.insert_temp(id, true));
+    }
+    if resp.secondary_clicked() {
+        ctx.data_mut(|d| d.remove::<bool>(id));
+    }
+    let mut popup = egui::Popup::context_menu(resp);
+    if by_key {
+        popup = popup.open_memory(Some(egui::SetOpenCommand::Bool(true)));
+    }
+    if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+        popup = popup.anchor(resp);
+    }
+    popup.show(add);
 }
 
 /// Space between a text box's edge and its text. egui has no style for this, so every
@@ -190,6 +245,11 @@ impl LoadMore {
             LoadMore::All => LOAD_ALL,
         }
     }
+}
+
+/// "1 file", "2 files".
+pub fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", grouped(n), if n == 1 { one } else { many })
 }
 
 /// 2000 as "2,000".
@@ -251,7 +311,7 @@ pub fn load_more_row(ui: &mut Ui, step: usize, left: Option<usize>, busy: bool) 
 
 pub fn section(ui: &mut Ui, title: &str, p: &Palette) {
     ui.add_space(6.0);
-    ui.label(RichText::new(title.to_uppercase()).size(11.0).color(p.faint).strong());
+    ui.label(RichText::new(title.to_uppercase()).size(11.0).color(p.dim).strong());
     ui.add_space(2.0);
 }
 
@@ -273,10 +333,12 @@ pub fn paint_path(ui: &Ui, rect: Rect, path: &str, p: &Palette) {
         None => ("", path),
     };
     let mut job = LayoutJob::default();
-    job.wrap.max_width = f32::INFINITY;
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width().max(1.0));
     job.append(name, 0.0, TextFormat { font_id: prop(13.0), color: p.text, ..Default::default() });
     if !dir.is_empty() {
-        job.append(&format!("  {dir}"), 0.0, TextFormat { font_id: prop(11.0), color: p.faint, ..Default::default() });
+        // About what fits after the name, at this font's average width.
+        let room = (rect.width() - name.chars().count() as f32 * 6.5 - 8.0) / 5.5;
+        job.append(&format!("  {}", middle_elided(dir, room.max(0.0) as usize)), 0.0, TextFormat { font_id: prop(11.0), color: p.faint, ..Default::default() });
     }
     let g = ui.painter().layout_job(job);
     ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(pos2(rect.left(), rect.center().y - g.size().y / 2.0), g, p.text);
@@ -575,9 +637,9 @@ pub fn spinner_row(ui: &mut Ui, text: &str, p: &Palette) {
     });
 }
 
-/// Compact toolbar toggle.
+/// Compact toolbar toggle. It looks like something to press when it's off, too.
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str, tip: &str) -> bool {
-    let r = ui.selectable_label(*on, label).on_hover_text(tip);
+    let r = ui.add(egui::Button::new(label).selected(*on)).on_hover_text(tip);
     if r.clicked() {
         *on = !*on;
         true

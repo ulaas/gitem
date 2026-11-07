@@ -151,7 +151,7 @@ fn activity(ui: &mut Ui, cx: &mut Cx, s: &AgentSession) {
     if let Some(i) = hit {
         let (path, n) = &s.files[i];
         egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("agent-tip"), egui::PopupAnchor::Pointer).show(|ui| {
-            ui.label(format!("{path}: {n} time(s)"));
+            ui.label(format!("{path}: {}", plural(*n as usize, "time", "times")));
         });
         let root = cx.repo.root.to_string_lossy().replace('\\', "/");
         if let (true, Some(rel)) = (resp.clicked(), path.strip_prefix(&format!("{root}/"))) {

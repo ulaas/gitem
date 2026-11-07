@@ -190,7 +190,7 @@ impl SearchView {
             ui.label(RichText::new(HELP).monospace().color(p.dim));
             return;
         };
-        ui.label(RichText::new(format!("{} commit(s)", grouped(list.len()))).small().color(p.dim));
+        ui.label(RichText::new(plural(list.len(), "commit", "commits")).small().color(p.dim));
         if list.len() >= self.limit
             && let Some(choice) = load_more_bar(ui, "search-load-more", list.len(), "matches", SEARCH_PAGE, self.results.busy(), &p)
         {

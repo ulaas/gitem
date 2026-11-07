@@ -40,6 +40,8 @@ struct Running {
     open_after: Option<PathBuf>,
     /// Stopping it loses nothing, so it's no reason to ask before closing.
     harmless: bool,
+    /// It makes a commit, which can then be taken back.
+    is_commit: bool,
     /// It changes the repository's config by the user's own hand in gitem.
     own_config: bool,
     /// It clones, so the folder it leaves behind is gitem's own work.
@@ -59,6 +61,7 @@ fn is_harmless(op: &GitOp) -> bool {
 fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, open_after: Option<PathBuf>) -> Running {
     let own_config = op.own_config;
     let is_clone = op.steps.first().and_then(|s| s.args.first()).is_some_and(|a| a == "clone");
+    let is_commit = op.steps.last().and_then(|s| s.args.first()).is_some_and(|a| a == "commit");
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let c2 = cancel.clone();
@@ -75,7 +78,7 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
         let _ = tx.send(OpMsg::Done(res));
         ctx2.request_repaint();
     });
-    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false }
+    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, is_commit, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false }
 }
 
 /// A write waiting its turn. `batch` tells what was asked for together: the steps of one
@@ -134,6 +137,60 @@ pub struct RepoTab {
     later: Vec<crate::task::Task<crate::action::Later>>,
     /// The user asked to see the question about this repository's config again.
     review_trust: bool,
+    /// Typed in the toolbar's branch menu.
+    branch_filter: String,
+    /// Branches switched to here, latest first.
+    recent_branches: Vec<String>,
+    /// The commit made here last, while nothing else has been run since.
+    undoable: Option<String>,
+    /// What there isn't room for beside the view at this window size.
+    squeeze: Squeeze,
+    /// Which of those is being shown over the view.
+    peek: Option<Peek>,
+    /// The tab opened last from the rail's More list, which the next one replaces.
+    more_tab: Option<String>,
+    /// When FETCH_HEAD was last written, as read for this status.
+    fetched: (u64, Option<std::time::SystemTime>),
+}
+
+#[derive(Default, Clone, Copy)]
+struct Squeeze {
+    details: bool,
+    sidebar: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Peek {
+    Details,
+    Sidebar,
+}
+
+/// A view narrower than this has lost the point of showing it.
+const VIEW_MIN_WIDTH: f32 = 520.0;
+const SIDEBAR_WIDTH: f32 = 270.0;
+const DETAILS_WIDTH: f32 = 340.0;
+
+/// Which side panels give way, Details first, so the view keeps a usable width.
+fn squeeze_for(width: f32, rail: bool, sidebar: bool, details: bool) -> Squeeze {
+    let left = width - if rail { chrome::RAIL_WIDTH } else { 0.0 };
+    let with_sidebar = if sidebar { left - SIDEBAR_WIDTH } else { left };
+    let hide_details = details && with_sidebar - DETAILS_WIDTH < VIEW_MIN_WIDTH;
+    let hide_sidebar = sidebar && with_sidebar < VIEW_MIN_WIDTH;
+    Squeeze { details: hide_details, sidebar: hide_sidebar }
+}
+
+#[cfg(test)]
+#[test]
+fn details_give_way_first_and_then_the_sidebar() {
+    let got = |w: f32| {
+        let s = squeeze_for(w, true, true, true);
+        (s.details, s.sidebar)
+    };
+    assert_eq!(got(1500.0), (false, false));
+    assert_eq!(got(1100.0), (true, false));
+    assert_eq!(got(800.0), (true, true));
+    // What's been turned off has no room to give.
+    assert!(!squeeze_for(1000.0, true, true, false).details);
 }
 
 impl RepoTab {
@@ -176,6 +233,13 @@ impl RepoTab {
             background: Vec::new(),
             later: Vec::new(),
             review_trust: false,
+            branch_filter: String::new(),
+            recent_branches: Vec::new(),
+            undoable: None,
+            squeeze: Squeeze::default(),
+            peek: None,
+            more_tab: None,
+            fetched: (u64::MAX, None),
         }
     }
 
@@ -187,7 +251,7 @@ impl RepoTab {
         }
         let queued = self.queue.iter().filter(|q| !is_harmless(&q.op)).count();
         if queued > 0 {
-            items.push(format!("{queued} queued git command(s) won't run."));
+            items.push(format!("{} won't run.", plural(queued, "queued git command", "queued git commands")));
         }
         items
     }
@@ -195,6 +259,24 @@ impl RepoTab {
     /// Whether any side panel is showing, or Zen mode has hidden them.
     pub fn panels_showing(&self) -> bool {
         self.show_sidebar || self.show_inspect
+    }
+
+    /// A view from the rail's More list takes over from the last one, so going through them
+    /// doesn't pile up tabs. It stays if it holds something that closing would lose.
+    fn open_from_more(&mut self, tab: Tab) {
+        let key = tab.key();
+        let already = self.dock.find_tab_from(|t| t.key() == key).is_some();
+        if let (false, Some(old)) = (already, self.more_tab.clone())
+            && let Some(path) = self.dock.find_tab_from(|t| t.key() == old && t.unsaved().is_none())
+        {
+            if let Some((_, slot)) = self.dock.iter_all_tabs_mut().find(|(p, _)| *p == path) {
+                *slot = tab;
+            }
+            let _ = self.dock.set_active_tab(path);
+        } else {
+            self.open_tab(tab);
+        }
+        self.more_tab = Some(key);
     }
 
     pub fn open_tab(&mut self, tab: Tab) {
@@ -255,6 +337,8 @@ impl RepoTab {
             if let Some(res) = done {
                 let title = r.title.clone();
                 let open_after = r.open_after.clone();
+                // Only straight after it: anything else run since is what an undo would meet.
+                self.undoable = res.as_ref().ok().filter(|_| r.is_commit).and_then(|n| n.split_whitespace().next()).map(String::from);
                 let (own_config, batch) = (r.own_config, r.batch);
                 self.running = None;
                 // A pull can bring in config through a tracked `include.path`.
@@ -282,7 +366,7 @@ impl RepoTab {
                         let before = self.queue.len();
                         self.queue.retain(|q| !stopped_midway && q.batch != batch);
                         let dropped = before - self.queue.len();
-                        let not_run = if dropped > 0 { format!("\n\n{dropped} queued command(s) after it were not run.") } else { String::new() };
+                        let not_run = if dropped > 0 { format!("\n\n{} after it {} not run.", plural(dropped, "queued command", "queued commands"), if dropped == 1 { "was" } else { "were" }) } else { String::new() };
                         // Being cancelled kills git without its cleanup. Either way, if the
                         // lock is why it stopped or what it left, there's a way out to offer.
                         if self.repo.index_lock().is_some() && (e == "cancelled" || gitem_core::runner::is_lock_failure(&e)) {
@@ -446,6 +530,30 @@ use gitem_core::trust::TrustState;
 
 const DOCK_ID: &str = "gitem-dock";
 
+/// What's going on, in the words of the branches involved where they can be found.
+pub fn op_headline(st: &RepoStatus, branches: &[Branch]) -> String {
+    // The commit a name is known by, if a branch is there.
+    let named = |sha: &str| branches.iter().find(|b| !sha.is_empty() && b.sha.starts_with(sha)).map(|b| b.name.clone());
+    let target = st.op_target.clone().unwrap_or_default();
+    match st.op {
+        RepoOp::Merge => {
+            let other = st.op_merging.clone().or_else(|| named(&target)).unwrap_or(target);
+            match &st.branch {
+                Some(here) => format!("Merging {other} into {here}"),
+                None => format!("Merging {other}"),
+            }
+        }
+        RepoOp::Rebase | RepoOp::RebaseInteractive => {
+            let onto = named(&target).unwrap_or(target);
+            match &st.op_branch {
+                Some(b) => format!("Rebasing {b} onto {onto}"),
+                None => format!("Rebasing onto {onto}"),
+            }
+        }
+        op => format!("{} {target}", op.label()).trim_end().to_string(),
+    }
+}
+
 /// A non-network op is only offered a Cancel once it looks stuck, since stopping one can
 /// leave things half done.
 const CANCEL_OFFERED_AFTER: Duration = Duration::from_secs(3);
@@ -507,6 +615,8 @@ pub fn layout_from_json(json: &str) -> Option<DockState<Tab>> {
 
 struct Viewer<'a> {
     cx: Cx<'a>,
+    /// The key of the tab the user is working in.
+    front: Option<String>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -525,6 +635,7 @@ impl TabViewer for Viewer<'_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Tab) {
         egui::Frame::new().inner_margin(6.0).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
+            self.cx.in_front = self.front.as_deref().is_none_or(|k| k == tab.key());
             tab.ui(ui, &mut self.cx);
         });
     }
@@ -540,6 +651,37 @@ impl TabViewer for Viewer<'_> {
                 OnCloseResponse::Focus
             }
             None => OnCloseResponse::Close,
+        }
+    }
+}
+
+/// A click in the moments after a dialog appears wasn't aimed at it: it's the second half of
+/// a double click, or it was on its way to something that was there before.
+const DIALOG_SETTLES: f64 = 0.2;
+
+/// How every dialog is put on screen. They sit above the backdrop that dims the app.
+fn dialog_window<'a>(title: impl Into<egui::WidgetText>, settled: bool) -> egui::Window<'a> {
+    egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).order(egui::Order::Foreground).interactable(settled)
+}
+
+/// Dims everything behind a dialog and keeps clicks and the keyboard off it. The window's own
+/// controls stay live, and its title bar still moves it, as there's no other way to do those.
+fn dialog_backdrop(ctx: &egui::Context, controls_width: f32) {
+    let screen = ctx.content_rect();
+    let dim = Color32::from_black_alpha(90);
+    let top = egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x - controls_width, screen.min.y + chrome::TITLE_BAR_HEIGHT));
+    let rest = egui::Rect::from_min_max(egui::pos2(screen.min.x, top.max.y), screen.max);
+    for (id, rect, is_title) in [("dialog-backdrop", rest, false), ("dialog-backdrop-title", top, true)] {
+        let area = egui::Area::new(id.into()).order(egui::Order::Middle).fixed_pos(rect.min).constrain(false).sense(Sense::click_and_drag()).interactable(true);
+        if !is_title {
+            ctx.memory_mut(|m| m.set_modal_layer(area.layer()));
+        }
+        let shown = area.show(ctx, |ui| {
+            ui.painter().rect_filled(rect, 0.0, dim);
+            ui.allocate_rect(rect, Sense::click_and_drag())
+        });
+        if is_title && shown.inner.drag_started_by(egui::PointerButton::Primary) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
     }
 }
@@ -633,6 +775,12 @@ pub struct GitemApp {
     /// Whether git is running anywhere, before removing a lock. Tests replace it, because
     /// tests running side by side always have git running somewhere.
     pub git_running: fn() -> bool,
+    /// Which dialogs are up, and when that last changed.
+    dialogs_seen: (String, f64),
+    dialogs_settled: bool,
+    /// The same, for the error showing.
+    errors_seen: (String, f64),
+    errors_settled: bool,
     close_guard: Option<CloseGuard>,
     /// The user has said yes to losing work, so the next close request goes through.
     closing: bool,
@@ -645,6 +793,10 @@ pub struct GitemApp {
     opening: Vec<Opening>,
     /// A folder being picked: the dialog runs on its own thread, so this one keeps drawing.
     folder_pick: crate::task::Task<Option<PathBuf>>,
+    /// The repository whose folder went missing, while its new place is being picked.
+    relocating: Option<PathBuf>,
+    /// The list of keys is open, with what's been typed to narrow it.
+    help: Option<String>,
 }
 
 struct Opening {
@@ -733,6 +885,10 @@ impl GitemApp {
             lock_prompt: None,
             link_prompt: None,
             git_running: gitem_core::runner::git_processes_running,
+            dialogs_seen: (String::new(), 0.0),
+            dialogs_settled: true,
+            errors_seen: (String::new(), 0.0),
+            errors_settled: true,
             close_guard: None,
             closing: false,
             orphans: Vec::new(),
@@ -740,6 +896,8 @@ impl GitemApp {
             window_focused: true,
             opening: Vec::new(),
             folder_pick: Default::default(),
+            relocating: None,
+            help: None,
         }
     }
 
@@ -762,14 +920,14 @@ impl GitemApp {
         let age = std::fs::metadata(&lock).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(|d| d.as_secs());
         let (mut remove, mut leave) = (false, false);
         let warn = self.pal.warn;
-        egui::Window::new("The repository is locked").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+        dialog_window("The repository is locked", self.dialogs_settled).show(ctx, |ui| {
             ui.set_max_width(540.0);
             ui.add(egui::Label::new(RichText::new(prompt.why.as_str()).monospace().small()).selectable(true));
             ui.add_space(6.0);
             ui.label("git refuses to change anything while this file exists:");
             ui.add(egui::Label::new(RichText::new(lock.display().to_string()).monospace().small()).selectable(true));
             if let Some(s) = age {
-                ui.label(format!("It was last changed {s} second(s) ago."));
+                ui.label(format!("It was last changed {} ago.", plural(s as usize, "second", "seconds")));
             }
             ui.add_space(4.0);
             ui.label("It may belong to another git program working here, such as an editor or a terminal. Or git may have stopped without cleaning up, which is what cancelling does: tracked files can then be left half updated, so look through Changes afterwards.");
@@ -937,7 +1095,7 @@ impl GitemApp {
     fn link_dialog(&mut self, ctx: &egui::Context) {
         let Some(link) = self.link_prompt.clone() else { return };
         let (mut open, mut cancel) = (false, false);
-        egui::Window::new("Open this repository?").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+        dialog_window("Open this repository?", self.dialogs_settled).show(ctx, |ui| {
             ui.set_max_width(560.0);
             ui.label("A link is asking gitem to open this folder, which you haven't opened in gitem before:");
             ui.add_space(4.0);
@@ -966,11 +1124,12 @@ impl GitemApp {
         if !self.trust_question_open() {
             return;
         }
+        let settled = self.dialogs_settled;
         let Some(tab) = self.repos.get_mut(self.active) else { return };
         let (mut allow, mut keep_off) = (false, false);
         let warn = self.pal.warn;
         let dim = self.pal.dim;
-        egui::Window::new("This repository's config can run programs").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+        dialog_window("This repository's config can run programs", settled).show(ctx, |ui| {
             ui.set_max_width(640.0);
             ui.add(egui::Label::new(RichText::new(tab.repo.root.display().to_string()).monospace()).selectable(true));
             ui.add_space(4.0);
@@ -1036,7 +1195,7 @@ impl GitemApp {
             return;
         }
         let (mut forget, mut keep) = (false, false);
-        egui::Window::new("Some repositories couldn't be reopened").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+        dialog_window("Some repositories couldn't be reopened", self.dialogs_settled).show(ctx, |ui| {
             ui.set_max_width(520.0);
             for p in &self.reopen_failed {
                 ui.add(egui::Label::new(RichText::new(p).monospace().small()).selectable(true));
@@ -1079,7 +1238,7 @@ impl GitemApp {
             items.push(format!("{} is running. It stops after its current step.", g.title));
         }
         if !self.global_queue.is_empty() {
-            items.push(format!("{} queued git command(s) won't run.", self.global_queue.len()));
+            items.push(format!("{} won't run.", plural(self.global_queue.len(), "queued git command", "queued git commands")));
         }
         if let Some(f) = self.form.as_ref().filter(|f| f.touched()) {
             items.push(format!("The \"{}\" dialog, with what's been typed in it.", f.title));
@@ -1160,7 +1319,7 @@ impl GitemApp {
         let (mut go, mut stay) = (false, ctx.input(|i| i.key_pressed(egui::Key::Escape)));
         let danger = self.pal.danger;
         let dim = self.pal.dim;
-        egui::Window::new("Close with work not saved?").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+        dialog_window("Close with work not saved?", self.dialogs_settled).show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.label(RichText::new("Closing now loses:").color(dim));
             for item in &g.items {
@@ -1174,6 +1333,7 @@ impl GitemApp {
         });
         if go {
             let Some(g) = self.close_guard.take() else { return };
+            // The dialog said this is lost, so the draft kept against a crash goes with it.
             match g.target {
                 CloseTarget::Tab { root, key } => {
                     if let Some(r) = self.repos.iter_mut().find(|r| r.repo.root == root)
@@ -1181,13 +1341,20 @@ impl GitemApp {
                     {
                         r.dock.remove_tab(path);
                     }
+                    if key == "changes" {
+                        crate::views::changes::forget_draft(&root);
+                    }
                 }
                 CloseTarget::Repo(root) => {
+                    crate::views::changes::forget_draft(&root);
                     if let Some(i) = self.repos.iter().position(|r| r.repo.root == root) {
                         self.close_repo(i);
                     }
                 }
                 CloseTarget::Window => {
+                    for r in &self.repos {
+                        crate::views::changes::forget_draft(&r.repo.root);
+                    }
                     self.closing = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -1315,6 +1482,13 @@ impl GitemApp {
                     r.show_inspect = true;
                 }
             }
+            Action::InspectFirst(sha) => {
+                if let Some(r) = self.repos.get_mut(self.active)
+                    && r.inspect.sha.is_none()
+                {
+                    r.inspect.set(&sha);
+                }
+            }
             // Only web links reach the browser opener; nothing goes through a shell.
             Action::OpenUrl(u) => {
                 if u.starts_with("https://") || u.starts_with("http://") {
@@ -1403,6 +1577,20 @@ impl GitemApp {
                 }
             }
             Action::OpenTerminal(dir, command) => open_terminal(&dir, command.as_deref(), &mut self.errors),
+            Action::CloseRepo(root) => {
+                if let Some(i) = self.repos.iter().position(|r| r.repo.root == root) {
+                    self.request_close_repo(i);
+                }
+            }
+            Action::LocateRepo(root) => {
+                self.relocating = Some(root);
+                crate::widgets::pick(&mut self.folder_pick, ctx, rfd::FileDialog::new(), true);
+            }
+            Action::OpenFromMore(t) => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    r.open_from_more(t);
+                }
+            }
             Action::BranchPr(pr) => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.data.branch_pr = pr;
@@ -1415,20 +1603,52 @@ impl GitemApp {
         let p = self.pal.clone();
         chrome::drag_region(ui);
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
-        ui.horizontal(|ui| {
+        let bar = ui.max_rect();
+        let has_repo = !self.repos.is_empty();
+        // The right end is laid out first: it holds the way to close the window, so however
+        // many repositories are open it has to stay on screen.
+        let field = if !has_repo { 30.0 } else if bar.width() >= 1000.0 { chrome::COMMAND_FIELD_WIDTH } else { 30.0 };
+        let right = egui::Rect::from_min_max(egui::pos2(bar.right() - chrome::window_controls_width() - 8.0 - field, bar.top()), bar.max);
+        let left = egui::Rect::from_min_max(bar.min, egui::pos2(right.left() - chrome::TITLE_DRAG_ROOM, bar.bottom()));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+            chrome::window_controls(ui, &p);
+            ui.add_space(6.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if !has_repo {
+                // With a repository open the rail has this.
+                if chrome::icon_button(ui, chrome::icon::GEAR_SIX, crate::i18n::t("Settings"), "Preferences", self.no_repo_settings.is_some(), &p).clicked() {
+                    out.push(Action::OpenSettings);
+                }
+            } else if field > 30.0 {
+                if chrome::command_field(ui, field, &p).clicked() {
+                    self.palette = Some(PaletteState::new());
+                }
+            } else if chrome::icon_button(ui, chrome::icon::LIST_MAGNIFYING_GLASS, "Command palette", "Run any command (Ctrl+P)", self.palette.is_some(), &p).clicked() {
+                self.palette = Some(PaletteState::new());
+            }
+        });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            ui.set_clip_rect(left.intersect(ui.clip_rect()));
             ui.add_space(9.0);
             let (rect, logo) = ui.allocate_exact_size(egui::vec2(20.0, chrome::TITLE_BAR_HEIGHT), Sense::click());
             chrome::paint_logo(ui.painter(), egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0)));
             logo.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "About gitem"));
+            crate::widgets::focus_ring(ui, &logo, &p);
             if logo.on_hover_text("About gitem").clicked() {
                 out.push(Action::About);
             }
             ui.add_space(8.0);
             let mut close = None;
-            let (repos, active) = (&self.repos, &mut self.active);
-            for (i, r) in repos.iter().enumerate() {
-                let dirty = r.data.status.get().is_some_and(|s| !s.entries.is_empty());
-                let (resp, closing) = chrome::repo_tab(ui, &r.repo.name(), dirty, i == *active, &r.repo.root.display().to_string(), &p);
+            let names: Vec<String> = self.repos.iter().map(|r| r.repo.name()).collect();
+            let dirty: Vec<bool> = self.repos.iter().map(|r| r.data.status.get().is_some_and(|s| !s.entries.is_empty())).collect();
+            let natural: Vec<f32> = names.iter().zip(&dirty).map(|(n, d)| chrome::repo_tab_width(ui, n, *d)).collect();
+            // Room for what comes after the tabs: "more", "+", and any still opening.
+            let room = ui.available_width() - 64.0 - self.opening.len() as f32 * 130.0;
+            let (shown, cap) = chrome::fit_tabs(&natural, room, self.active);
+            let active = &mut self.active;
+            for &i in &shown {
+                let r = &self.repos[i];
+                let (resp, closing) = chrome::repo_tab(ui, &names[i], dirty[i], i == *active, &r.repo.root.display().to_string(), cap, &p);
                 if closing || resp.middle_clicked() {
                     close = Some(i);
                 } else if resp.clicked() {
@@ -1440,6 +1660,17 @@ impl GitemApp {
                         ui.close();
                     }
                 });
+            }
+            if shown.len() < names.len() {
+                let hidden = names.len() - shown.len();
+                ui.menu_button(format!("{} {hidden}", chrome::icon::DOTS_THREE), |ui| {
+                    for (i, name) in names.iter().enumerate().filter(|(i, _)| !shown.contains(i)) {
+                        if ui.button(name.as_str()).clicked() {
+                            *active = i;
+                            ui.close();
+                        }
+                    }
+                }).response.on_hover_text(format!("{} more open", plural(hidden, "repository", "repositories")));
             }
             if let Some(i) = close {
                 self.request_close_repo(i);
@@ -1454,21 +1685,9 @@ impl GitemApp {
             ui.scope(|ui| {
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
                 ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
-                ui.menu_button(chrome::icon::PLUS, |ui| self.open_menu(ui, out)).response.on_hover_text("Open a repository");
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                chrome::window_controls(ui, &p);
-                ui.add_space(6.0);
-                ui.spacing_mut().item_spacing.x = 2.0;
-                if chrome::icon_button(ui, chrome::icon::INFO, "About", "Version and build", self.about_open, &p).clicked() {
-                    out.push(Action::About);
-                }
-                if chrome::icon_button(ui, chrome::icon::GEAR_SIX, crate::i18n::t("Settings"), "Preferences", self.no_repo_settings.is_some(), &p).clicked() {
-                    out.push(Action::OpenSettings);
-                }
-                if !self.repos.is_empty() && chrome::icon_button(ui, chrome::icon::LIST_MAGNIFYING_GLASS, "Command palette", "Run any command (Ctrl+P)", self.palette.is_some(), &p).clicked() {
-                    self.palette = Some(PaletteState::new());
-                }
+                let plus = ui.menu_button(chrome::icon::PLUS, |ui| self.open_menu(ui, out)).response;
+                plus.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Open a repository"));
+                plus.on_hover_text("Open a repository (Ctrl+O)");
             });
         });
     }
@@ -1492,7 +1711,7 @@ impl GitemApp {
         let mut dismiss = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         // Asked once each time the box opens: it starts a process.
         let git = self.about_git.get_or_insert_with(|| self.git.as_ref().map(|g| g.version()).unwrap_or_else(|e| e.clone())).clone();
-        egui::Window::new("About gitem").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).default_width(340.0).show(ctx, |ui| {
+        dialog_window("About gitem", self.dialogs_settled).open(&mut open).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).default_width(340.0).show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 52.0), Sense::hover());
@@ -1556,53 +1775,92 @@ impl GitemApp {
                 Some(s) => (s.branch.clone(), s.ahead, s.behind, s.upstream.clone(), true),
                 None => (None, 0, 0, None, false),
             };
-            let label = branch.clone().unwrap_or_else(|| if has_status { "detached HEAD".into() } else { "…".into() });
+            // Mid-rebase HEAD is detached, which is true and alarming and not what's going on.
+            let op_state = tab.data.status.get().map_or(RepoOp::None, |s| s.op);
+            let rebasing_branch = tab.data.status.get().and_then(|s| s.op_branch.clone()).filter(|_| matches!(op_state, RepoOp::Rebase | RepoOp::RebaseInteractive));
+            let label = rebasing_branch.map(|b| format!("{b} (rebasing)")).or_else(|| branch.clone()).unwrap_or_else(|| if has_status { "detached HEAD".into() } else { "…".into() });
             let data = &tab.data;
+            let filter = &mut tab.branch_filter;
+            let recent = &tab.recent_branches;
             ui.menu_button((RichText::new(chrome::icon::GIT_BRANCH).color(p.accent), RichText::new(format!("{label}  {}", chrome::icon::CARET_DOWN)).strong()), |ui| {
+                ui.set_min_width(260.0);
                 if ui.button("+ New branch…").clicked() {
                     out.push(Action::Form(forms::new_branch(None)));
                     ui.close();
                 }
+                let typed = ui.add(crate::widgets::input(filter).hint_text("Filter branches").desired_width(f32::INFINITY));
+                if !ui.memory(|m| m.focused().is_some()) {
+                    typed.request_focus();
+                }
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                    for b in data.local_branches() {
-                        if ui.selectable_label(b.is_current, b.name.as_str()).clicked() {
-                            if !b.is_current {
-                                out.push(Action::Run(ops::checkout(&b.name)));
-                            }
-                            ui.close();
+                let needle = filter.to_lowercase();
+                let hit = |b: &Branch| needle.is_empty() || b.name.to_lowercase().contains(&needle);
+                let dirty = data.status.get().is_some_and(|s| !s.entries.is_empty());
+                let mut choose = |ui: &mut Ui, b: &Branch| {
+                    let r = ui.selectable_label(b.is_current, b.name.as_str());
+                    if r.clicked() {
+                        if !b.is_current {
+                            out.push(Action::Run(ops::checkout(&b.name)));
                         }
+                        ui.close();
+                    }
+                };
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    let locals: Vec<&Branch> = data.local_branches().filter(|b| hit(b)).collect();
+                    let recents: Vec<&Branch> = recent.iter().filter_map(|n| locals.iter().find(|b| b.name == *n).copied()).collect();
+                    if !recents.is_empty() {
+                        ui.label(RichText::new("Recent").small().color(p.dim));
+                        recents.iter().for_each(|b| choose(ui, b));
+                        ui.separator();
+                        ui.label(RichText::new("All").small().color(p.dim));
+                    }
+                    locals.iter().for_each(|b| choose(ui, b));
+                    if locals.is_empty() {
+                        ui.label(RichText::new(if data.refs_known() { "No branch matches" } else { "Reading branches…" }).color(p.dim));
                     }
                 });
+                if dirty {
+                    ui.separator();
+                    ui.label(RichText::new("You have uncommitted changes. Git keeps them if it can, and refuses if switching would overwrite them.").small().color(p.dim));
+                }
             });
             ui.separator();
+            let no_remote = tab.data.refs_known() && tab.data.remotes().is_empty();
+            let in_op = op_state != RepoOp::None && op_state != RepoOp::Bisect;
+            let (sync_off, sync_why) = if no_remote { (true, "This repository has no remote yet. Add one from Remotes in the sidebar.") } else if in_op { (true, "Finish or abort what's going on first: see the banner.") } else { (false, "") };
             let prune = self.settings.prune_on_fetch;
             let remotes: Vec<String> = tab.data.remotes().iter().map(|r| r.name.clone()).collect();
-            if chrome::icon_text_button(ui, chrome::icon::CLOUD_ARROW_DOWN, p.accent, "Fetch", "Fetch all remotes", false, &p).clicked() {
+            let can_fetch = !no_remote;
+            let fetch = ui.add_enabled_ui(can_fetch, |ui| chrome::icon_text_button(ui, chrome::icon::CLOUD_ARROW_DOWN, p.accent, "Fetch", "Fetch all remotes (Ctrl+Shift+F)", false, &p)).inner;
+            if fetch.on_disabled_hover_text(sync_why).clicked() {
                 out.push(Action::Run(ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() })));
             }
             let pull_label = if behind > 0 { format!("Pull {behind}") } else { "Pull".to_string() };
-            if chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_DOWN, p.incoming(), &pull_label, "", behind > 0, &p).clicked() {
-                let mode = match self.settings.pull_mode.as_str() {
-                    "ff-only" => ops::PullMode::FfOnly,
-                    "rebase" => ops::PullMode::Rebase,
-                    "merge" => ops::PullMode::Merge,
-                    _ => ops::PullMode::Default,
-                };
-                out.push(Action::Run(ops::pull(mode, false)));
+            let pull = ui.add_enabled_ui(!sync_off, |ui| chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_DOWN, p.incoming(), &pull_label, "Bring in the upstream's commits (Ctrl+Shift+L)", behind > 0, &p)).inner;
+            if pull.on_disabled_hover_text(sync_why).clicked() {
+                out.push(Action::Run(ops::pull(pull_mode(&self.settings.pull_mode), false)));
             }
-            if ui.small_button(chrome::icon::CARET_DOWN).on_hover_text("Pull options").clicked() {
+            let pull_more = ui.small_button(chrome::icon::CARET_DOWN);
+            pull_more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Pull options"));
+            if pull_more.on_hover_text("Pull options").clicked() {
                 out.push(Action::Form(forms::pull_form()));
             }
             let push_label = if upstream.is_none() && branch.is_some() { "Publish".to_string() } else if ahead > 0 { format!("Push {ahead}") } else { "Push".to_string() };
-            if chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_UP, p.outgoing(), &push_label, "", ahead > 0, &p).clicked() {
-                if upstream.is_some() {
+            // Publishing with no remote leads to adding one, so only an operation stops it.
+            let push_off = if upstream.is_none() && branch.is_some() { in_op } else { sync_off };
+            let push = ui.add_enabled_ui(!push_off, |ui| chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_UP, p.outgoing(), &push_label, "Send this branch's commits to its remote (Ctrl+Shift+K)", ahead > 0, &p)).inner;
+            if push.on_disabled_hover_text(sync_why).clicked() {
+                if no_remote {
+                    out.push(Action::Form(forms::add_remote()));
+                } else if upstream.is_some() {
                     out.push(Action::Run(ops::push(&ops::PushOpts::default())));
                 } else {
                     out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), false, self.settings.confirm_destructive)));
                 }
             }
-            if ui.small_button(chrome::icon::CARET_DOWN).on_hover_text("Push options").clicked() {
+            let push_more = ui.small_button(chrome::icon::CARET_DOWN);
+            push_more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Push options"));
+            if push_more.on_hover_text("Push options").clicked() {
                 out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), upstream.is_some(), self.settings.confirm_destructive)));
             }
             ui.separator();
@@ -1612,9 +1870,30 @@ impl GitemApp {
             if chrome::tool_button(ui, chrome::icon::ARROWS_CLOCKWISE, p.dim, crate::i18n::t("Refresh"), "Reload this repository (F5)", false, &p).clicked() {
                 out.push(Action::Refresh);
             }
+            if let Some(short) = tab.undoable.clone() {
+                let name = format!("Undo commit {short}");
+                if chrome::tool_button(ui, chrome::icon::ARROW_COUNTER_CLOCKWISE, p.dim, &name, "Take it back, keeping its changes staged", false, &p).clicked() {
+                    out.push(crate::menus::undo_commit_action(&tab.repo, tab.data.status.get().is_some_and(|s| s.upstream.is_some() && s.ahead == 0), self.settings.confirm_destructive));
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                chrome::tool_button(ui, chrome::icon::ARTICLE, p.dim, crate::i18n::t("Details"), "Show the selected commit's details", tab.show_inspect, &p).clicked().then(|| tab.show_inspect = !tab.show_inspect);
-                chrome::tool_button(ui, chrome::icon::SIDEBAR_SIMPLE, p.dim, crate::i18n::t("Sidebar"), "Show branches, tags, and files (Ctrl+B)", tab.show_sidebar, &p).clicked().then(|| tab.show_sidebar = !tab.show_sidebar);
+                // Shown over the view when there's no room to put them beside it.
+                let details_on = if tab.squeeze.details { tab.peek == Some(Peek::Details) } else { tab.show_inspect };
+                if chrome::tool_button(ui, chrome::icon::ARTICLE, p.dim, crate::i18n::t("Details"), "Show the selected commit's details", details_on, &p).clicked() {
+                    if tab.squeeze.details {
+                        tab.peek = if details_on { None } else { Some(Peek::Details) };
+                    } else {
+                        tab.show_inspect = !tab.show_inspect;
+                    }
+                }
+                let sidebar_on = if tab.squeeze.sidebar { tab.peek == Some(Peek::Sidebar) } else { tab.show_sidebar };
+                if chrome::tool_button(ui, chrome::icon::SIDEBAR_SIMPLE, p.dim, crate::i18n::t("Sidebar"), "Show branches, tags, and files (Ctrl+B)", sidebar_on, &p).clicked() {
+                    if tab.squeeze.sidebar {
+                        tab.peek = if sidebar_on { None } else { Some(Peek::Sidebar) };
+                    } else {
+                        tab.show_sidebar = !tab.show_sidebar;
+                    }
+                }
             });
         });
     }
@@ -1712,17 +1991,14 @@ impl GitemApp {
         });
     }
 
-    fn op_banner(ui: &mut Ui, tab_status: &RepoStatus, ops_busy: bool, out: &mut Vec<Action>, p: &Palette) {
+    fn op_banner(ui: &mut Ui, tab_status: &RepoStatus, branches: &[Branch], ops_busy: bool, out: &mut Vec<Action>, p: &Palette) {
         egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 // A second Skip would act on a state nobody has looked at yet.
                 if ops_busy {
                     ui.disable();
                 }
-                let mut text = tab_status.op.label().to_string();
-                if let Some(t) = &tab_status.op_target {
-                    text.push_str(&format!(" {t}"));
-                }
+                let mut text = op_headline(tab_status, branches);
                 if let Some((a, b)) = tab_status.op_progress {
                     text.push_str(&format!(" (step {a} of {b})"));
                 }
@@ -1730,7 +2006,7 @@ impl GitemApp {
                 let conflicts: Vec<String> = tab_status.conflicts().map(|e| e.path.clone()).collect();
                 if !conflicts.is_empty() {
                     // Not a chip: its warning-coloured text fails contrast on this fill in light themes.
-                    ui.label(RichText::new(format!("{} conflict(s)", conflicts.len())).strong().color(p.text));
+                    ui.label(RichText::new(plural(conflicts.len(), "conflict", "conflicts")).strong().color(p.text));
                     if ui.button("Resolve").clicked() {
                         out.push(Action::OpenTab(Tab::merge(&conflicts[0])));
                     }
@@ -1827,16 +2103,38 @@ impl GitemApp {
             } else {
                 let last = tab.repo.git.log.lock().ok().and_then(|l| l.iter().rev().find(|e| e.is_write).map(|e| (e.command.clone(), e.code)));
                 if let Some((c, code)) = last {
-                    ui.label(RichText::new(if code == 0 { "✔" } else { "✖" }).small().color(if code == 0 { p.good } else { p.danger }));
-                    ui.add(egui::Label::new(RichText::new(c).small().color(p.faint).monospace()).truncate());
+                    ui.label(RichText::new(if code == 0 { chrome::icon::CHECK } else { chrome::icon::X }).small().color(if code == 0 { p.good } else { p.danger }));
+                    // The rest of what's been run is in the Console.
+                    let r = ui.add(egui::Label::new(RichText::new(c).small().color(p.faint).monospace()).truncate().sense(Sense::click()));
+                    if r.on_hover_text("Open the Console, which has every command gitem has run").clicked() {
+                        out.push(Action::OpenTab(Tab::Console(Box::default())));
+                    }
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if tab.data.status.get().is_some() {
                     let n = tab.data.counts();
                     let (st, un, c) = (n.staged, n.unstaged, n.conflicts);
-                    if st + un + c > 0 && ui.small_button(format!("{st} staged, {un} changed{}", if c > 0 { format!(", {c} conflicts") } else { String::new() })).clicked() {
+                    if st + un + c > 0 && ui.small_button(format!("{st} staged, {un} unstaged{}", if c > 0 { format!(", {}", plural(c, "conflict", "conflicts")) } else { String::new() })).clicked() {
                         out.push(Action::OpenTab(Tab::changes()));
+                    }
+                }
+                if let Some(s) = tab.data.status.get() {
+                    if tab.fetched.0 != tab.data.status_gen {
+                        // Once per status, not per frame: this can be a slow disk.
+                        tab.fetched = (tab.data.status_gen, std::fs::metadata(tab.repo.git_dir.join("FETCH_HEAD")).and_then(|m| m.modified()).ok());
+                    }
+                    if let Some(at) = tab.fetched.1.and_then(|t| t.elapsed().ok()) {
+                        ui.label(RichText::new(format!("Fetched {}", gitem_core::util::relative_time(gitem_core::util::now_ts() - at.as_secs() as i64, gitem_core::util::now_ts()))).small().color(p.faint));
+                    }
+                    if s.behind > 0 {
+                        ui.label(RichText::new(format!("{} {}", chrome::icon::ARROW_DOWN, s.behind)).small().color(p.text)).on_hover_text(format!("{} to pull", plural(s.behind as usize, "commit", "commits")));
+                    }
+                    if s.ahead > 0 {
+                        ui.label(RichText::new(format!("{} {}", chrome::icon::ARROW_UP, s.ahead)).small().color(p.text)).on_hover_text(format!("{} to push", plural(s.ahead as usize, "commit", "commits")));
+                    }
+                    if let Some(b) = &s.branch {
+                        ui.label(RichText::new(format!("{} {b}", chrome::icon::GIT_BRANCH)).small().color(p.text));
                     }
                 }
                 if tab.watcher.failed.load(Ordering::Relaxed) {
@@ -1854,15 +2152,59 @@ impl GitemApp {
         });
     }
 
+    /// Names the dialogs up now that the backdrop goes behind, so a change can be noticed.
+    fn modal_dialogs(&self) -> String {
+        let mut names = String::new();
+        let mut add = |on: bool, name: &str| {
+            if on {
+                names.push_str(name);
+                names.push('\n');
+            }
+        };
+        add(self.confirm.is_some(), self.confirm.as_ref().map_or("", |c| c.title.as_str()));
+        add(self.form.is_some(), self.form.as_ref().map_or("", |f| f.title.as_str()));
+        add(self.about_open, "about");
+        add(!self.crash_reports.is_empty(), "crash");
+        add(self.git_warning.is_some(), "git");
+        add(!self.reopen_failed.is_empty(), "reopen");
+        add(self.close_guard.is_some(), "close");
+        add(self.lock_prompt.is_some(), "lock");
+        add(self.link_prompt.is_some(), "link");
+        add(self.trust_question_open(), "trust");
+        add(self.help.is_some(), "help");
+        names
+    }
+
+    /// Clicks count once what's on screen has been there long enough to have been meant.
+    fn settle_dialogs(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let settle = |seen: &mut (String, f64), key: String| {
+            if seen.0 != key {
+                *seen = (key, now);
+            }
+            let left = DIALOG_SETTLES - (now - seen.1);
+            if left > 0.0 {
+                ctx.request_repaint_after(Duration::from_secs_f64(left));
+            }
+            left <= 0.0
+        };
+        let modal = self.modal_dialogs();
+        self.dialogs_settled = settle(&mut self.dialogs_seen, modal.clone());
+        self.errors_settled = settle(&mut self.errors_seen, self.errors.first().cloned().unwrap_or_default());
+        if !modal.is_empty() {
+            dialog_backdrop(ctx, chrome::window_controls_width());
+        }
+    }
+
     fn dialog_open(&self) -> bool {
-        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some() || self.lock_prompt.is_some() || self.link_prompt.is_some() || self.trust_question_open()
+        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some() || self.lock_prompt.is_some() || self.link_prompt.is_some() || self.help.is_some() || self.trust_question_open()
     }
 
     /// Old git still does most things, so this warns and lets the user carry on.
     fn git_warning_dialog(&mut self, ctx: &egui::Context) {
         let Some(warning) = self.git_warning.clone() else { return };
         let mut dismiss = false;
-        egui::Window::new("Your git is older than gitem needs").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+        dialog_window("Your git is older than gitem needs", self.dialogs_settled).show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.label(warning);
             ui.add_space(8.0);
@@ -1878,13 +2220,13 @@ impl GitemApp {
         let Some(newest) = self.crash_reports.first().cloned() else { return };
         let more = self.crash_reports.len() - 1;
         let (mut dismiss, mut reveal, mut copy) = (false, false, false);
-        egui::Window::new("gitem crashed last time").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+        dialog_window("gitem crashed last time", self.dialogs_settled).show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.label("A report was saved on this computer. Nothing was sent anywhere. If you share it, read it first: it names folders and the last git commands.");
             ui.add_space(4.0);
             ui.add(egui::Label::new(RichText::new(newest.display().to_string()).monospace().small()).selectable(true));
             if more > 0 {
-                ui.label(RichText::new(format!("And {more} older report(s) in the same folder.")).small().color(self.pal.dim));
+                ui.label(RichText::new(format!("And {} in the same folder.", plural(more, "older report", "older reports"))).small().color(self.pal.dim));
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -1915,7 +2257,8 @@ impl GitemApp {
         if let Some(c) = &self.confirm {
             let mut close = false;
             let mut go = false;
-            egui::Window::new(c.title.as_str()).collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            let settled = self.dialogs_settled;
+            dialog_window(c.title.as_str(), settled).show(ctx, |ui| {
                 ui.set_max_width(460.0);
                 ui.label(c.body.as_str());
                 ui.add_space(4.0);
@@ -1925,7 +2268,10 @@ impl GitemApp {
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    go = ui.add(egui::Button::new(RichText::new(c.label.as_str()).color(theme::ink_on(p.danger))).fill(p.danger)).clicked();
+                    // Red is kept for what can't be got back, and only there does Enter not answer.
+                    let (fill, ink) = if c.op.lossless { (p.accent, p.on_accent) } else { (p.danger, theme::ink_on(p.danger)) };
+                    go = ui.add(egui::Button::new(RichText::new(c.label.as_str()).color(ink)).fill(fill)).clicked();
+                    go |= c.op.lossless && settled && ui.ctx().memory(|m| m.focused().is_none()) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                     close = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
                 });
             });
@@ -1944,7 +2290,7 @@ impl GitemApp {
             let mut closed = false;
             let mut result = Vec::new();
             let form_repo = self.form_repo.clone();
-            egui::Window::new(f.title.clone()).collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 70.0]).show(ctx, |ui| {
+            dialog_window(f.title.clone(), self.dialogs_settled).anchor(Align2::CENTER_TOP, [0.0, 70.0]).show(ctx, |ui| {
                 if let Some(root) = form_repo.as_ref().filter(|_| several) {
                     ui.label(RichText::new(format!("In {}", root.display())).small().color(p.warn));
                 }
@@ -1967,7 +2313,9 @@ impl GitemApp {
             let (title, details) = error_parts(&e);
             let help = explain_error(details);
             let mut fix = None;
-            egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_BOTTOM, [0.0, -40.0]).show(ctx, |ui| {
+            // Not behind a backdrop: this can come from something in the background, and it
+            // mustn't take the keyboard from someone typing. It's above any that's there.
+            dialog_window(title, self.errors_settled).anchor(Align2::CENTER_BOTTOM, [0.0, -40.0]).show(ctx, |ui| {
                 ui.set_max_width(560.0);
                 if waiting > 1 {
                     ui.label(RichText::new(format!("1 of {waiting}")).small().color(p.dim));
@@ -2045,6 +2393,14 @@ impl GitemApp {
         let (palette, refresh, sidebar, changes, graph) = ctx.input(|i| {
             (i.modifiers.command && i.key_pressed(egui::Key::P), i.key_pressed(egui::Key::F5), i.modifiers.command && i.key_pressed(egui::Key::B), i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::G), i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::H))
         });
+        // Behind a dialog these would act on what's dimmed. Typing isn't in their way: every
+        // one needs a key held, and egui's text boxes have no use for them.
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.help = if self.help.is_some() { None } else { Some(String::new()) };
+        }
+        if !self.dialog_open() {
+            self.more_shortcuts(ctx, out);
+        }
         if palette {
             self.palette = if self.palette.is_some() { None } else { Some(PaletteState::new()) };
         }
@@ -2060,6 +2416,102 @@ impl GitemApp {
         }
         if graph {
             out.push(Action::OpenTab(Tab::graph()));
+        }
+    }
+
+    fn more_shortcuts(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
+        use egui::{Key, Modifiers};
+        const CS: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+        let (settings, open, close_tab, next, prev, fetch, pull, push) = ctx.input_mut(|i| {
+            (i.consume_key(Modifiers::COMMAND, Key::Comma), i.consume_key(Modifiers::COMMAND, Key::O), i.consume_key(Modifiers::COMMAND, Key::W), i.consume_key(Modifiers::COMMAND, Key::Tab), i.consume_key(CS, Key::Tab), i.consume_key(CS, Key::F), i.consume_key(CS, Key::L), i.consume_key(CS, Key::K))
+        });
+        const NUMBERS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+        if let Some(n) = NUMBERS.iter().position(|k| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, *k)))
+            && n < self.repos.len()
+        {
+            self.active = n;
+        }
+        if settings {
+            out.push(Action::OpenSettings);
+        }
+        if open {
+            crate::widgets::pick(&mut self.folder_pick, ctx, rfd::FileDialog::new(), true);
+        }
+        let Some(r) = self.repos.get_mut(self.active) else { return };
+        if close_tab {
+            let focused = r.dock.find_active_focused().map(|(_, t)| (t.key(), t.unsaved())).or_else(|| r.dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).map(|t| (t.key(), t.unsaved())));
+            // The last one stays: nothing would be left to show where things are.
+            if r.dock.iter_all_tabs().count() > 1
+                && let Some((key, unsaved)) = focused
+            {
+                match unsaved {
+                    Some(lost) => out.push(Action::AskCloseTab { key, lost }),
+                    None => {
+                        if let Some(path) = r.dock.find_tab_from(|t| t.key() == key) {
+                            r.dock.remove_tab(path);
+                        }
+                    }
+                }
+            }
+        }
+        if next || prev {
+            let leaf = r.dock.focused_leaf().or_else(|| r.dock.iter_leaves().next().map(|(p, _)| p));
+            let target = leaf.and_then(|path| {
+                let (_, l) = r.dock.iter_leaves().find(|(p, _)| *p == path)?;
+                let n = l.tabs().len().max(1);
+                Some((path, if next { (l.active.0 + 1) % n } else { (l.active.0 + n - 1) % n }))
+            });
+            if let Some((path, at)) = target {
+                let _ = r.dock.set_active_tab(egui_dock::TabPath::new(path.surface, path.node, egui_dock::TabIndex(at)));
+            }
+        }
+        let st = r.data.status.get();
+        if fetch && !r.data.remotes().is_empty() {
+            out.push(Action::Run(ops::fetch(&ops::FetchOpts { all: true, prune: self.settings.prune_on_fetch, ..Default::default() })));
+        }
+        let idle = st.is_some_and(|s| s.op == RepoOp::None);
+        if pull && idle && !r.data.remotes().is_empty() {
+            out.push(Action::Run(ops::pull(pull_mode(&self.settings.pull_mode), false)));
+        }
+        if push && idle && !r.data.remotes().is_empty() {
+            if st.is_some_and(|s| s.upstream.is_some()) {
+                out.push(Action::Run(ops::push(&ops::PushOpts::default())));
+            } else {
+                let remotes = r.data.remotes().iter().map(|x| x.name.clone()).collect();
+                out.push(Action::Form(forms::push_form(st.and_then(|s| s.branch.clone()), remotes, false, self.settings.confirm_destructive)));
+            }
+        }
+    }
+
+    /// Every key, from one table, narrowed by what's typed.
+    fn help_dialog(&mut self, ctx: &egui::Context) {
+        let Some(query) = &mut self.help else { return };
+        let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let p = self.pal.clone();
+        dialog_window("Keyboard shortcuts", self.dialogs_settled).anchor(Align2::CENTER_TOP, [0.0, 60.0]).show(ctx, |ui| {
+            ui.set_width(480.0);
+            let r = ui.add(crate::widgets::input(query).hint_text("Search").desired_width(f32::INFINITY));
+            if !ui.memory(|m| m.focused().is_some()) {
+                r.request_focus();
+            }
+            let needle = query.to_lowercase();
+            egui::ScrollArea::vertical().max_height(ctx.content_rect().height() - 220.0).show(ui, |ui| {
+                egui::Grid::new("keys").num_columns(2).spacing(egui::vec2(14.0, 4.0)).striped(true).show(ui, |ui| {
+                    for (keys, what) in crate::keys::TABLE.iter().filter(|(k, w)| needle.is_empty() || k.to_lowercase().contains(&needle) || w.to_lowercase().contains(&needle)) {
+                        ui.label(RichText::new(*keys).monospace().color(p.text));
+                        ui.label(RichText::new(*what).color(p.dim));
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                close |= ui.button("Close").clicked();
+                ui.label(RichText::new("Ctrl+P runs any command by name.").small().color(p.dim));
+            });
+        });
+        if close {
+            self.help = None;
         }
     }
 
@@ -2130,6 +2582,11 @@ impl GitemApp {
         self.handle_shot(ui);
         self.check_window_close(&ctx);
         let mut out: Vec<Action> = Vec::new();
+        // egui's own Ctrl+Plus and Ctrl+Minus change this without telling anyone.
+        if (ctx.zoom_factor() - self.settings.ui_scale.clamp(0.6, 3.0)).abs() > 0.001 && self.applied.is_some() {
+            self.settings.ui_scale = ctx.zoom_factor();
+            self.settings_dirty = true;
+        }
 
         if let Some(sha) = self.shot_inspect.take() {
             out.push(Action::Inspect(sha));
@@ -2155,6 +2612,13 @@ impl GitemApp {
             r.poll_ops(&ctx, &mut local);
             out.extend(local);
             r.start_quiet_work(&ctx, &self.settings);
+            if let Some(b) = r.data.status.get().and_then(|s| s.branch.clone())
+                && r.recent_branches.first() != Some(&b)
+            {
+                r.recent_branches.retain(|x| *x != b);
+                r.recent_branches.insert(0, b);
+                r.recent_branches.truncate(6);
+            }
             let job_running = r.data.jobs.load(Ordering::Relaxed) > 0;
             r.data.ops_busy = r.running.is_some() || !r.queue.is_empty() || job_running;
             let seen = r.watcher.take();
@@ -2210,10 +2674,16 @@ impl GitemApp {
         self.poll_global(&ctx, &mut out);
         self.poll_orphans();
         self.poll_opening(&ctx);
-        if self.folder_pick.poll()
-            && let Some(Some(d)) = self.folder_pick.value.take()
-        {
-            out.push(Action::OpenRepo(d));
+        if self.folder_pick.poll() {
+            let picked = self.folder_pick.value.take().flatten();
+            let moved = self.relocating.take();
+            if let Some(d) = picked {
+                // Open first: if that's not it, the tab stays and says what's wrong.
+                if let Some(old) = moved {
+                    out.push(Action::CloseRepo(old));
+                }
+                out.push(Action::OpenRepo(d));
+            }
         }
         self.shortcuts(&ctx, &mut out);
 
@@ -2232,8 +2702,10 @@ impl GitemApp {
                 None => tab.dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).and_then(name_of),
             };
             egui::Panel::left("rail").frame(egui::Frame::new().fill(pal.bg)).resizable(false).exact_size(chrome::RAIL_WIDTH).show(ui, |ui| {
-                if let Some(t) = chrome::rail(ui, &|i| focused == Some(i.name), &pal) {
-                    out.push(Action::OpenTab(t));
+                match chrome::rail(ui, &|i| focused == Some(i.name), self.settings.rail_full, &pal) {
+                    Some((t, true)) => out.push(Action::OpenFromMore(t)),
+                    Some((t, false)) => out.push(Action::OpenTab(t)),
+                    None => {}
                 }
             });
         }
@@ -2242,13 +2714,13 @@ impl GitemApp {
         }
 
         if let Some(tab) = self.repos.get_mut(self.active) {
-            let RepoTab { repo, data, dock, inspect, show_inspect, sidebar, show_sidebar, .. } = tab;
+            let RepoTab { repo, data, dock, inspect, show_inspect, sidebar, show_sidebar, show_rail, squeeze: tab_squeeze, peek, .. } = tab;
             if let Some(s) = data.status.get()
                 && s.op != RepoOp::None {
                     let frame = egui::Frame::new().fill(pal.banner_fill());
                     let s = s.clone();
                     let ops_busy = data.ops_busy;
-                    egui::Panel::top("op-banner").frame(frame).show(ui, |ui| Self::op_banner(ui, &s, ops_busy, &mut out, &pal));
+                    egui::Panel::top("op-banner").frame(frame).show(ui, |ui| Self::op_banner(ui, &s, data.branches(), ops_busy, &mut out, &pal));
                 }
             if let Some(problem) = data.read_failure().map(str::to_string).or_else(|| data.waiting_on().map(|(what, t)| format!("Still waiting: {what} has been running for {} s.", t.as_secs()))) {
                 let frame = egui::Frame::new().fill(pal.banner_fill()).inner_margin(egui::Margin::symmetric(8, 4));
@@ -2265,6 +2737,14 @@ impl GitemApp {
                         if ui.small_button("Copy").clicked() {
                             out.push(Action::Copy(problem.clone()));
                         }
+                        if gone {
+                            if ui.small_button("Locate…").on_hover_text("Find where it went, and open it from there").clicked() {
+                                out.push(Action::LocateRepo(repo.root.clone()));
+                            }
+                            if ui.small_button("Close").on_hover_text("Close this repository's tab. Nothing on disk is touched.").clicked() {
+                                out.push(Action::CloseRepo(repo.root.clone()));
+                            }
+                        }
                     });
                 });
             }
@@ -2280,22 +2760,33 @@ impl GitemApp {
                     });
                 });
             }
-            if *show_sidebar {
-                egui::Panel::left("sidebar").resizable(true).default_size(270.0).size_range(180.0..=600.0).show(ui, |ui| {
-                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
+            let screen_w = ctx.content_rect().width();
+            let squeeze = squeeze_for(screen_w, *show_rail, *show_sidebar, *show_inspect);
+            *tab_squeeze = squeeze;
+            if !squeeze.details && *peek == Some(Peek::Details) || !squeeze.sidebar && *peek == Some(Peek::Sidebar) {
+                *peek = None;
+            }
+            if *show_sidebar && !squeeze.sidebar {
+                egui::Panel::left("sidebar").resizable(true).default_size(SIDEBAR_WIDTH).size_range(180.0..=600.0).show(ui, |ui| {
+                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
                     ui.push_id(&cx.repo.root, |ui| sidebar.ui(ui, &mut cx));
                 });
             }
-            if *show_inspect {
-                egui::Panel::right("inspect").resizable(true).default_size(340.0).size_range(220.0..=800.0).show(ui, |ui| {
-                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
+            // With nothing picked, or beside a view with no commits, it's only lost room.
+            let front_shows_commits = dock.find_active_focused().map(|(_, t)| t.shows_commits()).or_else(|| dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).map(Tab::shows_commits)).unwrap_or(true);
+            if *show_inspect && !squeeze.details && inspect.sha.is_some() && front_shows_commits {
+                egui::Panel::right("inspect").resizable(true).default_size(DETAILS_WIDTH).size_range(220.0..=800.0).show(ui, |ui| {
+                    // A short message mustn't shrink the panel and move everything beside it.
+                    ui.set_min_width(ui.available_width());
+                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
                     ui.push_id(&cx.repo.root, |ui| inspect.ui(ui, &mut cx));
                 });
             }
             let style = theme::dock_style(ui.style(), &pal);
-            let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open } };
+            let front = dock.find_active_focused().map(|(_, t)| t.key()).or_else(|| dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).map(Tab::key));
+            let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true }, front };
             egui::CentralPanel::no_frame().show(ui, |ui| {
-                DockArea::new(dock).id(egui::Id::new(DOCK_ID)).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_inside(ui, &mut viewer);
+                DockArea::new(dock).id(egui::Id::new(DOCK_ID)).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_leaf_close_all_buttons(false).show_inside(ui, &mut viewer);
                 paint_active_tab_markers(ui, dock, &pal);
                 // egui_dock shows a grab cursor on any hovered tab. Keep the usual pointer
                 // until a tab is actually being dragged, which has its own cursor.
@@ -2304,8 +2795,25 @@ impl GitemApp {
                 }
             });
 
+            // Over the view, where there's no room beside it. A click elsewhere puts it away.
+            if let Some(which) = *peek {
+                let width = (screen_w - 60.0).min(if which == Peek::Details { DETAILS_WIDTH } else { SIDEBAR_WIDTH });
+                let top = chrome::TITLE_BAR_HEIGHT + 34.0;
+                let (anchor, x) = if which == Peek::Details { (Align2::RIGHT_TOP, -2.0) } else { (Align2::LEFT_TOP, chrome::RAIL_WIDTH) };
+                let shown = egui::Area::new("side-peek".into()).order(egui::Order::Middle).anchor(anchor, [x, top]).show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style()).fill(pal.panel).show(ui, |ui| {
+                        ui.set_width(width);
+                        ui.set_height(ctx.content_rect().height() - top - 40.0);
+                        let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: false };
+                        ui.push_id(&cx.repo.root, |ui| if which == Peek::Details { inspect.ui(ui, &mut cx) } else { sidebar.ui(ui, &mut cx) });
+                    });
+                });
+                if shown.response.clicked_elsewhere() && !egui::Popup::is_any_open(&ctx) {
+                    *peek = None;
+                }
+            }
             if let Some(pl) = &mut self.palette {
-                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
+                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
                 if pl.show(&ctx, &mut cx) {
                     self.palette = None;
                 }
@@ -2316,7 +2824,7 @@ impl GitemApp {
                 let settings = &self.settings;
                 egui::CentralPanel::default().show(ui, |ui| {
                     let NoRepoSettings { repo, data, view } = &mut **s;
-                    let mut cx = Cx { repo, data, settings, pal: &pal, out: &mut out, dialog_open };
+                    let mut cx = Cx { repo, data, settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
                     view.ui(ui, &mut cx);
                 });
             } else {
@@ -2324,6 +2832,7 @@ impl GitemApp {
             }
         }
 
+        self.settle_dialogs(&ctx);
         self.dialogs(&ctx, &mut out);
         self.crash_dialog(&ctx);
         self.git_warning_dialog(&ctx);
@@ -2333,6 +2842,7 @@ impl GitemApp {
         self.trust_dialog(&ctx);
         self.link_dialog(&ctx);
         self.about(&ctx, &mut out);
+        self.help_dialog(&ctx);
         chrome::window_edges(&ctx, &pal);
         for a in out {
             self.apply_action(&ctx, a);
@@ -2357,6 +2867,15 @@ impl eframe::App for GitemApp {
 
     fn on_exit(&mut self) {
         self.save_settings();
+    }
+}
+
+fn pull_mode(setting: &str) -> ops::PullMode {
+    match setting {
+        "ff-only" => ops::PullMode::FfOnly,
+        "rebase" => ops::PullMode::Rebase,
+        "merge" => ops::PullMode::Merge,
+        _ => ops::PullMode::Default,
     }
 }
 

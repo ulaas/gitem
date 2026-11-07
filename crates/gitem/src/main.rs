@@ -134,6 +134,11 @@ fn run_app(args: &[String]) -> i32 {
                     tabs.push(Tab::file(f, None, None));
                 }
             }
+            "--changes-file" => {
+                if let Some(f) = it.next() {
+                    tabs.push(Tab::Changes(Box::new(gitem::views::changes::ChangesView::showing(f))));
+                }
+            }
             "--visual" => {
                 if let Some(f) = it.next() {
                     tabs.push(Tab::visual(f));

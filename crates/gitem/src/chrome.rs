@@ -13,6 +13,11 @@ pub const TITLE_BAR_HEIGHT: f32 = 34.0;
 pub const RAIL_WIDTH: f32 = 44.0;
 const RAIL_ITEM: f32 = 34.0;
 const CONTROL_WIDTH: f32 = 46.0;
+/// Clear title bar kept for moving the window, however many repositories are open.
+pub const TITLE_DRAG_ROOM: f32 = 28.0;
+pub const COMMAND_FIELD_WIDTH: f32 = 250.0;
+/// A repository's tab doesn't get narrower than this. Past that they go in a list.
+const MIN_REPO_TAB: f32 = 96.0;
 const RESIZE_EDGE: f32 = 4.0;
 const RESIZE_CORNER: f32 = 10.0;
 const CLOSE_HOVER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
@@ -63,6 +68,7 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, name: &str, tip: &str, on: bool, p:
     let side = ui.spacing().interact_size.y + 4.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+    crate::widgets::focus_ring(ui, &resp, p);
     if ui.is_rect_visible(rect) {
         if on {
             ui.painter().rect_filled(rect, 4.0, p.selection);
@@ -88,6 +94,7 @@ pub fn tool_button(ui: &mut Ui, glyph: &str, tint: Color32, name: &str, tip: &st
         };
         ui.painter().rect(rect, 4.0, fill, Stroke::new(1.0, border), egui::StrokeKind::Inside);
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, prop(16.0), if on { p.text } else { tint });
+        crate::widgets::focus_ring(ui, &resp, p);
     }
     tooltip(resp, name, tip, p)
 }
@@ -123,15 +130,89 @@ pub fn drag_region(ui: &mut Ui) {
     }
 }
 
+const REPO_TAB_CLOSE: f32 = 20.0;
+
+/// What a repository's tab takes around its name.
+fn repo_tab_chrome(dirty: bool) -> f32 {
+    12.0 + if dirty { 11.0 } else { 0.0 } + 4.0 + REPO_TAB_CLOSE + 6.0
+}
+
+/// How wide a repository's tab is with its whole name showing.
+pub fn repo_tab_width(ui: &Ui, name: &str, dirty: bool) -> f32 {
+    ui.painter().layout_no_wrap(name.to_string(), prop(12.5), Color32::WHITE).size().x + repo_tab_chrome(dirty)
+}
+
+/// Which tabs fit in `room`, and the widest any may be. They shrink before any goes in the
+/// overflow list, and the one in use is always among those showing.
+pub fn fit_tabs(natural: &[f32], room: f32, active: usize) -> (Vec<usize>, f32) {
+    if natural.iter().sum::<f32>() <= room {
+        return ((0..natural.len()).collect(), f32::INFINITY);
+    }
+    let fit = ((room / MIN_REPO_TAB).floor() as usize).max(1);
+    if fit >= natural.len() {
+        // The narrow ones keep their width and the wide ones share what's left.
+        let mut widths: Vec<f32> = natural.to_vec();
+        widths.sort_by(f32::total_cmp);
+        let (mut left, mut count, mut cap) = (room, widths.len(), room / widths.len() as f32);
+        for w in widths {
+            if w > cap {
+                break;
+            }
+            left -= w;
+            count -= 1;
+            cap = left / count.max(1) as f32;
+        }
+        return ((0..natural.len()).collect(), cap);
+    }
+    let mut shown: Vec<usize> = (0..fit).collect();
+    if active >= fit {
+        shown[fit - 1] = active;
+    }
+    (shown, room / fit as f32)
+}
+
+#[cfg(test)]
+#[test]
+fn tabs_shrink_then_overflow_and_the_active_one_stays() {
+    let wide = [300.0; 9];
+    let (shown, cap) = fit_tabs(&wide[..2], 1000.0, 0);
+    assert_eq!((shown.len(), cap), (2, f32::INFINITY));
+    let (shown, cap) = fit_tabs(&wide[..4], 800.0, 0);
+    assert_eq!((shown.len(), cap), (4, 200.0));
+    // One short tab keeps what it needs.
+    let (shown, cap) = fit_tabs(&[100.0, 500.0, 500.0], 700.0, 0);
+    assert_eq!((shown.len(), cap), (3, 300.0));
+    let (shown, _) = fit_tabs(&wide, 500.0, 8);
+    assert_eq!(shown, vec![0, 1, 2, 3, 8]);
+}
+
+/// The palette's place in the title bar, looking like the search box it is.
+pub fn command_field(ui: &mut Ui, width: f32, p: &Palette) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Command palette"));
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect(rect, 4.0, if resp.hovered() { p.hover } else { p.panel }, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+        ui.painter().text(rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, icon::MAGNIFYING_GLASS, prop(13.0), p.dim);
+        ui.painter().text(rect.left_center() + vec2(26.0, 0.0), Align2::LEFT_CENTER, "Search or run a command", prop(12.0), p.dim);
+        ui.painter().text(rect.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, "Ctrl+P", prop(11.0), p.faint);
+        crate::widgets::focus_ring(ui, &resp, p);
+    }
+    tooltip(resp, "Command palette", "Every command, branch and file", p)
+}
+
 /// One open repository in the titlebar. Returns whether its close button was clicked.
-pub fn repo_tab(ui: &mut Ui, name: &str, dirty: bool, selected: bool, path: &str, p: &Palette) -> (Response, bool) {
+pub fn repo_tab(ui: &mut Ui, name: &str, dirty: bool, selected: bool, path: &str, cap: f32, p: &Palette) -> (Response, bool) {
     const TOP_GAP: f32 = 5.0;
-    const CLOSE: f32 = 16.0;
+    const CLOSE: f32 = REPO_TAB_CLOSE;
     let color = if selected { p.text } else { p.dim };
-    let galley = ui.painter().layout_no_wrap(name.to_string(), prop(12.5), color);
-    let width = 12.0 + galley.size().x + if dirty { 11.0 } else { 0.0 } + 4.0 + CLOSE + 6.0;
+    let room = (cap - repo_tab_chrome(dirty)).max(16.0);
+    let mut job = egui::text::LayoutJob::simple_singleline(name.to_string(), prop(12.5), color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+    let galley = ui.painter().layout_job(job);
+    let width = galley.size().x + repo_tab_chrome(dirty);
     let (outer, resp) = ui.allocate_exact_size(vec2(width, TITLE_BAR_HEIGHT), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+    crate::widgets::focus_ring(ui, &resp, p);
     let rect = Rect::from_min_max(pos2(outer.left(), outer.top() + TOP_GAP), outer.max);
     let close_rect = Rect::from_center_size(pos2(rect.right() - 6.0 - CLOSE / 2.0, rect.center().y), vec2(CLOSE, CLOSE));
     let close = ui.interact(close_rect, resp.id.with("close"), Sense::click());
@@ -158,7 +239,8 @@ pub fn repo_tab(ui: &mut Ui, name: &str, dirty: bool, selected: bool, path: &str
         ui.painter().text(close_rect.center(), Align2::CENTER_CENTER, icon::X, prop(11.0), if close.hovered() { p.text } else { p.faint });
     }
     let clicked = close.clicked();
-    (resp.on_hover_text(path), clicked)
+    let hover = if dirty { format!("{path}\nHas uncommitted changes") } else { path.to_string() };
+    (resp.on_hover_text(hover), clicked)
 }
 
 #[derive(Clone, Copy)]
@@ -172,6 +254,7 @@ enum Control {
 fn control(ui: &mut Ui, kind: Control, name: &str, p: &Palette) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(CONTROL_WIDTH, TITLE_BAR_HEIGHT), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+    crate::widgets::focus_ring(ui, &resp, p);
     let closing = matches!(kind, Control::Close) && resp.hovered();
     if closing {
         ui.painter().rect_filled(rect, 0.0, CLOSE_HOVER);
@@ -203,6 +286,11 @@ fn control(ui: &mut Ui, kind: Control, name: &str, p: &Palette) -> Response {
         }
     }
     resp
+}
+
+/// How much of the title bar's right end the window controls take.
+pub fn window_controls_width() -> f32 {
+    CONTROL_WIDTH * 3.0
 }
 
 /// Minimize, maximize and close, for a right-to-left layout.
@@ -339,7 +427,7 @@ pub fn rail_top() -> [&'static [RailItem]; 4] {
     static WORK: [RailItem; 5] = [
         item!(HOUSE, "Home", "Overview and start work", Tab::home, Home),
         item!(GIT_FORK, "Graph", "Commit graph", Tab::graph, Graph),
-        item!(GIT_DIFF, "Changes", "Stage and commit", Tab::changes, Changes),
+        item!(NOTE_PENCIL, "Changes", "Stage and commit", Tab::changes, Changes),
         item!(MAGNIFYING_GLASS, "Search", "Search and compare", || Tab::Search(Box::default()), Search),
         item!(ROCKET_LAUNCH, "Launchpad", "Pull requests and issues", || Tab::Launchpad(Box::default()), Launchpad),
     ];
@@ -352,7 +440,7 @@ pub fn rail_top() -> [&'static [RailItem]; 4] {
         item!(CLOCK_COUNTER_CLOCKWISE, "Reflog", "Recover lost work", || Tab::Reflog(Box::default()), Reflog),
         item!(LIST_NUMBERS, "Rebase", "Interactive rebase", || Tab::rebase(None), Rebase),
         item!(BUG_BEETLE, "Bisect", "Find a regression", || Tab::Bisect(Box::default()), Bisect),
-        item!(BANDAIDS, "Patches", "Saved patches", || Tab::Patches(Box::default()), Patches),
+        item!(FILE_ARROW_DOWN, "Patches", "Saved patches", || Tab::Patches(Box::default()), Patches),
         item!(STACK, "Composer", "Split work into commits", || Tab::Composer(Box::default()), Composer),
     ];
     static INSIGHT: [RailItem; 4] = [
@@ -396,32 +484,88 @@ fn rail_button(ui: &mut Ui, item: &RailItem, tint: Color32, active: bool, p: &Pa
         }
         let color = if active { tint } else if resp.hovered() { p.text } else { tint.gamma_multiply(0.8) };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, item.glyph, prop(20.0), color);
+        crate::widgets::focus_ring(ui, &resp, p);
     }
     tooltip(resp, name, item.tip, p)
 }
 
-/// The views rail. `is_focused` lights up the icon of the tab in front; a click
-/// returns the view to open.
-pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, p: &Palette) -> Option<Tab> {
+/// Names for the groups in the More list, in `rail_top`'s order after the first.
+const MORE_GROUPS: [&str; 3] = ["Together", "History", "Insight"];
+
+/// The views that sit behind the More button, with what's left of the rail's bottom.
+fn more_list(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, p: &Palette) -> Option<&'static RailItem> {
     let mut clicked = None;
+    let mut entry = |ui: &mut Ui, item: &'static RailItem, tint: Color32| {
+        let name = crate::i18n::t(item.name);
+        let r = ui.add(egui::Button::new((RichText::new(item.glyph).color(tint), RichText::new(name))).selected(is_focused(item)).frame_when_inactive(false));
+        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+        if r.on_hover_text(item.tip).clicked() {
+            clicked = Some(item);
+            ui.close();
+        }
+    };
+    for (i, group) in rail_top().into_iter().enumerate().skip(1) {
+        ui.label(RichText::new(MORE_GROUPS[i - 1]).small().color(p.dim));
+        for item in group {
+            entry(ui, item, group_tint(i, p));
+        }
+        ui.separator();
+    }
+    ui.label(RichText::new("Repository").small().color(p.dim));
+    for item in rail_bottom().iter().filter(|i| !KEPT_ON_RAIL.contains(&i.name)) {
+        entry(ui, item, p.dim);
+    }
+    clicked
+}
+
+/// From the bottom of the rail, what stays when the rest go in More.
+const KEPT_ON_RAIL: [&str; 2] = ["Console", "Settings"];
+
+/// The views rail. `is_focused` lights up the icon of the tab in front; a click returns
+/// the view to open, and whether it came from the More list. With `full`, every view has
+/// its own icon, and the top part scrolls if the window is too short for them.
+pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, p: &Palette) -> Option<(Tab, bool)> {
+    let mut clicked = None;
+    let mut from_more = false;
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-    let bottom = rail_bottom();
+    let bottom: Vec<&'static RailItem> = rail_bottom().iter().filter(|i| full || KEPT_ON_RAIL.contains(&i.name)).collect();
     let pinned = bottom.len() as f32 * RAIL_ITEM + 9.0;
     let height = (ui.available_height() - pinned).max(RAIL_ITEM);
     ui.allocate_ui_with_layout(vec2(RAIL_WIDTH, height), egui::Layout::top_down(egui::Align::Min), |ui| {
-        egui::ScrollArea::vertical().id_salt("rail").max_height(height).auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+        let groups = rail_top();
+        let shown: &[&'static [RailItem]] = if full { &groups } else { &groups[..1] };
+        let content = shown.iter().map(|g| g.len() as f32 * RAIL_ITEM + 9.0).sum::<f32>() + if full { 0.0 } else { RAIL_ITEM };
+        let area = egui::ScrollArea::vertical().id_salt("rail").max_height(height).auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
             ui.add_space(4.0);
-            for (i, group) in rail_top().into_iter().enumerate() {
+            for (i, group) in shown.iter().enumerate() {
                 if i > 0 {
                     separator(ui, p);
                 }
-                for item in group {
+                for item in group.iter() {
                     if rail_button(ui, item, group_tint(i, p), is_focused(item), p).clicked() {
                         clicked = Some(item);
                     }
                 }
             }
+            if !full {
+                let hidden_on = rail_top().into_iter().skip(1).flatten().chain(rail_bottom().iter().filter(|i| !KEPT_ON_RAIL.contains(&i.name))).any(is_focused);
+                let more = RailItem { glyph: icon::DOTS_THREE_CIRCLE, name: "More", tip: "Every other view", make: Tab::home, is: |_| false };
+                let resp = rail_button(ui, &more, p.dim, hidden_on, p);
+                egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).show(|ui| {
+                    if let Some(item) = more_list(ui, is_focused, p) {
+                        clicked = Some(item);
+                        from_more = true;
+                    }
+                });
+            }
         });
+        // With no scroll bar, this says there's more below when the window is short.
+        if content > height && area.state.offset.y + height < content - 1.0 {
+            let r = area.inner_rect;
+            let fade = Rect::from_min_max(pos2(r.left(), r.bottom() - 14.0), r.max);
+            ui.painter().rect_filled(fade, 0.0, p.bg);
+            ui.painter().text(fade.center(), Align2::CENTER_CENTER, icon::CARET_DOWN, prop(11.0), p.dim);
+        }
     });
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.add_space(4.0);
@@ -431,7 +575,7 @@ pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, p: &Palette) ->
             }
         }
     });
-    clicked.map(|i| (i.make)())
+    clicked.map(|i| ((i.make)(), from_more))
 }
 
 fn separator(ui: &mut Ui, p: &Palette) {

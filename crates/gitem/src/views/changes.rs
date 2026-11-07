@@ -17,7 +17,12 @@ use crate::menus;
 use crate::task::Task;
 use crate::views::Tab;
 use crate::views::changes_tree::{self, Node, Row, RowKind};
+use crate::views::diffview::DiffView;
 use crate::widgets::*;
+
+/// Below this a list and a diff side by side would both be too narrow to read, so a click
+/// on a file opens its diff in a tab of its own, as it does in a narrow pane of a split.
+const PREVIEW_MIN_WIDTH: f32 = 700.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -40,6 +45,29 @@ impl Section {
 
 /// How a file row shows in the tree: its depth and bare name.
 type Leaf<'a> = Option<(usize, &'a str)>;
+
+/// The file being looked at. A file can be in two lists, staged and unstaged at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Current {
+    section: Section,
+    path: String,
+}
+
+/// What a file row needs besides the file.
+struct RowState<'a> {
+    selected: &'a mut HashSet<String>,
+    current: Option<&'a Current>,
+    /// Set when the row was clicked.
+    picked: &'a mut Option<Current>,
+    /// Shift+F10 was pressed, which opens the current row's menu.
+    menu_key: bool,
+}
+
+impl RowState<'_> {
+    fn is_current(&self, section: Section, path: &str) -> bool {
+        self.current.is_some_and(|c| c.section == section && c.path == path)
+    }
+}
 
 /// The trees for one status and filter.
 struct TreeCache {
@@ -79,6 +107,11 @@ fn draft_path(root: &std::path::Path) -> PathBuf {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     root.to_string_lossy().hash(&mut h);
     gitem_core::settings::config_dir().join("drafts").join(format!("{:016x}.txt", h.finish()))
+}
+
+/// The draft kept for this repository is no longer wanted.
+pub fn forget_draft(root: &std::path::Path) {
+    let _ = std::fs::remove_file(draft_path(root));
 }
 
 #[derive(Default)]
@@ -124,6 +157,17 @@ pub struct ChangesView {
     /// The message as last written to disk, and when the box last differed from it.
     draft_saved: String,
     draft_changed: Option<Instant>,
+    /// The file picked in the list, shown beside it when there's room.
+    current: Option<Current>,
+    preview: Option<Box<DiffView>>,
+    /// The list's scroll position and height, for keeping the current file on screen.
+    list_scroll: (f32, f32),
+    /// Move the list to show the current file, on the next frame.
+    reveal: bool,
+    /// A file to show as soon as the status is known, for screenshots.
+    show_first: Option<String>,
+    /// How tall the commit box's controls under the message are.
+    commit_tail: f32,
 }
 
 fn change_of(e: &StatusEntry, staged: bool) -> FileChange {
@@ -131,6 +175,18 @@ fn change_of(e: &StatusEntry, staged: bool) -> FileChange {
 }
 
 impl ChangesView {
+    /// With this file's unstaged changes showing, for screenshots.
+    pub fn showing(path: &str) -> Self {
+        Self { show_first: Some(path.to_string()), ..Default::default() }
+    }
+
+    /// Asked for again, for another file.
+    pub fn retarget(&mut self, new: ChangesView) {
+        if new.show_first.is_some() {
+            self.show_first = new.show_first;
+        }
+    }
+
     pub fn key(&self) -> String {
         "changes".into()
     }
@@ -185,7 +241,7 @@ impl ChangesView {
                 if self.ai_stash_gen == cx.data.status_gen {
                     cx.run(op);
                 } else {
-                    cx.out.push(Action::Confirm { title: "Files changed since you asked".into(), body: format!("Stash everything in the working tree now, as \"{message}\"? That includes changes made after you pressed the button."), label: "Stash".into(), op });
+                    cx.out.push(Action::Confirm { title: "Files changed since you asked".into(), body: format!("Stash everything in the working tree now, as \"{message}\"? That includes changes made after you pressed the button."), label: "Stash".into(), op: op.lossless() });
                 }
             }
             if let Some(e) = self.ai_stash.error.take() {
@@ -247,6 +303,137 @@ impl ChangesView {
             }
         }
 
+        let room = ui.available_width();
+        let beside = room >= PREVIEW_MIN_WIDTH;
+        if let Some(path) = self.show_first.take() {
+            let section = if st.entries.iter().any(|e| e.path == path && e.is_unstaged()) { Section::Unstaged } else { Section::Staged };
+            self.pick(Current { section, path }, cx, st, beside);
+        }
+        self.follow_current(st);
+        if !beside {
+            // Nowhere to show it. Its diff comes back when the pane is wide again.
+            self.files_column(ui, cx, st, false);
+            return;
+        }
+        let widest = (room - 320.0).max(240.0);
+        egui::Panel::left("changes-files").resizable(true).default_size((room * 0.36).clamp(280.0, 460.0)).size_range(240.0..=widest).show(ui, |ui| self.files_column(ui, cx, st, true));
+        self.preview_pane(ui, cx);
+    }
+
+    /// A file staged while it's on show moves to the other list, and its diff goes with it.
+    fn follow_current(&mut self, st: &RepoStatus) {
+        let Some(cur) = self.current.clone() else { return };
+        let Some(e) = st.entries.iter().find(|e| e.path == cur.path) else {
+            self.current = None;
+            self.preview = None;
+            return;
+        };
+        if cur.section.holds(e) {
+            return;
+        }
+        let other = Section::ALL.into_iter().find(|s| s.holds(e));
+        self.current = other.map(|section| Current { section, path: cur.path });
+        self.reveal = self.current.is_some();
+        let want = self.current.clone();
+        self.show_preview(want.as_ref(), Some(e));
+    }
+
+    /// Which diff a file in a list means.
+    fn source_of(section: Section, e: &StatusEntry) -> DiffSource {
+        match section {
+            Section::Staged => DiffSource::Staged,
+            _ if e.worktree == FileStatus::Untracked => DiffSource::Untracked,
+            _ => DiffSource::Unstaged,
+        }
+    }
+
+    /// Keeps how the diff was being looked at, as one file after another goes by.
+    fn show_preview(&mut self, cur: Option<&Current>, e: Option<&StatusEntry>) {
+        let (Some(cur), Some(e)) = (cur, e) else {
+            self.preview = None;
+            return;
+        };
+        if cur.section == Section::Conflicts {
+            self.preview = None;
+            return;
+        }
+        let mut view = DiffView::new(Self::source_of(cur.section, e), Some(cur.path.clone())).embedded();
+        if let Some(old) = &self.preview {
+            view.look_like(old);
+        }
+        self.preview = Some(Box::new(view));
+    }
+
+    fn preview_pane(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        match &mut self.preview {
+            Some(view) => {
+                ui.push_id("changes-preview", |ui| view.ui(ui, cx));
+            }
+            None => empty_state(ui, "Select a file to see its changes", "Click a file, or use the Up and Down keys. Space stages it.", cx.pal),
+        }
+    }
+
+    /// The row after or before the current file, among files: not headings or folders.
+    fn next_file(&self, st: &RepoStatus, down: bool) -> Option<Current> {
+        let list = self.list.as_ref()?;
+        let current_at = self.current.as_ref().and_then(|c| list.lines.iter().position(|l| line_file(list, st, *l).is_some_and(|(s, e)| s == c.section && e.path == c.path)));
+        let order: Box<dyn Iterator<Item = usize>> = match (current_at, down) {
+            (Some(at), true) => Box::new(at + 1..list.lines.len()),
+            (Some(at), false) => Box::new((0..at).rev()),
+            (None, true) => Box::new(0..list.lines.len()),
+            (None, false) => Box::new((0..list.lines.len()).rev()),
+        };
+        order.into_iter().find_map(|i| line_file(list, st, list.lines[i]).map(|(section, e)| Current { section, path: e.path.clone() }))
+    }
+
+    /// Up and Down walk the files, Space stages or unstages the current one, Enter opens
+    /// its diff in a tab, and Shift+F10 is its menu. Not while typing, behind a dialog, or
+    /// when another pane has the user's attention. Says whether the menu was asked for.
+    fn keyboard(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, beside: bool) -> bool {
+        if cx.dialog_open || !cx.in_front || ui.ctx().memory(|m| m.focused().is_some()) {
+            return false;
+        }
+        use egui::{Key, Modifiers};
+        let (down, up, space, enter, menu) = ui.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::Space), i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::SHIFT, Key::F10)));
+        if (down || up)
+            && let Some(next) = self.next_file(st, down)
+        {
+            self.reveal = true;
+            self.pick(next, cx, st, beside);
+        }
+        let on_current = self.current.clone().and_then(|c| st.entries.iter().find(|e| e.path == c.path).map(|e| (c.section, e)));
+        if let (true, Some((section, e))) = (space, on_current) {
+            match section {
+                Section::Unstaged => cx.run(ops::stage_paths(std::slice::from_ref(&e.path))),
+                Section::Staged => cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty())),
+                Section::Conflicts => cx.open(Tab::merge(&e.path)),
+            }
+        }
+        if let (true, Some((section, e))) = (enter, on_current) {
+            if section == Section::Conflicts {
+                cx.open(Tab::merge(&e.path));
+            } else {
+                cx.diff(Self::source_of(section, e), Some(&e.path));
+            }
+        }
+        menu
+    }
+
+    /// A click or a key landed on this file.
+    fn pick(&mut self, picked: Current, cx: &mut Cx, st: &RepoStatus, beside: bool) {
+        let Some(e) = st.entries.iter().find(|e| e.path == picked.path) else { return };
+        if picked.section == Section::Conflicts {
+            cx.open(Tab::merge(&picked.path));
+        } else if !beside {
+            cx.diff(Self::source_of(picked.section, e), Some(&picked.path));
+        } else if self.current.as_ref() != Some(&picked) || self.preview.is_none() {
+            self.show_preview(Some(&picked), Some(e));
+        }
+        self.current = Some(picked);
+    }
+
+    fn files_column(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, beside: bool) {
+        let p = cx.pal.clone();
         egui::Panel::bottom("commit-box").resizable(true).default_size(190.0).show(ui, |ui| self.commit_box(ui, cx, st));
 
         let as_tree = cx.settings.changes_tree;
@@ -264,10 +451,12 @@ impl ChangesView {
             });
         });
         self.update_list(cx.data.status_gen, st, as_tree);
+        let menu_key = self.keyboard(ui, cx, st, beside);
         self.batch_bar(ui, cx, st);
         ui.add_space(2.0);
 
         let Some(list) = self.list.take() else { return };
+        let mut picked = None;
         if st.is_clean() {
             egui::ScrollArea::vertical().id_salt("changes-list").auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -278,17 +467,33 @@ impl ChangesView {
             });
         } else {
             ui.spacing_mut().item_spacing.y = 0.0;
-            egui::ScrollArea::vertical().id_salt("changes-list").auto_shrink([false, false]).show_rows(ui, ROW_H, list.lines.len(), |ui, range| {
+            let mut area = egui::ScrollArea::vertical().id_salt("changes-list").auto_shrink([false, false]);
+            if std::mem::take(&mut self.reveal)
+                && let Some(y) = self.current.as_ref().and_then(|c| list.lines.iter().position(|l| line_file(&list, st, *l).is_some_and(|(s, e)| s == c.section && e.path == c.path))).map(|i| i as f32 * ROW_H)
+            {
+                let (top, height) = self.list_scroll;
+                if y < top {
+                    area = area.vertical_scroll_offset(y);
+                } else if y + ROW_H > top + height {
+                    area = area.vertical_scroll_offset(y + ROW_H - height);
+                }
+            }
+            let shown = area.show_rows(ui, ROW_H, list.lines.len(), |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for at in range {
-                    self.line(ui, cx, st, &list, at);
+                    self.line(ui, cx, st, &list, at, &mut picked, menu_key);
                 }
             });
+            self.list_scroll = (shown.state.offset.y, shown.inner_rect.height());
         }
         self.list = Some(list);
+        if let Some(picked) = picked {
+            self.pick(picked, cx, st, beside);
+        }
     }
 
-    fn line(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, list: &ListCache, at: usize) {
+    #[allow(clippy::too_many_arguments)]
+    fn line(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, list: &ListCache, at: usize, picked: &mut Option<Current>, menu_key: bool) {
         match list.lines[at] {
             Line::Heading(section) => self.heading(ui, cx, st, section, list.shown[section as usize]),
             Line::File(section, index) => {
@@ -296,13 +501,15 @@ impl ChangesView {
                     ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), egui::Sense::hover());
                     return;
                 };
+                let current = self.current.clone();
+                let mut rows = RowState { selected: &mut self.selected, current: current.as_ref(), picked, menu_key };
                 match section {
-                    Section::Conflicts => conflict_row(ui, cx, e, None),
-                    Section::Staged => staged_row(ui, cx, e, st, &mut self.selected, None),
-                    Section::Unstaged => unstaged_row(ui, cx, e, &mut self.selected, None),
+                    Section::Conflicts => conflict_row(ui, cx, e, None, &mut rows),
+                    Section::Staged => staged_row(ui, cx, e, st, &mut rows, None),
+                    Section::Unstaged => unstaged_row(ui, cx, e, &mut rows, None),
                 }
             }
-            Line::Tree(section, row) => self.tree_row(ui, cx, st, &list.trees[section as usize], section, row),
+            Line::Tree(section, row) => self.tree_row(ui, cx, st, &list.trees[section as usize], section, row, picked, menu_key),
         }
     }
 
@@ -313,11 +520,11 @@ impl ChangesView {
         let mut ui = ui.new_child(egui::UiBuilder::new().id_salt(("changes-heading", section as usize)).max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
         let ui = &mut ui;
         let title = match section {
-            Section::Conflicts => "Merge conflicts",
+            Section::Conflicts => "Conflicts",
             Section::Staged => "Staged",
             Section::Unstaged => "Unstaged",
         };
-        ui.label(RichText::new(format!("{title} ({shown})").to_uppercase()).size(11.0).color(p.faint).strong());
+        ui.label(RichText::new(format!("{title} ({shown})").to_uppercase()).size(11.0).color(p.dim).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match section {
             Section::Conflicts => {}
             Section::Staged => {
@@ -341,22 +548,27 @@ impl ChangesView {
                     if ui.small_button("Stage all").clicked() {
                         cx.run(ops::stage_all());
                     }
-                    if ui.small_button("Stash…").clicked() {
-                        cx.form(forms::stash_form(Vec::new()));
-                    }
-                    if ui.add_enabled(!self.ai_stash.busy(), egui::Button::new("Stash with AI message").small()).clicked() {
-                        self.ai_stash_gen = cx.data.status_gen;
-                        let (repo, cfg) = (cx.repo.clone(), cx.settings.ai.clone());
-                        self.ai_stash.spawn(ui.ctx(), move || -> Result<String, String> {
-                            let diff = repo.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?;
-                            let (s, u) = ai::stash_prompt(&diff);
-                            let key = cred::ai_key(cfg.provider.key_name());
-                            ai::complete(&cfg, key.as_deref(), &s, &u).map_err(|e| e.to_string())
-                        });
-                    }
                     if ui.small_button("View all").clicked() {
                         cx.diff(DiffSource::Unstaged, None);
                     }
+                    // The heading is one row of a narrow column, and these are the rare ones.
+                    ui.menu_button(icon::DOTS_THREE, |ui| {
+                        if ui.button("Stash…").clicked() {
+                            cx.form(forms::stash_form(Vec::new()));
+                            ui.close();
+                        }
+                        if ui.add_enabled(!self.ai_stash.busy(), egui::Button::new("Stash with AI message")).clicked() {
+                            self.ai_stash_gen = cx.data.status_gen;
+                            let (repo, cfg) = (cx.repo.clone(), cx.settings.ai.clone());
+                            self.ai_stash.spawn(ui.ctx(), move || -> Result<String, String> {
+                                let diff = repo.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?;
+                                let (s, u) = ai::stash_prompt(&diff);
+                                let key = cred::ai_key(cfg.provider.key_name());
+                                ai::complete(&cfg, key.as_deref(), &s, &u).map_err(|e| e.to_string())
+                            });
+                            ui.close();
+                        }
+                    }).response.on_hover_text("More for these files");
                 }
             }
         });
@@ -450,7 +662,8 @@ impl ChangesView {
         }
     }
 
-    fn tree_row(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, rows: &[Row], section: Section, at: usize) {
+    #[allow(clippy::too_many_arguments)]
+    fn tree_row(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, rows: &[Row], section: Section, at: usize, picked: &mut Option<Current>, menu_key: bool) {
         let i = section as usize;
         let r = &rows[at];
         let filtering = !self.filter.is_empty();
@@ -461,10 +674,12 @@ impl ChangesView {
                     return;
                 };
                 let leaf = Some((r.depth, r.name.as_str()));
+                let current = self.current.clone();
+                let mut state = RowState { selected: &mut self.selected, current: current.as_ref(), picked, menu_key };
                 match section {
-                    Section::Conflicts => conflict_row(ui, cx, e, leaf),
-                    Section::Staged => staged_row(ui, cx, e, st, &mut self.selected, leaf),
-                    Section::Unstaged => unstaged_row(ui, cx, e, &mut self.selected, leaf),
+                    Section::Conflicts => conflict_row(ui, cx, e, leaf, &mut state),
+                    Section::Staged => staged_row(ui, cx, e, st, &mut state, leaf),
+                    Section::Unstaged => unstaged_row(ui, cx, e, &mut state, leaf),
                 }
             }
             RowKind::Dir { open, count } => {
@@ -483,23 +698,28 @@ impl ChangesView {
     fn commit_box(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus) {
         let p = cx.pal.clone();
         ui.add_space(4.0);
-        let branch = st.branch.clone().unwrap_or_else(|| "detached HEAD".into());
+        let branch = st.op_branch.as_ref().map(|b| format!("{b} (rebasing)")).or_else(|| st.branch.clone()).unwrap_or_else(|| "detached HEAD".into());
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Commit to {branch}")).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let busy = self.ai.busy();
-                if ui.add_enabled(!busy, egui::Button::new("Generate with AI").small()).on_hover_text("Write a message from the staged diff").clicked() {
-                    self.generate(ui.ctx(), cx);
-                }
+                ui.menu_button(format!("AI {}", icon::CARET_DOWN), |ui| {
+                    if ui.add_enabled(!busy, egui::Button::new("Generate with AI")).on_hover_text("Write a message from the staged diff").clicked() {
+                        self.generate(ui.ctx(), cx);
+                        ui.close();
+                    }
+                    if ui.button("Review with AI").on_hover_text("Look for problems in these changes").clicked() {
+                        let extra = cx.settings.ai.custom_instructions.clone();
+                        crate::views::textview::ai_tab(cx, "AI Review", move |r| Ok(ai::review_prompt(&extra, &r.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?)));
+                        ui.close();
+                    }
+                    if ui.button("Explain with AI").on_hover_text("Summarise the working changes with AI").clicked() {
+                        crate::views::textview::ai_tab(cx, "Explain changes", move |r| Ok(ai::explain_prompt("uncommitted changes", "(not committed yet)", &r.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?)));
+                        ui.close();
+                    }
+                }).response.on_hover_text("These send your changes to the AI provider set in Settings");
                 if busy {
                     ui.add(spinner(13.0));
-                }
-                if ui.small_button("Review with AI").on_hover_text("Look for problems in these changes").clicked() {
-                    let extra = cx.settings.ai.custom_instructions.clone();
-                    crate::views::textview::ai_tab(cx, "AI Review", move |r| Ok(ai::review_prompt(&extra, &r.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?)));
-                }
-                if ui.small_button("Explain").on_hover_text("Summarise the working changes with AI").clicked() {
-                    crate::views::textview::ai_tab(cx, "Explain changes", move |r| Ok(ai::explain_prompt("uncommitted changes", "(not committed yet)", &r.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?)));
                 }
                 if ui.small_button("Compose…").on_hover_text("Split the changes into several commits").clicked() {
                     cx.open(Tab::Composer(Box::default()));
@@ -507,9 +727,10 @@ impl ChangesView {
             });
         });
         let mut box_focused = false;
-        egui::ScrollArea::vertical().id_salt("msg").max_height(ui.available_height() - 62.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("msg").max_height((ui.available_height() - self.commit_tail).max(40.0)).show(ui, |ui| {
             box_focused = ui.add(crate::widgets::text_area(&mut self.message).hint_text("Message (Ctrl+Enter to commit)").desired_rows(3).desired_width(f32::INFINITY)).has_focus();
         });
+        let tail_top = ui.cursor().top();
         let len = self.message.lines().next().unwrap_or("").chars().count();
         if squash_waiting(st) {
             ui.label(RichText::new("A squash merge is staged. Git has made it no commit yet: committing this is what records it.").small().color(p.dim));
@@ -517,7 +738,7 @@ impl ChangesView {
         if self.message.lines().nth(1).is_some_and(|l| !l.trim().is_empty()) {
             ui.label(RichText::new("Leave the second line blank: git and most tools read the first line alone as the subject.").small().color(p.warn));
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.checkbox(&mut self.amend, "Amend").changed() && self.amend && self.message.trim().is_empty() {
                 self.amend_message.spawn_git(ui.ctx(), cx.repo, |r| r.commit("HEAD").map(|c| c.message()));
             }
@@ -554,9 +775,7 @@ impl ChangesView {
                     }
                 });
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(format!("{len}/72")).small().color(if len > 72 { p.warn } else { p.faint }));
-            });
+            ui.label(RichText::new(format!("{len}/72")).small().color(if len > 72 { p.warn } else { p.faint })).on_hover_text("Characters in the first line. Git tools show about 72.");
         });
         if let Some(offer) = self.ai_offer.clone() {
             ui.horizontal(|ui| {
@@ -571,27 +790,53 @@ impl ChangesView {
         }
         let counts = cx.data.counts();
         let (staged_n, unstaged_n) = (counts.staged, counts.unstaged);
+        // Mid-rebase and the like, what comes next is Continue, not a commit of your own.
+        if let Some(cmd) = st.op.command().filter(|_| st.op != RepoOp::Merge && !st.op_allows_commits) {
+            ui.horizontal(|ui| {
+                let clear = counts.conflicts == 0 && !cx.data.ops_busy;
+                let b = egui::Button::new(RichText::new(format!("Continue {cmd}")).color(if clear { p.on_accent } else { p.faint })).fill(if clear { p.accent } else { p.panel2 });
+                if ui.add_enabled(clear, b).on_disabled_hover_text("Resolve the conflicts first.").clicked() {
+                    cx.run(ops::op_continue(cmd));
+                }
+                if ui.button("Abort…").clicked() {
+                    cx.out.push(Action::Confirm { title: format!("Abort {}", st.op.label().to_lowercase()), body: "Abandon this operation and go back to where you started? Conflict resolutions made so far are lost.".into(), label: "Abort".into(), op: ops::op_abort(cmd) });
+                }
+            });
+            self.commit_tail = (ui.cursor().top() - tail_top).max(40.0) + 8.0;
+            return;
+        }
         let can = !cx.data.ops_busy && self.submitted.is_none() && !self.message.trim().is_empty() && counts.conflicts == 0 && (staged_n > 0 || self.amend || st.op == RepoOp::Merge || unstaged_n > 0);
         ui.horizontal(|ui| {
             let label = if self.amend {
                 "Amend commit".to_string()
             } else if staged_n > 0 {
-                format!("Commit {staged_n} file(s)")
+                format!("Commit {}", plural(staged_n, "file", "files"))
             } else if st.op == RepoOp::Merge {
                 // Finishing a merge stages nothing by itself, whatever is left unstaged.
                 "Finish merge".to_string()
             } else {
-                format!("Stage all and commit {unstaged_n} file(s)")
+                format!("Stage all and commit {}", plural(unstaged_n, "file", "files"))
             };
             let fill = if can { p.accent } else { p.panel2 };
             let b = egui::Button::new(RichText::new(label).color(if can { p.on_accent } else { p.faint })).fill(fill);
             // Dialogs draw after this and have the same shortcut. It belongs to them,
             // unless the commit box is where the typing is.
             let shortcut = can && (box_focused || !cx.dialog_open) && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
-            if ui.add_enabled(can, b).clicked() || shortcut {
+            let why = if counts.conflicts > 0 {
+                "Resolve the conflicts first."
+            } else if self.message.trim().is_empty() {
+                "Write a commit message first."
+            } else if cx.data.ops_busy || self.submitted.is_some() {
+                "Git is still working on the last thing asked for."
+            } else {
+                "There's nothing to commit."
+            };
+            if ui.add_enabled(can, b).on_disabled_hover_text(why).clicked() || shortcut {
                 self.commit(cx, staged_n == 0 && !self.amend && st.op != RepoOp::Merge);
             }
         });
+        // What's below the message box, for the next frame to leave room for: it wraps.
+        self.commit_tail = (ui.cursor().top() - tail_top).max(40.0) + 8.0;
     }
 
     /// Actions for files picked with Ctrl+click.
@@ -618,7 +863,7 @@ impl ChangesView {
                 self.selected.clear();
             }
             if !tracked.is_empty() && ui.small_button("Discard…").clicked() {
-                cx.confirm("Discard changes", &format!("Discard unstaged changes in {} file(s)? This cannot be undone.", tracked.len()), "Discard", ops::discard_paths(&tracked));
+                cx.confirm("Discard changes", &format!("Discard unstaged changes in {}? This cannot be undone.", plural(tracked.len(), "file", "files")), "Discard", ops::discard_paths(&tracked));
                 self.selected.clear();
             }
             if ui.small_button("Clear").clicked() {
@@ -666,6 +911,18 @@ impl ChangesView {
     }
 }
 
+/// The file on a line of the list, if it's a file's line.
+fn line_file<'s>(list: &ListCache, st: &'s RepoStatus, line: Line) -> Option<(Section, &'s StatusEntry)> {
+    match line {
+        Line::Heading(_) => None,
+        Line::File(section, n) => st.entries.get(n).map(|e| (section, e)),
+        Line::Tree(section, row) => match list.trees[section as usize].get(row)?.kind {
+            RowKind::File(n) => st.entries.get(n).map(|e| (section, e)),
+            RowKind::Dir { .. } => None,
+        },
+    }
+}
+
 fn folder_row(ui: &mut Ui, r: &Row, open: bool, count: usize, p: &crate::theme::Palette) -> egui::Response {
     let (rect, resp) = row(ui, ROW_H, false, p);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, r.name.as_str()));
@@ -696,7 +953,7 @@ fn folder_menu(ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section, rows
     };
     match section {
         Section::Staged => {
-            if ui.button(format!("Unstage {count} file(s)")).clicked() {
+            if ui.button(format!("Unstage {}", plural(count, "file", "files"))).clicked() {
                 let mut names = targets();
                 // A rename into this folder from elsewhere goes back whole.
                 let inside = format!("{folder}/");
@@ -707,7 +964,7 @@ fn folder_menu(ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section, rows
             ui.separator();
         }
         Section::Unstaged => {
-            if ui.button(format!("Stage {count} file(s)")).clicked() {
+            if ui.button(format!("Stage {}", plural(count, "file", "files"))).clicked() {
                 cx.run(ops::stage_paths(&targets()));
                 ui.close();
             }
@@ -721,10 +978,11 @@ fn folder_menu(ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section, rows
     }
 }
 
-fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf) {
+fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf, state: &mut RowState) {
     let p = cx.pal.clone();
     let code = e.conflict.clone().unwrap_or_default();
-    let (rect, resp) = row(ui, ROW_H, false, &p);
+    let is_current = state.is_current(Section::Conflicts, &e.path);
+    let (rect, resp) = row(ui, ROW_H, is_current, &p);
     let (depth, shown) = leaf.unwrap_or((0, &e.path));
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, e.path.as_str()));
     if leaf.is_some() {
@@ -738,9 +996,9 @@ fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf) {
     let rebasing = cx.status().is_some_and(|s| matches!(s.op, RepoOp::Rebase | RepoOp::RebaseInteractive));
     let (ours, theirs) = if rebasing { ("upstream's version", "your commit's version") } else { ("ours", "theirs") };
     if resp.clicked() {
-        cx.open(Tab::merge(&e.path));
+        *state.picked = Some(Current { section: Section::Conflicts, path: e.path.clone() });
     }
-    resp.context_menu(|ui| {
+    keyed_context_menu(&resp, is_current && state.menu_key, |ui| {
         if ui.button("Resolve in merge tool").clicked() {
             cx.open(Tab::merge(&e.path));
             ui.close();
@@ -818,28 +1076,31 @@ fn select_click(ui: &Ui, resp: &egui::Response, path: &str, selected: &mut HashS
 }
 
 fn changed_file_row(ui: &mut Ui, ch: &FileChange, selected: bool, leaf: Leaf, p: &crate::theme::Palette) -> egui::Response {
-    match leaf {
+    let resp = match leaf {
         Some((depth, name)) => tree_file_row(ui, ch, name, depth, selected, p),
         None => file_row(ui, ch, selected, p),
-    }
+    };
+    // A long name doesn't fit, and in a tree the row has only the last part of it.
+    resp.on_hover_text(ch.path.as_str())
 }
 
-fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, selected: &mut HashSet<String>, leaf: Leaf) {
+fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, state: &mut RowState, leaf: Leaf) {
     let p = cx.pal.clone();
     let ch = change_of(e, true);
-    let is_selected = selected.contains(&e.path);
+    let is_current = state.is_current(Section::Staged, &e.path);
+    let is_selected = state.selected.contains(&e.path) || is_current;
     let resp = changed_file_row(ui, &ch, is_selected, leaf, &p);
     if row_button(ui, &resp, crate::chrome::icon::MINUS, &format!("Unstage {}", e.path), is_selected, &p) {
         cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty()));
     }
-    if select_click(ui, &resp, &e.path, selected) {
+    if select_click(ui, &resp, &e.path, state.selected) {
     } else if resp.clicked() {
-        cx.diff(DiffSource::Staged, Some(&e.path));
+        *state.picked = Some(Current { section: Section::Staged, path: e.path.clone() });
     }
     if resp.double_clicked() {
         cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty()));
     }
-    resp.context_menu(|ui| {
+    keyed_context_menu(&resp, is_current && state.menu_key, |ui| {
         if ui.button("Unstage").clicked() {
             cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty()));
             ui.close();
@@ -853,24 +1114,25 @@ fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, select
     });
 }
 
-fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, selected: &mut HashSet<String>, leaf: Leaf) {
+fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, state: &mut RowState, leaf: Leaf) {
     let p = cx.pal.clone();
     let untracked = e.worktree == FileStatus::Untracked;
     let ch = change_of(e, false);
-    let is_selected = selected.contains(&e.path);
+    let is_current = state.is_current(Section::Unstaged, &e.path);
+    let is_selected = state.selected.contains(&e.path) || is_current;
     let resp = changed_file_row(ui, &ch, is_selected, leaf, &p);
     if row_button(ui, &resp, crate::chrome::icon::PLUS, &format!("Stage {}", e.path), is_selected, &p) {
         cx.run(ops::stage_paths(std::slice::from_ref(&e.path)));
     }
     let src = if untracked { DiffSource::Untracked } else { DiffSource::Unstaged };
-    if select_click(ui, &resp, &e.path, selected) {
+    if select_click(ui, &resp, &e.path, state.selected) {
     } else if resp.clicked() {
-        cx.diff(src.clone(), Some(&e.path));
+        *state.picked = Some(Current { section: Section::Unstaged, path: e.path.clone() });
     }
     if resp.double_clicked() {
         cx.run(ops::stage_paths(std::slice::from_ref(&e.path)));
     }
-    resp.context_menu(|ui| {
+    keyed_context_menu(&resp, is_current && state.menu_key, |ui| {
         if ui.button("Stage").clicked() {
             cx.run(ops::stage_paths(std::slice::from_ref(&e.path)));
             ui.close();

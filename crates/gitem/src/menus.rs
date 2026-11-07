@@ -17,6 +17,15 @@ fn item(ui: &mut Ui, label: &str) -> bool {
     c
 }
 
+/// As `item`, for what loses something or rewrites history.
+fn risky(ui: &mut Ui, cx: &Cx, label: &str) -> bool {
+    let c = ui.button(egui::RichText::new(crate::i18n::t(label)).color(cx.pal.danger)).clicked();
+    if c {
+        ui.close();
+    }
+    c
+}
+
 pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
     let sha = c.sha.clone();
     let short = c.short().to_string();
@@ -26,62 +35,8 @@ pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
     if item(ui, "Open changes") {
         cx.diff(DiffSource::Commit(sha.clone()), None);
     }
-    if item(ui, "Compare with working tree") {
-        cx.diff(DiffSource::WorkingVs(sha.clone()), None);
-    }
-    if item(ui, "Compare with HEAD") {
-        cx.open(Tab::compare(&sha, "HEAD"));
-    }
-    if item(ui, "Browse files at this commit") {
-        cx.open(Tab::tree(&sha));
-    }
-    ui.separator();
     if item(ui, "Check out (detached)…") {
-        cx.confirm("Check out commit", &format!("Check out {short} with a detached HEAD?"), "Check out", ops::checkout_detached(&sha));
-    }
-    if item(ui, "Create branch here…") {
-        cx.form(forms::new_branch(Some(sha.clone())));
-    }
-    if item(ui, "Create tag here…") {
-        cx.form(forms::new_tag(Some(sha.clone())));
-    }
-    if item(ui, "Create worktree here…") {
-        let refs = cx.data.ref_names();
-        cx.form(forms::add_worktree(cx.repo, refs, Some(sha.clone())));
-    }
-    ui.separator();
-    let is_head = cx.status().is_some_and(|s| s.head_sha == sha);
-    if is_head && item(ui, "Undo commit") {
-        undo_commit(cx);
-    }
-    if item(ui, "Reword…") {
-        if is_head {
-            let msg = c.message();
-            cx.form(forms::FormDialog::new("Reword commit", "Save").multiline("message", "Message", &msg).on_submit(|v| {
-                let m = v.opt("message").ok_or("A message is required.")?;
-                Ok(vec![Action::Run(ops::reword_head(&m))])
-            }));
-        } else {
-            open_plan(cx, c, gitem_core::rebase::RebaseAction::Reword, false);
-        }
-    }
-    if item(ui, "Squash into previous…") {
-        open_plan(cx, c, gitem_core::rebase::RebaseAction::Squash, true);
-    }
-    if item(ui, "Drop…") {
-        open_plan(cx, c, gitem_core::rebase::RebaseAction::Drop, false);
-    }
-    if let (Some(branch), Some(remote)) = (cx.current_branch(), cx.data.forge_remote.clone().or_else(|| cx.data.remotes().first().map(|r| r.name.clone())))
-        && item(ui, "Push up to this commit…") {
-            cx.confirm("Push to commit", &format!("Push {branch} to {remote} only up to {short}?"), "Push", ops::push_to_commit(&remote, &sha, &branch));
-        }
-    // Not on a first commit: there's nothing before it to rebase onto.
-    if let Some(p) = c.parents.first()
-        && item(ui, "Squash fixups from here") {
-            cx.run(ops::squash_fixups(p));
-        }
-    if item(ui, "Recompose from here…") {
-        recompose(cx, &sha);
+        cx.confirm("Check out commit", &format!("Check out {short} with a detached HEAD?"), "Check out", ops::checkout_detached(&sha).lossless());
     }
     if item(ui, "Cherry-pick…") {
         cx.form(forms::cherry_pick_form(vec![sha.clone()]));
@@ -89,73 +44,139 @@ pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
     if item(ui, "Revert…") {
         cx.form(forms::revert_form(sha.clone(), c.is_merge()));
     }
-    if item(ui, "Reset current branch to here…") {
-        cx.form(forms::reset_form(sha.clone()));
+    if item(ui, "Create branch here…") {
+        cx.form(forms::new_branch(Some(sha.clone())));
     }
-    if item(ui, "Interactive rebase from here…") {
-        match c.parents.first() {
-            Some(base) => cx.open(Tab::rebase(Some(base.clone()))),
-            None => cx.open(Tab::Rebase(Box::new(crate::views::rebase::RebaseView::from_root()))),
-        }
-    }
-    if item(ui, "Rebase current branch onto this…") {
-        cx.form(forms::rebase_form(sha.clone()));
-    }
-    if item(ui, "Merge into current branch…") {
-        cx.form(forms::merge_form(sha.clone()));
-    }
-    if item(ui, "Create fixup commit") {
-        cx.run(ops::fixup_commit(&sha));
-    }
-    ui.separator();
-    if item(ui, "Edit note…") {
-        let (repo, sha) = (cx.repo.clone(), sha.clone());
-        cx.out.push(Action::Later(Box::new(move || {
-            let current = repo.commit_note(&sha).unwrap_or_default();
-            Ok(Later::Form(Box::new(move || forms::note_form(sha, current))))
-        })));
-    }
-    if item(ui, "Save as patch…") {
-        cx.open(Tab::Patches(Box::new(crate::views::patches::PatchesView::create_from(DiffSource::Commit(sha.clone()), &c.subject))));
-    }
-    if item(ui, "Export with format-patch…") {
-        cx.form(forms::format_patch_form(format!("{sha}~1..{sha}")));
-    }
-    if item(ui, "Create archive…") {
-        cx.form(forms::archive_form(sha.clone()));
-    }
-    if item(ui, "Start bisect with this as bad…") {
-        let refs = cx.data.ref_names();
-        cx.form(forms::bisect_start_form(sha.clone(), refs));
-    }
-    ui.separator();
     if item(ui, "Copy SHA") {
         cx.copy(sha.clone());
-    }
-    if item(ui, "Copy short SHA") {
-        cx.copy(short);
-    }
-    if item(ui, "Copy message") {
-        cx.copy(c.message());
-    }
-    if item(ui, "Copy gitem link") {
-        let d = gitem_core::forge::DeepLink { repo: cx.repo.root.to_string_lossy().replace('\\', "/"), commit: Some(sha.clone()), ..Default::default() };
-        cx.copy(d.to_url());
-    }
-    if item(ui, "Copy as patch") {
-        // 16 seconds on a commit of 100,000 files, which would freeze the window.
-        let (repo, sha) = (cx.repo.clone(), sha.clone());
-        cx.out.push(Action::Later(Box::new(move || repo.patch_text(&DiffSource::Commit(sha)).map(crate::action::Later::Copy).map_err(|e| e.to_string()))));
     }
     if let Some(f) = cx.forge() {
         let url = f.commit_url(&sha);
         if item(ui, "Open on remote") {
-            cx.url(url.clone());
-        }
-        if item(ui, "Copy remote link") {
-            cx.copy(url);
+            cx.url(url);
         }
     }
+    let is_head = cx.status().is_some_and(|s| s.head_sha == sha);
+    if is_head && item(ui, "Undo commit") {
+        undo_commit(cx);
+    }
+    ui.separator();
+    ui.menu_button("Compare", |ui| {
+        if item(ui, "Compare with working tree") {
+            cx.diff(DiffSource::WorkingVs(sha.clone()), None);
+        }
+        if item(ui, "Compare with HEAD") {
+            cx.open(Tab::compare(&sha, "HEAD"));
+        }
+        if item(ui, "Browse files at this commit") {
+            cx.open(Tab::tree(&sha));
+        }
+    });
+    ui.menu_button("Rewrite history", |ui| {
+        if item(ui, "Reword…") {
+            if is_head {
+                let msg = c.message();
+                cx.form(forms::FormDialog::new("Reword commit", "Save").multiline("message", "Message", &msg).on_submit(|v| {
+                    let m = v.opt("message").ok_or("A message is required.")?;
+                    Ok(vec![Action::Run(ops::reword_head(&m))])
+                }));
+            } else {
+                open_plan(cx, c, gitem_core::rebase::RebaseAction::Reword, false);
+            }
+        }
+        if item(ui, "Squash into previous…") {
+            open_plan(cx, c, gitem_core::rebase::RebaseAction::Squash, true);
+        }
+        if item(ui, "Create fixup commit") {
+            cx.run(ops::fixup_commit(&sha));
+        }
+        // Not on a first commit: there's nothing before it to rebase onto.
+        if let Some(p) = c.parents.first()
+            && item(ui, "Squash fixups from here") {
+                cx.run(ops::squash_fixups(p));
+            }
+        if item(ui, "Recompose from here…") {
+            recompose(cx, &sha);
+        }
+        if risky(ui, cx, "Drop…") {
+            open_plan(cx, c, gitem_core::rebase::RebaseAction::Drop, false);
+        }
+    });
+    ui.menu_button("Reset, rebase and merge", |ui| {
+        if item(ui, "Merge into current branch…") {
+            cx.form(forms::merge_form(sha.clone()));
+        }
+        if item(ui, "Rebase current branch onto this…") {
+            cx.form(forms::rebase_form(sha.clone()));
+        }
+        if item(ui, "Interactive rebase from here…") {
+            match c.parents.first() {
+                Some(base) => cx.open(Tab::rebase(Some(base.clone()))),
+                None => cx.open(Tab::Rebase(Box::new(crate::views::rebase::RebaseView::from_root()))),
+            }
+        }
+        if let (Some(branch), Some(remote)) = (cx.current_branch(), cx.data.forge_remote.clone().or_else(|| cx.data.remotes().first().map(|r| r.name.clone())))
+            && item(ui, "Push up to this commit…") {
+                cx.confirm("Push to commit", &format!("Push {branch} to {remote} only up to {short}?"), "Push", ops::push_to_commit(&remote, &sha, &branch).lossless());
+            }
+        if risky(ui, cx, "Reset current branch to here…") {
+            cx.form(forms::reset_form(sha.clone()));
+        }
+    });
+    ui.menu_button("Create", |ui| {
+        if item(ui, "Create tag here…") {
+            cx.form(forms::new_tag(Some(sha.clone())));
+        }
+        if item(ui, "Create worktree here…") {
+            let refs = cx.data.ref_names();
+            cx.form(forms::add_worktree(cx.repo, refs, Some(sha.clone())));
+        }
+        if item(ui, "Edit note…") {
+            let (repo, sha) = (cx.repo.clone(), sha.clone());
+            cx.out.push(Action::Later(Box::new(move || {
+                let current = repo.commit_note(&sha).unwrap_or_default();
+                Ok(Later::Form(Box::new(move || forms::note_form(sha, current))))
+            })));
+        }
+        if item(ui, "Start bisect with this as bad…") {
+            let refs = cx.data.ref_names();
+            cx.form(forms::bisect_start_form(sha.clone(), refs));
+        }
+    });
+    ui.menu_button("Copy", |ui| {
+        if item(ui, "Copy short SHA") {
+            cx.copy(short.clone());
+        }
+        if item(ui, "Copy message") {
+            cx.copy(c.message());
+        }
+        if item(ui, "Copy gitem link") {
+            let d = gitem_core::forge::DeepLink { repo: cx.repo.root.to_string_lossy().replace('\\', "/"), commit: Some(sha.clone()), ..Default::default() };
+            cx.copy(d.to_url());
+        }
+        if item(ui, "Copy as patch") {
+            // 16 seconds on a commit of 100,000 files, which would freeze the window.
+            let (repo, sha) = (cx.repo.clone(), sha.clone());
+            cx.out.push(Action::Later(Box::new(move || repo.patch_text(&DiffSource::Commit(sha)).map(crate::action::Later::Copy).map_err(|e| e.to_string()))));
+        }
+        if let Some(f) = cx.forge() {
+            let url = f.commit_url(&sha);
+            if item(ui, "Copy remote link") {
+                cx.copy(url);
+            }
+        }
+    });
+    ui.menu_button("Export", |ui| {
+        if item(ui, "Save as patch…") {
+            cx.open(Tab::Patches(Box::new(crate::views::patches::PatchesView::create_from(DiffSource::Commit(sha.clone()), &c.subject))));
+        }
+        if item(ui, "Export with format-patch…") {
+            cx.form(forms::format_patch_form(format!("{sha}~1..{sha}")));
+        }
+        if item(ui, "Create archive…") {
+            cx.form(forms::archive_form(sha.clone()));
+        }
+    });
 }
 
 /// Open the rebase editor with one commit's action already chosen, for review.
@@ -197,21 +218,25 @@ fn recompose(cx: &mut Cx, base: &str) {
 /// Keeps the changes, but asks first once the commit is on a remote, since it would then
 /// have to be pushed over. A first commit has nothing before it to go back to.
 pub fn undo_commit(cx: &mut Cx) {
-    let repo = cx.repo.clone();
     let pushed = cx.status().is_some_and(|s| s.upstream.is_some() && s.ahead == 0);
-    let confirming = cx.settings.confirm_destructive;
-    cx.out.push(Action::Later(Box::new(move || {
+    let action = undo_commit_action(cx.repo, pushed, cx.settings.confirm_destructive);
+    cx.out.push(action);
+}
+
+pub fn undo_commit_action(repo: &gitem_core::Repo, pushed: bool, confirming: bool) -> Action {
+    let repo = repo.clone();
+    Action::Later(Box::new(move || {
         if repo.resolve("HEAD~1").is_err() {
             return Ok(Later::Toast("This is the first commit on this branch, so there's nothing to go back to.".to_string()));
         }
         Ok(if pushed {
             Later::Confirm { title: "Undo a pushed commit".to_string(), body: "This commit is already on the remote. Undoing it here means the next push has to overwrite it. Your changes stay in the working tree.".to_string(), label: "Undo commit".to_string(), op: ops::undo_commit() }
         } else if confirming {
-            Later::Confirm { title: "Undo last commit".to_string(), body: "Take the last commit back? Its changes stay staged.".to_string(), label: "Undo commit".to_string(), op: ops::undo_commit() }
+            Later::Confirm { title: "Undo last commit".to_string(), body: "Take the last commit back? Its changes stay staged.".to_string(), label: "Undo commit".to_string(), op: ops::undo_commit().lossless() }
         } else {
             Later::Run(ops::undo_commit())
         })
-    })));
+    }))
 }
 
 pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
@@ -255,16 +280,30 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         })));
     }
     ui.separator();
-    if item(ui, "Compare with HEAD") {
-        cx.open(Tab::compare("HEAD", &rev));
-    }
-    if item(ui, "Compare with working tree") {
-        cx.diff(DiffSource::WorkingVs(rev.clone()), None);
-    }
-    if !b.is_current {
-        if item(ui, "Open all changes with common base") {
-            cx.diff(DiffSource::MergeBase("HEAD".to_string(), rev.clone()), None);
+    ui.menu_button("Compare", |ui| {
+        if item(ui, "Compare with HEAD") {
+            cx.open(Tab::compare("HEAD", &rev));
         }
+        if item(ui, "Compare with working tree") {
+            cx.diff(DiffSource::WorkingVs(rev.clone()), None);
+        }
+        if !b.is_current {
+            if item(ui, "Open all changes with common base") {
+                cx.diff(DiffSource::MergeBase("HEAD".to_string(), rev.clone()), None);
+            }
+            if item(ui, "Check for conflicts with current") {
+                let (r, n) = (cx.repo.clone(), rev.clone());
+                cx.out.push(Action::Background(Box::new(move || {
+                    let files = r.predict_conflicts("HEAD", &n).map_err(|e| e.to_string())?;
+                    Ok(if files.is_empty() { format!("{n} would merge cleanly.") } else { format!("{n} would conflict in {}: {}", crate::widgets::plural(files.len(), "file", "files"), files.join(", ")) })
+                })));
+            }
+        }
+        if item(ui, "Search commits on this branch") {
+            cx.open(Tab::search(&format!("ref:{rev}")));
+        }
+    });
+    if !b.is_current {
         if item(ui, "Auto-rebase current onto this with AI…") {
             let (n, r, cfg) = (rev.clone(), cx.repo.clone(), cx.settings.ai.clone());
             let title = format!("Auto-rebase onto {name}");
@@ -293,13 +332,6 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
                 Ok(vec![Action::OpenTab(Tab::Text(Box::new(crate::views::textview::TextView::with_undo(&title, job, undo).stoppable(stop))))])
             }));
         }
-        if item(ui, "Check for conflicts with current") {
-            let (r, n) = (cx.repo.clone(), rev.clone());
-            cx.out.push(Action::Background(Box::new(move || {
-                let files = r.predict_conflicts("HEAD", &n).map_err(|e| e.to_string())?;
-                Ok(if files.is_empty() { format!("{n} would merge cleanly.") } else { format!("{n} would conflict in {} file(s): {}", files.len(), files.join(", ")) })
-            })));
-        }
     }
     if item(ui, "Explain with AI") {
         let (n, base) = (rev.clone(), cx.data.base_branch());
@@ -320,19 +352,18 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             })));
         }
     }
-    if item(ui, "Search commits on this branch") {
-        cx.open(Tab::search(&format!("ref:{rev}")));
-    }
-    if item(ui, "Create branch from this…") {
-        cx.form(forms::new_branch(Some(rev.clone())));
-    }
-    if item(ui, "Create worktree…") {
-        let refs = cx.data.ref_names();
-        cx.form(forms::add_worktree(cx.repo, refs, Some(name.clone())));
-    }
-    if item(ui, "Create tag…") {
-        cx.form(forms::new_tag(Some(rev.clone())));
-    }
+    ui.menu_button("Create", |ui| {
+        if item(ui, "Create branch from this…") {
+            cx.form(forms::new_branch(Some(rev.clone())));
+        }
+        if item(ui, "Create worktree…") {
+            let refs = cx.data.ref_names();
+            cx.form(forms::add_worktree(cx.repo, refs, Some(name.clone())));
+        }
+        if item(ui, "Create tag…") {
+            cx.form(forms::new_tag(Some(rev.clone())));
+        }
+    });
     ui.separator();
     if !b.is_remote {
         if item(ui, "Rename…") {
@@ -349,18 +380,18 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             if item(ui, "Move to another commit…") {
                 cx.form(forms::move_branch(name.clone(), cx.data.ref_names()));
             }
-            if item(ui, "Delete…") {
+            if risky(ui, cx, "Delete…") {
                 cx.confirm("Delete branch", &format!("Delete {name}? This fails if it has unmerged commits."), "Delete", ops::branch_delete(&name, false));
             }
-            if item(ui, "Force delete…") {
-                cx.confirm("Force delete branch", &format!("Delete {name} even if it has unmerged commits? Those commits may become unreachable."), "Force delete", ops::branch_delete(&name, true));
+            if risky(ui, cx, "Force delete…") {
+                cx.confirm("Force delete branch", &format!("Delete {name} even if it has unmerged commits? Those commits are then reachable only through the reflog, until git expires them."), "Force delete", ops::branch_delete(&name, true));
             }
         }
         if item(ui, "Push…") {
             let remotes = cx.data.remotes().iter().map(|r| r.name.clone()).collect();
             cx.form(forms::push_form(Some(name.clone()), remotes, b.upstream.is_some(), cx.settings.confirm_destructive));
         }
-    } else if item(ui, "Delete on remote…") {
+    } else if risky(ui, cx, "Delete on remote…") {
         cx.confirm("Delete remote branch", &format!("Delete {name} on the remote? This affects everyone using it."), "Delete on remote", ops::branch_delete_remote(&name, &cx.data.remote_names()));
     }
     ui.separator();
@@ -390,7 +421,7 @@ pub fn tag_menu(ui: &mut Ui, cx: &mut Cx, t: &Tag) {
         cx.inspect(&t.sha);
     }
     if item(ui, "Check out (detached)…") {
-        cx.confirm("Check out tag", &format!("Check out {name} with a detached HEAD?"), "Check out", ops::checkout_detached(&name));
+        cx.confirm("Check out tag", &format!("Check out {name} with a detached HEAD?"), "Check out", ops::checkout_detached(&name).lossless());
     }
     if item(ui, "Compare with HEAD") {
         cx.open(Tab::compare(&name, "HEAD"));
@@ -406,10 +437,10 @@ pub fn tag_menu(ui: &mut Ui, cx: &mut Cx, t: &Tag) {
     if item(ui, "Push to remote") {
         cx.run(ops::tag_push(&remote, &name));
     }
-    if item(ui, "Delete locally…") {
+    if risky(ui, cx, "Delete locally…") {
         cx.confirm("Delete tag", &format!("Delete tag {name} from this repository?"), "Delete", ops::tag_delete(&name));
     }
-    if item(ui, "Delete on remote…") {
+    if risky(ui, cx, "Delete on remote…") {
         cx.confirm("Delete remote tag", &format!("Delete tag {name} on {remote}?"), "Delete on remote", ops::tag_delete_remote(&remote, &name));
     }
     ui.separator();
@@ -473,7 +504,7 @@ pub fn stash_menu(ui: &mut Ui, cx: &mut Cx, s: &Stash) {
         });
     }
     ui.separator();
-    if item(ui, "Drop…") {
+    if risky(ui, cx, "Drop…") {
         cx.confirm("Drop stash", &format!("Permanently drop {sel} ({})?", s.message), "Drop", ops::only_if_stash_is(ops::stash_drop(&sel), &sel, &s.sha));
     }
 }

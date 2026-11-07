@@ -35,7 +35,7 @@ pub struct Item {
 fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'static str>) {
     match label {
         "Home" => (icon::HOUSE, "Overview and start work", None),
-        "Commit Graph" => (icon::GIT_FORK, "All branches and their history", Some("Ctrl+Shift+H")),
+        "Graph" => (icon::GIT_FORK, "All branches and their history", Some("Ctrl+Shift+H")),
         "Changes" => (icon::GIT_DIFF, "Stage and commit", Some("Ctrl+Shift+G")),
         "Launchpad" => (icon::ROCKET_LAUNCH, "Pull requests and issues", None),
         "Search Commits" => (icon::MAGNIFYING_GLASS, "By message, author, file, or change", None),
@@ -43,18 +43,18 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Worktrees" => (icon::TREE_STRUCTURE, "Work on several branches at once", None),
         "Contributors" => (icon::USERS_THREE, "People and activity", None),
         "Reflog" => (icon::CLOCK_COUNTER_CLOCKWISE, "Recover lost work", None),
-        "Interactive Rebase" => (icon::LIST_NUMBERS, "Reorder, squash, and edit commits", None),
+        "Rebase" => (icon::LIST_NUMBERS, "Reorder, squash, and edit commits", None),
         "Bisect" => (icon::BUG_BEETLE, "Find the commit that broke something", None),
         "Patches" => (icon::BANDAIDS, "Saved patches", None),
-        "Commit Composer" => (icon::STACK, "Split work into commits", None),
-        "Repository Tools" => (icon::WRENCH, "Submodules, hooks, LFS, clean", None),
-        "Git Config" => (icon::SLIDERS_HORIZONTAL, "Git's configuration values", None),
+        "Composer" => (icon::STACK, "Split work into commits", None),
+        "Tools" => (icon::WRENCH, "Submodules, hooks, LFS, clean", None),
+        "Config" => (icon::SLIDERS_HORIZONTAL, "Git's configuration values", None),
         "Credentials" => (icon::KEY, "Tokens and SSH keys", None),
-        "Git Console" => (icon::TERMINAL_WINDOW, "Every git command gitem has run", None),
+        "Console" => (icon::TERMINAL_WINDOW, "Every git command gitem has run", None),
         "Settings" => (icon::GEAR_SIX, "Preferences", None),
         "Visual History" => (icon::CHART_SCATTER, "History of the repository, a folder, or a file", None),
         "Treemap" => (icon::SQUARES_FOUR, "Files by size or recent activity", None),
-        "Repository Health" => (icon::HEARTBEAT, "How well this repository is tuned", None),
+        "Health" => (icon::HEARTBEAT, "How well this repository is tuned", None),
         "Agent Sessions" => (icon::ROBOT, "Coding agents in these worktrees", None),
         "Review Changes" => (icon::LIST_CHECKS, "A checklist and notes for a change", None),
         "About gitem" => (icon::INFO, "Version and build", None),
@@ -109,7 +109,7 @@ pub fn commands() -> Vec<Item> {
         };
     }
     view!("Home", Tab::home());
-    view!("Commit Graph", Tab::graph());
+    view!("Graph", Tab::graph());
     view!("Changes", Tab::changes());
     view!("Launchpad", Tab::Launchpad(Box::default()));
     view!("Search Commits", Tab::Search(Box::default()));
@@ -117,18 +117,18 @@ pub fn commands() -> Vec<Item> {
     view!("Worktrees", Tab::Worktrees(Box::default()));
     view!("Contributors", Tab::Contributors(Box::default()));
     view!("Reflog", Tab::Reflog(Box::default()));
-    view!("Interactive Rebase", Tab::rebase(None));
+    view!("Rebase", Tab::rebase(None));
     view!("Bisect", Tab::Bisect(Box::default()));
     view!("Patches", Tab::Patches(Box::default()));
-    view!("Commit Composer", Tab::Composer(Box::default()));
-    view!("Repository Tools", Tab::Tools(Box::default()));
-    view!("Git Config", Tab::Config(Box::default()));
+    view!("Composer", Tab::Composer(Box::default()));
+    view!("Tools", Tab::Tools(Box::default()));
+    view!("Config", Tab::Config(Box::default()));
     view!("Credentials", Tab::Credentials(Box::default()));
-    view!("Git Console", Tab::Console(Box::default()));
+    view!("Console", Tab::Console(Box::default()));
     view!("Settings", Tab::Settings(Box::default()));
     view!("Visual History", Tab::visual(""));
     view!("Treemap", Tab::Treemap(Box::default()));
-    view!("Repository Health", Tab::Health(Box::default()));
+    view!("Health", Tab::Health(Box::default()));
     view!("Agent Sessions", Tab::Agents(Box::default()));
     view!("Review Changes", Tab::Review(Box::default()));
 
@@ -941,7 +941,7 @@ mod tests {
     fn commands_know_their_shortcuts_and_have_icons() {
         let all = commands();
         let by = |l: &str| all.iter().find(|i| i.label == l).unwrap();
-        assert_eq!(by("Commit Graph").chord, Some("Ctrl+Shift+H"));
+        assert_eq!(by("Graph").chord, Some("Ctrl+Shift+H"));
         assert_eq!(by("Changes").chord, Some("Ctrl+Shift+G"));
         assert_eq!(by("Refresh").chord, Some("F5"));
         assert!(all.iter().all(|i| !i.glyph.is_empty()));

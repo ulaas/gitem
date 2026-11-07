@@ -50,13 +50,13 @@ impl ComposerView {
         "composer".into()
     }
     pub fn title(&self) -> String {
-        "Commit Composer".into()
+        "Composer".into()
     }
 
     /// What closing this tab would lose. An empty plan with nothing typed is nothing.
     pub fn unsaved(&self) -> Option<String> {
         let planned = self.groups.iter().filter(|g| !g.message.trim().is_empty() || !g.files.is_empty()).count();
-        (planned > 0).then(|| format!("Commit Composer: a plan of {planned} commit(s)"))
+        (planned > 0).then(|| format!("Composer: a plan of {}", plural(planned, "commit", "commits")))
     }
 
     /// Once the queue is done: the commits that landed leave the plan and the rest stay,
@@ -164,7 +164,7 @@ impl ComposerView {
             let mid_op = st.op != RepoOp::None && !(st.op_allows_commits && st.conflicts().next().is_none());
             let working = self.running.is_some() || self.settling.is_some() || cx.data.ops_busy;
             let ready = !mid_op && !working && !self.groups.is_empty() && self.groups.iter().all(|g| !g.message.trim().is_empty() && g.files.iter().any(|f| changed.contains(f)));
-            let b = egui::Button::new(RichText::new(format!("Create {} commit(s)", self.groups.len())).color(if ready { p.on_accent } else { p.faint })).fill(if ready { p.accent } else { p.panel2 });
+            let b = egui::Button::new(RichText::new(format!("Create {}", plural(self.groups.len(), "commit", "commits"))).color(if ready { p.on_accent } else { p.faint })).fill(if ready { p.accent } else { p.panel2 });
             if ui.add_enabled(ready, b).on_disabled_hover_text(if mid_op { "Finish or abort the operation in progress first" } else { "Every commit needs a message and at least one changed file" }).clicked() {
                 // Each commit takes its files whole, so a line left unstaged on purpose would go in.
                 let partial: Vec<String> = st.entries.iter().filter(|e| e.is_staged() && e.is_unstaged() && assigned.contains(&e.path)).map(|e| e.path.clone()).collect();

@@ -205,20 +205,27 @@ impl FormDialog {
         }
         self.update_derived();
         let mut first_text = true;
+        // Enter in a one-line field means go, except where going loses something.
+        let mut entered = false;
+        let mut in_multiline = false;
+        let danger = self.danger;
+        let pressed = |ui: &Ui, r: &egui::Response| r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.set_min_width(440.0);
         for (i, f) in self.fields.iter_mut().enumerate() {
             match f {
                 Field::Text { label, value, hint, password, .. } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
                     let r = ui.add(crate::widgets::input(value).hint_text(hint.as_str()).password(*password).desired_width(f32::INFINITY));
-                    if first_text && !ui.ctx().memory(|m| m.focused().is_some()) {
+                    // Before taking the focus back: Enter is what's just given it up.
+                    entered |= pressed(ui, &r);
+                    if first_text && !entered && !ui.ctx().memory(|m| m.focused().is_some()) {
                         r.request_focus();
                         first_text = false;
                     }
                 }
                 Field::Multiline { label, value, .. } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
-                    ui.add(crate::widgets::text_area(value).desired_rows(4).desired_width(f32::INFINITY));
+                    in_multiline |= ui.add(crate::widgets::text_area(value).desired_rows(4).desired_width(f32::INFINITY)).has_focus();
                 }
                 Field::Check { label, value, .. } => {
                     ui.checkbox(value, label.as_str());
@@ -234,7 +241,12 @@ impl FormDialog {
                 }
                 Field::Pick { key, label, options, value } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
-                    ui.add(crate::widgets::input(value).desired_width(f32::INFINITY));
+                    let r = ui.add(crate::widgets::input(value).desired_width(f32::INFINITY));
+                    entered |= pressed(ui, &r);
+                    if first_text && !entered && !ui.ctx().memory(|m| m.focused().is_some()) {
+                        r.request_focus();
+                        first_text = false;
+                    }
                     let q = value.clone();
                     let mut scored: Vec<(i32, &String)> = options.iter().filter_map(|o| gitem_core::util::fuzzy_score(&q, o).map(|s| (s, o))).collect();
                     scored.sort_by_key(|x| std::cmp::Reverse(x.0));
@@ -283,12 +295,17 @@ impl FormDialog {
             let fill = if self.danger { p.danger } else { p.accent };
             let text = if self.danger { crate::theme::ink_on(p.danger) } else { p.on_accent };
             let b = egui::Button::new(RichText::new(self.submit.as_str()).color(text)).fill(fill);
-            submit = ui.add(b).clicked();
+            submit = ui.add(b).on_hover_text(if danger { "Ctrl+Enter" } else { "Enter, or Ctrl+Enter from a box with several lines" }).clicked();
             if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 *closed = true;
             }
         });
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter)) {
+            submit = true;
+        }
+        // With nothing in focus, as in a form that only asks a question.
+        let nothing_focused = ui.ctx().memory(|m| m.focused().is_none()) && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none());
+        if !danger && !in_multiline && !egui::Popup::is_any_open(ui.ctx()) && (entered || nothing_focused) {
             submit = true;
         }
         if submit {
@@ -391,7 +408,7 @@ pub fn reset_form(rev: String) -> FormDialog {
 }
 
 pub fn cherry_pick_form(shas: Vec<String>) -> FormDialog {
-    FormDialog::new(format!("Cherry-pick {} commit(s)", shas.len()), "Cherry-pick")
+    FormDialog::new(format!("Cherry-pick {}", crate::widgets::plural(shas.len(), "commit", "commits")), "Cherry-pick")
         .check("x", "Record the source commit (-x)", false)
         .check("no_commit", "Apply without committing", false)
         .on_submit(move |v| run(ops::cherry_pick(&shas, v.on("no_commit"), v.on("x"))))
@@ -406,7 +423,7 @@ pub fn revert_form(sha: String, is_merge: bool) -> FormDialog {
 }
 
 pub fn stash_form(paths: Vec<String>) -> FormDialog {
-    let scope = if paths.is_empty() { "all changes".to_string() } else { format!("{} file(s)", paths.len()) };
+    let scope = if paths.is_empty() { "all changes".to_string() } else { crate::widgets::plural(paths.len(), "file", "files") };
     FormDialog::new(format!("Stash {scope}"), "Stash")
         .text("message", "Message", "")
         .check("untracked", "Include untracked files", true)

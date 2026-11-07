@@ -116,14 +116,27 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 
 | Keys | Action |
 |---|---|
+| `F1` | List these shortcuts, with a search box |
 | `Ctrl+P` | Command palette |
 | `Ctrl+Shift+G` | Changes |
-| `Ctrl+Shift+H` | Commit graph |
+| `Ctrl+Shift+H` | Graph |
 | `Ctrl+B` | Toggle sidebar |
 | `F5` | Refresh |
+| `Ctrl+O` | Open a folder |
+| `Ctrl+,` | Settings |
+| `Ctrl+W` | Close the tab, asking first if that loses something |
+| `Ctrl+Tab` `Ctrl+Shift+Tab` | Next and previous tab in the pane |
+| `Ctrl+1` to `Ctrl+9` | Go to that repository |
+| `Ctrl+Shift+F` `Ctrl+Shift+L` `Ctrl+Shift+K` | Fetch, pull, push |
+| `Enter` | Submit a dialog from a one-line field; answer a question that loses nothing |
 | `Ctrl+Enter` | Submit the open form. With none open, or from the commit box, commit |
-| `↑` `↓` or `J` `K` | Move through the graph |
-| `Alt+↑` `Alt+↓` | Previous and next change in a diff; move a commit in the rebase editor |
+| `Esc` | Close a dialog or menu |
+| `Tab` | Move between controls. What has the keyboard gets an outline |
+| `Shift+F10` | Open the menu of the current row, in Changes and the graph |
+| `↑ ↓` | Move through the files in Changes, or the commits in the graph |
+| `J` `K` | Next and previous commit in the graph |
+| `Space` | Stage or unstage the current file in Changes |
+| `Alt+↑, Alt+↓` | Previous and next change in a diff; move a commit in the rebase editor |
 | `P` `R` `E` `S` `F` `D` | Set the rebase action |
 | `Ctrl+F` | Find in file; search in the graph |
 | `/` | Find a ref in the graph |

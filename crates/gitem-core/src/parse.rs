@@ -243,6 +243,21 @@ pub fn parse_submodules(status: &str) -> Vec<Submodule> {
 }
 
 /// Parse `git status --porcelain=v2 --branch -z`.
+/// What a merge's default message says is being merged: `feature` from
+/// `Merge branch 'feature' into main`. Nothing, for a message someone wrote.
+pub fn merge_subject_name(subject: &str) -> Option<String> {
+    let rest = ["Merge branch '", "Merge remote-tracking branch '", "Merge tag '", "Merge commit '"].iter().find_map(|p| subject.strip_prefix(p))?;
+    rest.split_once('\'').map(|(name, _)| name.to_string())
+}
+
+#[cfg(test)]
+#[test]
+fn a_merge_message_names_what_is_merged() {
+    assert_eq!(merge_subject_name("Merge branch 'feature/x' into main").as_deref(), Some("feature/x"));
+    assert_eq!(merge_subject_name("Merge remote-tracking branch 'origin/x'").as_deref(), Some("origin/x"));
+    assert_eq!(merge_subject_name("my own words"), None);
+}
+
 pub fn parse_status(out: &str) -> RepoStatus {
     let mut st = RepoStatus::default();
     let mut it = out.split('\0');

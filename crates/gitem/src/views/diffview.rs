@@ -41,6 +41,8 @@ struct Prepared {
     /// Unified rows: a hunk's header, then each of its lines.
     unified: Vec<(usize, Option<usize>)>,
     unified_chars: usize,
+    /// The text of each unified row, for wrapping. A hunk's header has none.
+    unified_texts: Vec<Option<String>>,
     side: Vec<SideRow>,
     /// (hunk, line index) -> changed byte ranges within that line.
     words: HashMap<(usize, usize), Vec<(usize, usize)>>,
@@ -100,7 +102,8 @@ fn prepare(f: &FileDiff, dark: bool) -> Prepared {
             }
         }
     }
-    Prepared { additions: f.additions(), deletions: f.deletions(), unified, unified_chars, side, words, syntax: syn, max_chars, marked }
+    let unified_texts = unified.iter().map(|(h, l)| l.map(|l| marked.get(&(*h, l)).unwrap_or(&f.hunks[*h].lines[l].text).clone())).collect();
+    Prepared { additions: f.additions(), deletions: f.deletions(), unified, unified_chars, unified_texts, side, words, syntax: syn, max_chars, marked }
 }
 
 fn change_for(f: &FileDiff) -> gitem_core::FileChange {
@@ -166,6 +169,13 @@ pub struct DiffView {
     preparing_for: Option<usize>,
     /// Unpinned diffs are replaced by the next one opened from a list.
     pub pinned: bool,
+    /// Part of another view, rather than a tab of its own.
+    embedded: bool,
+    /// Long lines run on underneath, rather than off to the side.
+    wrap: bool,
+    /// Top of each row and the end of the last, while wrapping, with what they're for:
+    /// side by side or not, text columns, and the file.
+    wrapped_tops: Option<(bool, usize, usize, std::sync::Arc<Vec<f32>>)>,
 }
 
 impl DiffView {
@@ -194,7 +204,25 @@ impl DiffView {
             file_filter: String::new(),
             preparing_for: None,
             pinned: false,
+            embedded: false,
+            wrap: false,
+            wrapped_tops: None,
         }
+    }
+
+    /// For showing inside another view. It starts unified, as half of a pane is little room.
+    pub fn embedded(mut self) -> Self {
+        self.embedded = true;
+        self.mode = Mode::Unified;
+        self
+    }
+
+    /// Shows files the way `other` was showing them.
+    pub fn look_like(&mut self, other: &DiffView) {
+        self.mode = other.mode;
+        self.opts = other.opts;
+        self.full_file = other.full_file;
+        self.wrap = other.wrap;
     }
 
     /// The changed lines once loaded, or the reason it couldn't load. `None` while loading.
@@ -262,6 +290,7 @@ impl DiffView {
         self.preparing.stop();
         self.long_jobs.clear();
         self.load_no += 1;
+        self.wrapped_tops = None;
         // The file on screen comes ready with the load, so a reload swaps it in one piece.
         let selected = self.selected_file;
         self.files.spawn_git(ctx, cx.repo, move |repo| -> Result<Loaded, String> {
@@ -418,14 +447,21 @@ impl DiffView {
                 ui.label(RichText::new("Not UTF-8: stage the whole file").small().color(cx.pal.warn));
             } else if self.can_stage() && !self.selected_lines.is_empty() {
                 let verb = if self.src == DiffSource::Unstaged { "Stage" } else { "Unstage" };
-                if ui.button(format!("{verb} {} selected line(s)", self.selected_lines.len())).clicked() {
+                if ui.button(format!("{verb} {}", plural(self.selected_lines.len(), "selected line", "selected lines"))).clicked() {
                     self.apply_selected_lines(cx);
                 }
                 if self.src == DiffSource::Unstaged && ui.button("Discard selected…").clicked() {
                     self.discard_selected_lines(cx);
                 }
             }
-            toggle(ui, &mut self.pinned, "Keep open", "Keep this tab when opening another diff");
+            toggle(ui, &mut self.wrap, "Wrap", "Run long lines on underneath, rather than off to the side");
+            if self.embedded {
+                if ui.small_button("Open in tab").on_hover_text("Open this diff in a tab of its own").clicked() {
+                    cx.diff(self.src.clone(), self.path.as_deref());
+                }
+            } else {
+                toggle(ui, &mut self.pinned, "Keep open", "Keep this tab when opening another diff");
+            }
             if self.files.busy() {
                 ui.add(spinner(14.0));
             }
@@ -489,7 +525,7 @@ impl DiffView {
         }
         if !op.steps.is_empty() {
             let n = self.selected_lines.len();
-            cx.confirm("Discard lines", &format!("Discard {n} selected line(s) from the working tree? This cannot be undone."), "Discard", op);
+            cx.confirm("Discard lines", &format!("Discard {} from the working tree? This cannot be undone.", plural(n, "selected line", "selected lines")), "Discard", op);
         }
         self.selected_lines.clear();
     }
@@ -597,17 +633,19 @@ impl DiffView {
         if selected {
             ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(3.0, rect.height())), 0.0, pal.accent);
         }
+        // The first line's middle, which is the row's while nothing wraps.
+        let first_y = rect.top() + (font * 1.45).ceil() / 2.0;
         if let Some(n) = no {
-            ui.painter().text(pos2(rect.left() + gutter - 6.0, rect.center().y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
+            ui.painter().text(pos2(rect.left() + gutter - 6.0, first_y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
         }
         let changed = matches!(kind, Some(LineKind::Add | LineKind::Del));
-        // Red and green can look alike. Unified has these signs in its text already.
-        match kind {
+        // Red and green can look alike. Unified has these signs beside its line numbers.
+        match kind.filter(|_| no.is_some()) {
             Some(LineKind::Add) => {
-                ui.painter().text(pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, "+", mono(font - 1.5), pal.add_fg);
+                ui.painter().text(pos2(rect.left() + 6.0, first_y), Align2::LEFT_CENTER, "+", mono(font - 1.5), pal.add_fg);
             }
             Some(LineKind::Del) => {
-                ui.painter().text(pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, "-", mono(font - 1.5), pal.del_fg);
+                ui.painter().text(pos2(rect.left() + 6.0, first_y), Align2::LEFT_CENTER, "-", mono(font - 1.5), pal.del_fg);
             }
             _ => {}
         }
@@ -633,13 +671,19 @@ impl DiffView {
             if self.long_jobs.len() >= MAX_LONG_JOBS {
                 self.long_jobs.clear();
             }
-            let job = match key.filter(|_| t.len() >= LONG_LINE) {
+            let mut job = match key.filter(|_| t.len() >= LONG_LINE) {
                 Some((h, l)) => self.long_jobs.entry((self.selected_file, h, l, font.to_bits())).or_insert_with(|| code_job(t, font, pal.text, spans, words, word_bg)).clone(),
                 None => code_job(t, font, pal.text, spans, words, word_bg),
             };
+            if self.wrap {
+                job.wrap.max_width = rect.width() - gutter - 8.0;
+                job.wrap.break_anywhere = true;
+            }
             let g = ui.painter().layout_job(job);
             let clip = Rect::from_min_max(pos2(rect.left() + gutter, rect.top()), rect.max).intersect(ui.clip_rect());
-            ui.painter().with_clip_rect(clip).galley(pos2(rect.left() + gutter + 4.0 - scroll_x, rect.center().y - g.size().y / 2.0), g, pal.text);
+            // Wrapped lines hang from the first one: the row is tall enough for them.
+            let top = if self.wrap { rect.top() + 1.0 } else { rect.center().y - g.size().y / 2.0 };
+            ui.painter().with_clip_rect(clip).galley(pos2(rect.left() + gutter + 4.0 - scroll_x, top), g, pal.text);
         }
     }
 
@@ -655,6 +699,13 @@ impl DiffView {
         }
         let char_w = ui.fonts_mut(|fx| fx.glyph_width(&mono(font), 'm'));
         let avail = ui.available_width();
+        if self.wrap {
+            let half = (avail - 10.0) / 2.0;
+            let columns = wrap_columns(half - 1.0 - gutter - 8.0, char_w);
+            let tops = self.tops_for(true, columns, row_h, pr);
+            self.wrapped_rows(ui, &tops, row_h, ("split-wrapped", self.selected_file), half * 2.0, |view, ui, rect, i| view.split_row(ui, cx, f, pr, rect, i, half, gutter, 0.0, font, &pal));
+            return;
+        }
         // Each side keeps half the pane, however long a line is, so the new side never
         // starts off screen. A long line scrolls within its half, both halves together.
         let half = (avail - 10.0) / 2.0;
@@ -680,22 +731,77 @@ impl DiffView {
             ui.set_min_width(half * 2.0);
             ui.spacing_mut().item_spacing.y = 0.0;
             for i in range {
-                let r = &pr.side[i];
                 let (rect, _) = ui.allocate_exact_size(vec2(half * 2.0, row_h), Sense::hover());
-                if r.is_hunk_header {
-                    ui.painter().rect_filled(rect, 0.0, pal.panel2);
-                    let vis = ui.clip_rect();
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(vis.left() + 8.0, rect.top()), pos2(vis.right(), rect.bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                    child.label(RichText::new(&r.header).monospace().size(font - 1.5).color(pal.dim));
-                    child.add_space(8.0);
-                    self.hunk_buttons(&mut child, cx, f, r.hunk);
-                    continue;
-                }
-                let lrect = Rect::from_min_size(rect.min, vec2(half - 1.0, row_h));
-                let rrect = Rect::from_min_size(pos2(rect.left() + half + 1.0, rect.top()), vec2(half - 1.0, row_h));
-                let id = ui.id().with(("row", i));
-                self.draw_cell(ui, &pal, lrect, r.left.as_ref().map(|x| x.0), r.left.as_ref().map(|x| x.1.as_str()), r.left_kind, r.left_idx.map(|l| (r.hunk, l)), pr, font, gutter, scroll_x, id.with("l"));
-                self.draw_cell(ui, &pal, rrect, r.right.as_ref().map(|x| x.0), r.right.as_ref().map(|x| x.1.as_str()), r.right_kind, r.right_idx.map(|l| (r.hunk, l)), pr, font, gutter, scroll_x, id.with("r"));
+                self.split_row(ui, cx, f, pr, rect, i, half, gutter, scroll_x, font, &pal);
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn split_row(&mut self, ui: &mut Ui, cx: &mut Cx, f: &FileDiff, pr: &Prepared, rect: Rect, i: usize, half: f32, gutter: f32, scroll_x: f32, font: f32, pal: &crate::theme::Palette) {
+        let r = &pr.side[i];
+        if r.is_hunk_header {
+            ui.painter().rect_filled(rect, 0.0, pal.panel2);
+            let vis = ui.clip_rect();
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(vis.left() + 8.0, rect.top()), pos2(vis.right(), rect.bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            child.label(RichText::new(&r.header).monospace().size(font - 1.5).color(pal.dim));
+            child.add_space(8.0);
+            self.hunk_buttons(&mut child, cx, f, r.hunk);
+            return;
+        }
+        let lrect = Rect::from_min_size(rect.min, vec2(half - 1.0, rect.height()));
+        let rrect = Rect::from_min_size(pos2(rect.left() + half + 1.0, rect.top()), vec2(half - 1.0, rect.height()));
+        let id = ui.id().with(("row", i));
+        self.draw_cell(ui, pal, lrect, r.left.as_ref().map(|x| x.0), r.left.as_ref().map(|x| x.1.as_str()), r.left_kind, r.left_idx.map(|l| (r.hunk, l)), pr, font, gutter, scroll_x, id.with("l"));
+        self.draw_cell(ui, pal, rrect, r.right.as_ref().map(|x| x.0), r.right.as_ref().map(|x| x.1.as_str()), r.right_kind, r.right_idx.map(|l| (r.hunk, l)), pr, font, gutter, scroll_x, id.with("r"));
+    }
+
+    /// Where each row starts while wrapping, kept until the text or its width changes: this
+    /// walks every line.
+    fn tops_for(&mut self, split: bool, columns: usize, row_h: f32, pr: &Prepared) -> std::sync::Arc<Vec<f32>> {
+        let rows = if split { pr.side.len() } else { pr.unified.len() };
+        if let Some((s, c, file, tops)) = &self.wrapped_tops
+            && *s == split
+            && *c == columns
+            && *file == self.selected_file
+            && tops.len() == rows + 1
+        {
+            return tops.clone();
+        }
+        let lines = |text: Option<&str>| text.map_or(1, |t| wrapped_lines(shown_chars(t), columns));
+        let heights: Vec<f32> = if split {
+            pr.side.iter().map(|r| lines(r.left.as_ref().map(|x| x.1.as_str())).max(lines(r.right.as_ref().map(|x| x.1.as_str()))) as f32 * row_h).collect()
+        } else {
+            pr.unified_texts.iter().map(|t| lines(t.as_deref()) as f32 * row_h).collect()
+        };
+        let mut tops = Vec::with_capacity(heights.len() + 1);
+        let mut y = 0.0;
+        tops.push(y);
+        for h in heights {
+            y += h;
+            tops.push(y);
+        }
+        let tops = std::sync::Arc::new(tops);
+        self.wrapped_tops = Some((split, columns, self.selected_file, tops.clone()));
+        tops
+    }
+
+    /// Rows of differing height in one long list. Only those on screen are drawn.
+    fn wrapped_rows(&mut self, ui: &mut Ui, tops: &[f32], row_h: f32, id: (&'static str, usize), width: f32, mut draw: impl FnMut(&mut Self, &mut Ui, Rect, usize)) {
+        let mut sa = egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]);
+        if let Some(r) = self.scroll_to_row.take() {
+            sa = sa.vertical_scroll_offset((tops.get(r).copied().unwrap_or(0.0) - 40.0).max(0.0));
+        }
+        let total = tops.last().copied().unwrap_or(0.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        sa.show_viewport(ui, |ui, view| {
+            ui.set_min_size(vec2(width, total.max(row_h)));
+            let origin = ui.min_rect().min;
+            let first = tops.partition_point(|t| *t <= view.top()).saturating_sub(1);
+            let last = tops.partition_point(|t| *t < view.bottom()).min(tops.len().saturating_sub(1));
+            for i in first..last {
+                let rect = Rect::from_min_size(origin + vec2(0.0, tops[i]), vec2(width, tops[i + 1] - tops[i]));
+                draw(self, ui, rect, i);
             }
         });
     }
@@ -707,6 +813,13 @@ impl DiffView {
         let gutter = 96.0;
         let (rows, max_chars) = (&pr.unified, pr.unified_chars);
         let char_w = ui.fonts_mut(|fx| fx.glyph_width(&mono(font), 'm'));
+        if self.wrap {
+            let width = ui.available_width() - 10.0;
+            let columns = wrap_columns(width - gutter - 8.0, char_w);
+            let tops = self.tops_for(false, columns, row_h, pr);
+            self.wrapped_rows(ui, &tops, row_h, ("unified-wrapped", self.selected_file), width, |view, ui, rect, i| view.unified_row(ui, cx, f, pr, rect, i, gutter, font, &pal));
+            return;
+        }
         let width = ((max_chars as f32 * char_w) + gutter + 24.0).max(ui.available_width() - 10.0);
         let mut sa = egui::ScrollArea::both().id_salt(("unified", self.selected_file)).auto_shrink([false, false]);
         if let Some(r) = self.scroll_to_row.take() {
@@ -720,40 +833,46 @@ impl DiffView {
             ui.set_min_width(width);
             ui.spacing_mut().item_spacing.y = 0.0;
             for i in range {
-                let (hi, li) = rows[i];
-                let h = &f.hunks[hi];
                 let (rect, _) = ui.allocate_exact_size(vec2(width, row_h), Sense::hover());
-                let Some(li) = li else {
-                    ui.painter().rect_filled(rect, 0.0, pal.panel2);
-                    let vis = ui.clip_rect();
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(vis.left() + 8.0, rect.top()), pos2(vis.right(), rect.bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                    child.label(RichText::new(format!("@@ -{},{} +{},{} @@ {}", h.old_start, h.old_count, h.new_start, h.new_count, h.section)).monospace().size(font - 1.5).color(pal.dim));
-                    child.add_space(8.0);
-                    self.hunk_buttons(&mut child, cx, f, hi);
-                    continue;
-                };
-                let l = &h.lines[li];
-                if l.kind == LineKind::NoNewline {
-                    paint_text(ui, Rect::from_min_max(pos2(rect.left() + gutter, rect.top()), rect.max), &format!("\\ {}", l.text), mono(font - 1.5), pal.faint);
-                    continue;
-                }
-                let id = ui.id().with(("urow", i));
-                let text = pr.marked.get(&(hi, li)).unwrap_or(&l.text);
-                self.draw_cell(ui, &pal, rect, None, Some(text), Some(l.kind), Some((hi, li)), pr, font, gutter, 0.0, id);
-                if let Some(n) = l.old_no {
-                    ui.painter().text(pos2(rect.left() + 42.0, rect.center().y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
-                }
-                if let Some(n) = l.new_no {
-                    ui.painter().text(pos2(rect.left() + 84.0, rect.center().y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
-                }
-                let sign = match l.kind {
-                    LineKind::Add => "+",
-                    LineKind::Del => "-",
-                    _ => "",
-                };
-                ui.painter().text(pos2(rect.left() + gutter - 4.0, rect.center().y), Align2::RIGHT_CENTER, sign, mono(font), pal.dim);
+                self.unified_row(ui, cx, f, pr, rect, i, gutter, font, &pal);
             }
         });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn unified_row(&mut self, ui: &mut Ui, cx: &mut Cx, f: &FileDiff, pr: &Prepared, rect: Rect, i: usize, gutter: f32, font: f32, pal: &crate::theme::Palette) {
+        let (hi, li) = pr.unified[i];
+        let h = &f.hunks[hi];
+        let Some(li) = li else {
+            ui.painter().rect_filled(rect, 0.0, pal.panel2);
+            let vis = ui.clip_rect();
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(vis.left() + 8.0, rect.top()), pos2(vis.right(), rect.bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            child.label(RichText::new(format!("@@ -{},{} +{},{} @@ {}", h.old_start, h.old_count, h.new_start, h.new_count, h.section)).monospace().size(font - 1.5).color(pal.dim));
+            child.add_space(8.0);
+            self.hunk_buttons(&mut child, cx, f, hi);
+            return;
+        };
+        let l = &h.lines[li];
+        if l.kind == LineKind::NoNewline {
+            paint_text(ui, Rect::from_min_max(pos2(rect.left() + gutter, rect.top()), rect.max), &format!("\\ {}", l.text), mono(font - 1.5), pal.faint);
+            return;
+        }
+        let id = ui.id().with(("urow", i));
+        let text = pr.marked.get(&(hi, li)).unwrap_or(&l.text);
+        self.draw_cell(ui, pal, rect, None, Some(text), Some(l.kind), Some((hi, li)), pr, font, gutter, 0.0, id);
+        let first_y = rect.top() + (font * 1.45).ceil() / 2.0;
+        if let Some(n) = l.old_no {
+            ui.painter().text(pos2(rect.left() + 42.0, first_y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
+        }
+        if let Some(n) = l.new_no {
+            ui.painter().text(pos2(rect.left() + 84.0, first_y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
+        }
+        let sign = match l.kind {
+            LineKind::Add => "+",
+            LineKind::Del => "-",
+            _ => "",
+        };
+        ui.painter().text(pos2(rect.left() + gutter - 4.0, first_y), Align2::RIGHT_CENTER, sign, mono(font), pal.dim);
     }
 
     /// Binary file: show images side by side, otherwise a message.
@@ -819,6 +938,16 @@ impl DiffView {
             }
         });
     }
+}
+
+/// Characters of a monospace font that fit in a width, at least a few.
+fn wrap_columns(width: f32, char_w: f32) -> usize {
+    ((width / char_w.max(1.0)).floor() as usize).max(8)
+}
+
+/// Rows a line of this many characters takes when wrapped.
+pub fn wrapped_lines(chars: usize, columns: usize) -> usize {
+    chars.max(1).div_ceil(columns.max(1))
 }
 
 fn short(s: &str) -> &str {

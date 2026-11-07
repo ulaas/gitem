@@ -10,6 +10,7 @@ pub mod logo;
 pub mod data;
 pub mod forms;
 pub mod i18n;
+pub mod keys;
 pub mod menus;
 pub mod palette;
 pub mod standalone;

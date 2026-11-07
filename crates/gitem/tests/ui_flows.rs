@@ -63,7 +63,7 @@ impl Fx {
 
 fn harness<'a>(f: &Fx) -> Harness<'a, GitemApp> {
     let ctx = egui::Context::default();
-    let mut app = GitemApp::with_settings(&ctx, gitem_core::settings::Settings::default());
+    let mut app = GitemApp::with_settings(&ctx, gitem_core::settings::Settings { details_on_open: false, ..Default::default() });
     app.git = Ok(f.git.clone());
     let root = f.root.clone();
     let mut opened = false;
@@ -137,9 +137,22 @@ fn assert_no_op_started(h: &mut Harness<GitemApp>, what: &str) {
 
 fn click(h: &mut Harness<GitemApp>, label: &str) {
     pump_for_label(h, label);
+    // A dialog takes no clicks for a moment after it appears. A person never notices.
+    h.step();
     h.get_by_label(label).click();
     h.step();
     h.step();
+}
+
+/// The commit box's AI actions.
+fn open_ai_menu(h: &mut Harness<GitemApp>) {
+    let label = format!("AI {}", gitem::chrome::icon::CARET_DOWN);
+    pump_for_label(h, &label);
+    for _ in 0..5 {
+        h.step();
+    }
+    click(h, &label);
+    pump_for_label(h, "Generate with AI");
 }
 
 fn pump_for_label(h: &mut Harness<GitemApp>, label: &str) {
@@ -319,7 +332,7 @@ fn commit_through_the_changes_view() {
     h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text("Add c file");
     h.step();
     h.step();
-    click(&mut h, "Stage all and commit 1 file(s)");
+    click(&mut h, "Stage all and commit 1 file");
     let t0 = Instant::now();
     while f.subjects()[0] != "Add c file" {
         h.step();
@@ -432,7 +445,7 @@ fn interactive_rebase_through_the_real_sequence_editor_helper() {
     settle(&mut h);
     let rebase = gitem::views::rebase::RebaseView::new(Some(base));
     h.state_mut().repos[0].open_tab(Tab::Rebase(Box::new(rebase)));
-    pump_for_label(&mut h, "Rebase 3 commit(s)");
+    pump_for_label(&mut h, "Rebase 3 commits");
     // Drop "two", the second row, through its action box. Rows list oldest first.
     let action_boxes = || egui_kittest::kittest::by().role(egui::accesskit::Role::ComboBox).value("pick");
     let t = Instant::now();
@@ -444,7 +457,7 @@ fn interactive_rebase_through_the_real_sequence_editor_helper() {
     h.query_all(action_boxes()).find(|n| (n.rect().center().y - box_y).abs() < 14.0).expect("the row of \"two\" has an action box").click();
     h.step();
     click_last(&mut h, "drop");
-    click(&mut h, "Rebase 3 commit(s)");
+    click(&mut h, "Rebase 3 commits");
     wait_for(&mut h, "rebase done", || f.subjects().len() == 3);
     assert_eq!(f.subjects(), vec!["three", "one", "base"]);
     assert!(!f.root.join("y").exists());
@@ -788,7 +801,7 @@ fn merge_tab_reloads_when_the_conflict_changes_and_refuses_stale_saves() {
     pump_for_label(&mut h, "Save and mark resolved");
     click(&mut h, "Save and mark resolved");
     wait_for(&mut h, "resolved", || !f.git(&["status", "--short"]).contains("UU"));
-    pump_for_label(&mut h, "✔ This file is no longer in conflict");
+    pump_for_label(&mut h, "This file is no longer in conflict");
     assert_eq!(std::fs::read_to_string(f.root.join("c.txt")).unwrap(), "main\n");
     // The next step conflicts on the same file, with new versions.
     let cont = f.git.run_opts(Some(&f.root), &["rebase".to_string(), "--continue".to_string()], &gitem_core::runner::RunOpts { env: vec![("GIT_EDITOR".into(), "true".into())], ..Default::default() }, &mut |_| {}).unwrap();
@@ -842,7 +855,7 @@ fn a_hand_edit_in_the_file_is_seen_and_survives_the_merge_tool() {
     f.write("c.txt", &format!("{}HAND-WRITTEN\n{}", &on_disk[..start], &on_disk[end..]));
 
     let mut h = harness(&f);
-    open_merge(&mut h, "1 of 1 conflict(s) left");
+    open_merge(&mut h, "1 of 1 conflict left in this file");
     pump_for_label(&mut h, "Start over from the three versions…");
     click(&mut h, "All ours");
     click(&mut h, "Save and mark resolved");
@@ -856,7 +869,7 @@ fn an_earlier_partial_save_is_seen_by_a_new_tab() {
     make_two_conflicts(&f);
     {
         let mut h = harness(&f);
-        open_merge(&mut h, "2 of 2 conflict(s) left");
+        open_merge(&mut h, "2 of 2 conflicts left in this file");
         click_nth(&mut h, "Take ours", 0);
         click(&mut h, "Save with markers");
         pump_for_label(&mut h, "Saved");
@@ -865,7 +878,7 @@ fn an_earlier_partial_save_is_seen_by_a_new_tab() {
     let saved = c_txt(&f);
     assert!(saved.starts_with("A-main\n") && saved.contains("<<<<<<<"), "{saved}");
     let mut h = harness(&f);
-    open_merge(&mut h, "1 of 1 conflict(s) left");
+    open_merge(&mut h, "1 of 1 conflict left in this file");
     click(&mut h, "All theirs");
     click(&mut h, "Save and mark resolved");
     wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
@@ -877,7 +890,7 @@ fn an_untouched_conflict_opens_as_a_plain_merge() {
     let f = Fx::new();
     make_two_conflicts(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "2 of 2 conflict(s) left");
+    open_merge(&mut h, "2 of 2 conflicts left in this file");
     assert!(h.query_by_label("Start over from the three versions…").is_none());
 }
 
@@ -893,7 +906,7 @@ fn starting_over_asks_and_only_then_uses_the_three_versions() {
     assert_eq!(c_txt(&f), "HAND-WRITTEN\n");
     click(&mut h, "Start over from the three versions…");
     click(&mut h, "Start over");
-    pump_for_label(&mut h, "2 of 2 conflict(s) left");
+    pump_for_label(&mut h, "2 of 2 conflicts left in this file");
     assert_eq!(c_txt(&f), "HAND-WRITTEN\n", "nothing is written until a save");
     click(&mut h, "All theirs");
     click(&mut h, "Save and mark resolved");
@@ -906,7 +919,7 @@ fn saving_over_a_file_changed_behind_the_tab_asks_first() {
     let f = Fx::new();
     make_two_conflicts(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "2 of 2 conflict(s) left");
+    open_merge(&mut h, "2 of 2 conflicts left in this file");
     click(&mut h, "All ours");
     f.write("c.txt", "EDITED ELSEWHERE\n");
     click(&mut h, "Save and mark resolved");
@@ -938,7 +951,7 @@ fn a_tabs_own_save_is_not_taken_for_someone_elses_edit() {
     let f = Fx::new();
     make_two_conflicts(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "2 of 2 conflict(s) left");
+    open_merge(&mut h, "2 of 2 conflicts left in this file");
     click_nth(&mut h, "Take ours", 0);
     click(&mut h, "Save with markers");
     pump_for_label(&mut h, "Saved");
@@ -953,7 +966,7 @@ fn switching_off_plain_editing_keeps_what_was_typed() {
     let f = Fx::new();
     make_conflict(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "1 of 1 conflict(s) left");
+    open_merge(&mut h, "1 of 1 conflict left in this file");
     click(&mut h, "Edit text");
     let input = egui::accesskit::Role::MultilineTextInput;
     pump_for_role(&mut h, input);
@@ -964,7 +977,7 @@ fn switching_off_plain_editing_keeps_what_was_typed() {
     h.step();
     click(&mut h, "Edit text");
     // Still one conflict to decide, and the typed line is in the result.
-    pump_for_label(&mut h, "1 of 1 conflict(s) left");
+    pump_for_label(&mut h, "1 of 1 conflict left in this file");
     click(&mut h, "All theirs");
     click(&mut h, "Save and mark resolved");
     wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
@@ -994,7 +1007,7 @@ fn inline_edit_undo_and_base_decide_a_conflict() {
     let f = Fx::new();
     make_conflict(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "1 of 1 conflict(s) left");
+    open_merge(&mut h, "1 of 1 conflict left in this file");
     let input = egui::accesskit::Role::MultilineTextInput;
     // Edit starts from nothing while undecided. Apply makes the text the resolution.
     click(&mut h, "Edit");
@@ -1005,10 +1018,10 @@ fn inline_edit_undo_and_base_decide_a_conflict() {
     h.step();
     h.step();
     click(&mut h, "Apply");
-    pump_for_label(&mut h, "✔ All 1 conflict(s) resolved");
+    pump_for_label(&mut h, "All 1 conflict resolved");
     // Undo reopens it.
     click(&mut h, "Undo");
-    pump_for_label(&mut h, "1 of 1 conflict(s) left");
+    pump_for_label(&mut h, "1 of 1 conflict left in this file");
     // The Base pane opens beside the others, and Base resolves to its text.
     let toolbar_base = h.query_all_by_label("Base").next().unwrap().rect();
     click_at(&mut h, toolbar_base.center());
@@ -1017,7 +1030,7 @@ fn inline_edit_undo_and_base_decide_a_conflict() {
     conflict_base.click();
     h.step();
     h.step();
-    pump_for_label(&mut h, "✔ All 1 conflict(s) resolved");
+    pump_for_label(&mut h, "All 1 conflict resolved");
     click(&mut h, "Save and mark resolved");
     wait_for(&mut h, "the file to be resolved", || !f.git(&["status", "--short"]).contains("UU"));
     assert_eq!(c_txt(&f), "top\nmiddle\nbottom\n");
@@ -1028,7 +1041,7 @@ fn an_inline_edit_saved_with_its_own_text() {
     let f = Fx::new();
     make_conflict(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "1 of 1 conflict(s) left");
+    open_merge(&mut h, "1 of 1 conflict left in this file");
     let input = egui::accesskit::Role::MultilineTextInput;
     click(&mut h, "Edit");
     pump_for_role(&mut h, input);
@@ -1105,7 +1118,7 @@ fn a_real_autocrlf_file_keeps_its_line_ends_through_the_merge_tool() {
     assert!(!f.git.run_raw(Some(&f.root), &["merge", "side"]).unwrap().ok());
     assert!(c_txt(&f).contains("\r\n"), "git writes the conflict with the file's own ending");
     let mut h = harness(&f);
-    open_merge(&mut h, "1 of 1 conflict(s) left");
+    open_merge(&mut h, "1 of 1 conflict left in this file");
     assert!(h.query_by_label("Start over from the three versions…").is_none(), "line ends alone don't count as an edit");
     click(&mut h, "All theirs");
     click(&mut h, "Save and mark resolved");
@@ -1124,18 +1137,18 @@ fn a_rebase_plan_refuses_to_run_if_head_moved() {
     let mut h = harness(&f);
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::rebase(Some(base.clone())));
-    pump_for_label(&mut h, "Rebase 1 commit(s)");
+    pump_for_label(&mut h, "Rebase 1 commit");
     // A new commit lands while the plan is open; the plan doesn't include it.
     f.write("y", "1\n");
     f.commit("two");
     for _ in 0..5 {
         h.step();
     }
-    click(&mut h, "Rebase 1 commit(s)");
+    click(&mut h, "Rebase 1 commit");
     pump_for_label(&mut h, "HEAD moved since this plan was made, so it was not started.");
     assert_eq!(f.subjects(), vec!["two", "one", "base"], "no commit lost");
     click(&mut h, "Rebuild plan");
-    pump_for_label(&mut h, "Rebase 2 commit(s)");
+    pump_for_label(&mut h, "Rebase 2 commits");
 }
 
 #[test]
@@ -1199,7 +1212,7 @@ fn a_rejected_commit_keeps_the_message() {
     h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text("Precious message");
     h.step();
     h.step();
-    click(&mut h, "Stage all and commit 1 file(s)");
+    click(&mut h, "Stage all and commit 1 file");
     pump_for_error(&mut h);
     for _ in 0..20 {
         h.step();
@@ -1222,6 +1235,7 @@ fn context_menus_work_on_graph_rows_and_sidebar_branches() {
     h.get_by_label("first").click_secondary();
     h.step();
     h.step();
+    click(&mut h, "Create ⏵");
     pump_for_label(&mut h, "Create tag here…");
     click(&mut h, "Create tag here…");
     for _ in 0..3 {
@@ -1277,8 +1291,9 @@ fn reword_from_the_menu_opens_a_plan_with_that_commit_marked() {
     h.get_by_label("second").click_secondary();
     h.step();
     h.step();
+    click(&mut h, "Rewrite history ⏵");
     click(&mut h, "Drop…");
-    pump_for_label(&mut h, "Rebase 2 commit(s)");
+    pump_for_label(&mut h, "Rebase 2 commits");
     let action = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Rebase(r) = t { r.items.iter().find(|i| i.text == "second").map(|i| i.action) } else { None });
     assert_eq!(action, Some(gitem_core::rebase::RebaseAction::Drop));
     assert_eq!(f.subjects().len(), 3, "nothing runs until the plan is confirmed");
@@ -1405,7 +1420,7 @@ fn a_folder_in_the_changes_tree_stages_and_unstages_as_one() {
     h.get_by_label("src").click_secondary();
     h.step();
     h.step();
-    click(&mut h, "Stage 2 file(s)");
+    click(&mut h, "Stage 2 files");
     wait_for(&mut h, "folder staged", || f.git(&["diff", "--cached", "--name-only"]).lines().count() == 2);
     let staged = f.git(&["diff", "--cached", "--name-only"]);
     assert!(staged.contains("src/main.rs") && staged.contains("src/views/one.rs") && !staged.contains("top.txt"), "{staged}");
@@ -1416,7 +1431,7 @@ fn a_folder_in_the_changes_tree_stages_and_unstages_as_one() {
     h.get_by_label("src").click_secondary();
     h.step();
     h.step();
-    click(&mut h, "Unstage 2 file(s)");
+    click(&mut h, "Unstage 2 files");
     wait_for(&mut h, "folder unstaged", || f.git(&["diff", "--cached", "--name-only"]).is_empty());
     no_errors(&h);
 }
@@ -1449,7 +1464,7 @@ fn a_filtered_tree_shows_matches_and_stages_only_those() {
     h.get_by_label("src").click_secondary();
     h.step();
     h.step();
-    click(&mut h, "Stage 1 file(s)");
+    click(&mut h, "Stage 1 file");
     wait_for(&mut h, "match staged", || !f.git(&["diff", "--cached", "--name-only"]).is_empty());
     assert_eq!(f.git(&["diff", "--cached", "--name-only"]).trim(), "src/keep.rs");
     no_errors(&h);
@@ -1924,12 +1939,12 @@ fn a_multi_commit_pick_finished_by_hand_offers_to_carry_on_from_the_banner() {
     f.git.run_opts(Some(&f.root), &["commit".to_string(), "-m".to_string(), "pick-A".to_string()], &gitem_core::runner::RunOpts { env: vec![("GIT_EDITOR".into(), "true".into())], ..Default::default() }, &mut |_| {}).unwrap();
     let mut h = harness(&f);
     settle(&mut h);
-    pump_for_label(&mut h, "Cherry-picking 1 commit(s) left");
+    pump_for_label(&mut h, "Cherry-picking 1 commit left");
     click(&mut h, "Continue");
     wait_for(&mut h, "the second pick", || f.subjects()[0] == "pick-B");
     wait_until_quiet(&mut h);
     no_errors(&h);
-    assert!(h.query_by_label("Cherry-picking 1 commit(s) left").is_none());
+    assert!(h.query_by_label("Cherry-picking 1 commit left").is_none());
 }
 
 /// Marking a file resolved with its markers still in is how they get committed.
@@ -2188,7 +2203,7 @@ fn closing_a_merge_tab_with_resolutions_asks_first() {
     let f = Fx::new();
     make_two_conflicts(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "2 of 2 conflict(s) left");
+    open_merge(&mut h, "2 of 2 conflicts left in this file");
 
     click_nth(&mut h, "Take ours", 0);
     wait_until_quiet(&mut h);
@@ -2214,7 +2229,7 @@ fn closing_a_merge_tab_anyway_closes_only_that_tab() {
     let f = Fx::new();
     make_conflict(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "1 of 1 conflict(s) left");
+    open_merge(&mut h, "1 of 1 conflict left in this file");
     click(&mut h, "Take ours");
     wait_until_quiet(&mut h);
     let tab = dock_tab_rect(&h, |t| matches!(t, Tab::Merge(_)));
@@ -2230,7 +2245,7 @@ fn an_untouched_merge_tab_closes_without_a_question() {
     let f = Fx::new();
     make_conflict(&f);
     let mut h = harness(&f);
-    open_merge(&mut h, "1 of 1 conflict(s) left");
+    open_merge(&mut h, "1 of 1 conflict left in this file");
     wait_until_quiet(&mut h);
     let tab = dock_tab_rect(&h, |t| matches!(t, Tab::Merge(_)));
     middle_click(&mut h, tab.center());
@@ -2418,7 +2433,7 @@ fn settings_and_about_are_reachable_from_the_titlebar() {
     sample_history(&f);
     let mut h = harness(&f);
     settle(&mut h);
-    click(&mut h, "About");
+    click(&mut h, "About gitem");
     // Not the commit rows: a build from a source tarball has no git history.
     pump_for_label(&mut h, "Version");
     pump_for_label(&mut h, env!("CARGO_PKG_VERSION"));
@@ -2439,7 +2454,7 @@ fn settings_and_about_are_reachable_from_the_titlebar() {
 #[test]
 fn settings_work_with_no_repository_open() {
     let ctx = egui::Context::default();
-    let mut app = GitemApp::with_settings(&ctx, gitem_core::settings::Settings::default());
+    let mut app = GitemApp::with_settings(&ctx, gitem_core::settings::Settings { details_on_open: false, ..Default::default() });
     app.git = Ok(real_git());
     let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5);
     let mut h = builder.build_ui_state(|ui, app: &mut GitemApp| app.frame(ui), app);
@@ -2583,6 +2598,7 @@ fn sidebar_sections_are_tall_toggle_and_keep_their_actions_on_the_header() {
     pump_for_label(&mut h, "Create");
     assert!(h.query_by_label("listed-branch").is_some());
     click(&mut h, "Cancel");
+    for _ in 0..8 { h.step(); }
 
     // The header folds it, and sections stay usable closed.
     click(&mut h, "Branches section");
@@ -3021,7 +3037,7 @@ fn search_offers_more_when_it_stops_at_a_limit() {
     h.state_mut().repos[0].open_tab(Tab::search("commit number"));
     pump_for_label(&mut h, "Showing the latest 500 matches");
     click(&mut h, "Load all");
-    pump_for_label(&mut h, "520 commit(s)");
+    pump_for_label(&mut h, "520 commits");
     assert!(h.query_by_label("Showing the latest 500 matches").is_none());
     no_errors(&h);
 }
@@ -3322,6 +3338,8 @@ fn ctrl_enter_in_a_form_submits_only_the_form() {
     changes_with_message(&mut h, "half written");
     // The real route: a pointer click moves focus off the commit box, and the form's
     // first field takes it.
+    let more = gitem::chrome::icon::DOTS_THREE;
+    click(&mut h, more);
     click(&mut h, "Stash…");
     h.step();
     assert!(!h.get_by_role(egui::accesskit::Role::MultilineTextInput).is_focused(), "this test is about focus being in the form");
@@ -3335,7 +3353,7 @@ fn ctrl_enter_in_a_form_submits_only_the_form() {
 }
 
 #[test]
-fn ctrl_enter_in_the_commit_box_commits_once_and_leaves_an_open_form_alone() {
+fn ctrl_enter_goes_to_an_open_form_even_with_a_message_written() {
     let f = Fx::new();
     staged_and_unstaged(&f);
     let mut h = harness(&f);
@@ -3343,14 +3361,13 @@ fn ctrl_enter_in_the_commit_box_commits_once_and_leaves_an_open_form_alone() {
     changes_with_message(&mut h, "from the box");
     let ctx = h.ctx.clone();
     h.state_mut().apply_action(&ctx, Action::Form(forms::stash_form(Vec::new())));
-    h.step();
-    h.step();
-    assert!(h.get_by_role(egui::accesskit::Role::MultilineTextInput).is_focused(), "this test is about focus staying in the box");
-    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
-    wait_for(&mut h, "the commit", || f.subjects()[0] == "from the box");
     wait_until_quiet(&mut h);
-    assert_eq!(f.git(&["stash", "list"]), "", "the form must not fire too");
-    assert!(h.query_by_label("Stash all changes").is_some(), "the form stays open");
+    // A dialog sits on top of the app, and the keyboard goes with it.
+    assert!(!h.get_by_role(egui::accesskit::Role::MultilineTextInput).is_focused(), "the box lost the keyboard");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    wait_for(&mut h, "the stash", || f.git(&["stash", "list"]).contains("WIP") || f.git(&["stash", "list"]).contains("On main"));
+    wait_until_quiet(&mut h);
+    assert_eq!(f.subjects(), ["second", "first"], "the commit box must not fire too");
 }
 
 #[test]
@@ -3435,7 +3452,7 @@ fn the_composer_makes_one_commit_per_group_with_only_its_files() {
     open_composer(&mut h);
     plan_commit(&mut h, 0, "Add left aside"); // left.txt sorts first
     plan_commit(&mut h, 0, "Add one");
-    click(&mut h, "Create 2 commit(s)");
+    click(&mut h, "Create 2 commits");
     wait_for(&mut h, "both commits", || f.subjects().first().is_some_and(|s| s == "Add one"));
     wait_until_quiet(&mut h);
     no_errors(&h);
@@ -3459,16 +3476,16 @@ fn a_rejected_composer_commit_keeps_what_has_not_landed() {
     open_composer(&mut h);
     plan_commit(&mut h, 0, "fine one");
     plan_commit(&mut h, 0, "refused two");
-    click(&mut h, "Create 2 commit(s)");
+    click(&mut h, "Create 2 commits");
     pump_for_error(&mut h);
     wait_until_quiet(&mut h);
     assert_eq!(f.subjects()[0], "fine one", "the first landed");
-    assert_eq!(composer_plan_len(&h).as_deref(), Some("Commit Composer: a plan of 1 commit(s)"), "the second is still planned");
+    assert_eq!(composer_plan_len(&h).as_deref(), Some("Composer: a plan of 1 commit"), "the second is still planned");
 
     // Fix the hook's objection and go again, with the message intact.
     std::fs::remove_file(&hook).unwrap();
     click(&mut h, "Dismiss");
-    click(&mut h, "Create 1 commit(s)");
+    click(&mut h, "Create 1 commit");
     wait_for(&mut h, "the second commit", || f.subjects()[0] == "refused two");
     wait_until_quiet(&mut h);
     no_errors(&h);
@@ -3487,14 +3504,14 @@ fn the_composer_asks_before_committing_a_partly_staged_file_whole() {
     let mut h = harness(&f);
     open_composer(&mut h);
     plan_commit(&mut h, 0, "the plan");
-    click(&mut h, "Create 1 commit(s)");
+    click(&mut h, "Create 1 commit");
     pump_for_label(&mut h, "Commit the whole files");
     assert_no_op_started(&mut h, "nothing is committed before answering");
     click(&mut h, "Go back");
     assert!(h.query_by_label("Commit the whole files").is_none());
     assert_eq!(f.subjects()[0], "base");
     assert_eq!(f.git(&["show", ":f.txt"]), "one\ntwo\n", "the staging is as it was");
-    click(&mut h, "Create 1 commit(s)");
+    click(&mut h, "Create 1 commit");
     click(&mut h, "Commit the whole files");
     wait_for(&mut h, "the commit", || f.subjects()[0] == "the plan");
     assert_eq!(f.git(&["show", "HEAD:f.txt"]), "one\ntwo\nleft unstaged\n");
@@ -3516,7 +3533,7 @@ fn the_composer_leaves_other_staged_files_staged() {
     open_composer(&mut h);
     // Files sort by path, so b.txt is the second. Remove a.txt's confirm from the picture.
     plan_commit(&mut h, 1, "just b");
-    click(&mut h, "Create 1 commit(s)");
+    click(&mut h, "Create 1 commit");
     wait_for(&mut h, "the commit", || f.subjects()[0] == "just b");
     wait_until_quiet(&mut h);
     assert_eq!(f.git(&["show", "--format=", "--name-only", "HEAD"]).trim(), "b.txt");
@@ -3543,7 +3560,7 @@ fn a_planned_file_that_goes_clean_for_a_moment_stays_in_the_plan() {
         assert!(t.elapsed() < PATIENCE, "the file never came back");
         std::thread::sleep(Duration::from_millis(15));
     }
-    click(&mut h, "Create 1 commit(s)");
+    click(&mut h, "Create 1 commit");
     wait_for(&mut h, "the commit", || f.subjects()[0] == "keep me");
 }
 
@@ -3567,7 +3584,7 @@ fn the_composer_can_split_a_commit_at_a_rebase_edit_stop() {
     plan_commit(&mut h, 0, "just one");
     plan_commit(&mut h, 0, "just two");
     assert!(h.query_by_label_contains("is in progress").is_none(), "this is the allowed case");
-    click(&mut h, "Create 2 commit(s)");
+    click(&mut h, "Create 2 commits");
     wait_for(&mut h, "both commits", || f.subjects()[0] == "just two");
     wait_until_quiet(&mut h);
     click(&mut h, "Continue");
@@ -3599,8 +3616,8 @@ fn the_composer_refuses_to_commit_during_a_merge() {
     h.step();
     h.step();
     h.step();
-    pump_for_label(&mut h, "Create 1 commit(s)");
-    h.get_by_label("Create 1 commit(s)").click();
+    pump_for_label(&mut h, "Create 1 commit");
+    h.get_by_label("Create 1 commit").click();
     for _ in 0..3 {
         h.step();
     }
@@ -3952,12 +3969,12 @@ fn line_actions_stay_clickable_at_the_default_window_size() {
         let panel_left = h.get_by_label("Side by side").rect().left();
         let added_row = if mode == "Unified" { 3.0 } else { 2.0 };
         click_at(&mut h, egui::pos2(panel_left + 20.0, head.center().y + row_h * added_row));
-        pump_for_label(&mut h, "Stage 1 selected line(s)");
-        let stage = h.get_by_label("Stage 1 selected line(s)").rect();
+        pump_for_label(&mut h, "Stage 1 selected line");
+        let stage = h.get_by_label("Stage 1 selected line").rect();
         let discard = h.get_by_label("Discard selected…").rect();
         let details_left = h.query_all_by_label("Details").map(|n| n.rect().left()).fold(width, f32::min);
         assert!(stage.right() <= details_left && discard.right() <= details_left, "{mode} at {width}: buttons run under the Details panel at {details_left}: stage {stage:?}, discard {discard:?}");
-        click(&mut h, "Stage 1 selected line(s)");
+        click(&mut h, "Stage 1 selected line");
         wait_for(&mut h, "the line to be staged", || !f.git(&["diff", "--cached", "--name-only"]).trim().is_empty());
         wait_until_quiet(&mut h);
         no_errors(&h);
@@ -4128,7 +4145,7 @@ fn discard_selected_across_two_hunks_keeps_the_rest() {
     // In the second: three of context, then the same.
     click_line(&mut h, "Stage hunk", 0, 3.0);
     click_line(&mut h, "Stage hunk", 1, 5.0);
-    pump_for_label(&mut h, "Stage 2 selected line(s)");
+    pump_for_label(&mut h, "Stage 2 selected lines");
     click(&mut h, "Discard selected…");
     confirm_discard(&mut h);
     // A discard takes the selected added line out. The removed line wasn't selected, so stays gone.
@@ -4149,7 +4166,7 @@ fn stage_selected_line_puts_only_that_line_in_the_index() {
     settle(&mut h);
     open_diff(&mut h, DiffSource::Unstaged, "Stage hunk");
     click_line(&mut h, "Stage hunk", 0, 3.0);
-    click(&mut h, "Stage 1 selected line(s)");
+    click(&mut h, "Stage 1 selected line");
     wait_for(&mut h, "the line to be staged", || in_index(&f) == "one\nnew b\ntwo\nthree\n");
     assert_eq!(on_disk(&f), edited, "staging leaves the file alone");
     wait_until_quiet(&mut h);
@@ -4166,9 +4183,9 @@ fn clicking_a_selected_line_again_clears_it() {
     settle(&mut h);
     open_diff(&mut h, DiffSource::Unstaged, "Stage hunk");
     click_line(&mut h, "Stage hunk", 0, 2.0);
-    pump_for_label(&mut h, "Stage 1 selected line(s)");
+    pump_for_label(&mut h, "Stage 1 selected line");
     click_line(&mut h, "Stage hunk", 0, 2.0);
-    assert!(h.query_by_label("Stage 1 selected line(s)").is_none());
+    assert!(h.query_by_label("Stage 1 selected line").is_none());
     assert!(h.query_by_label("Discard selected…").is_none());
 }
 
@@ -4186,7 +4203,7 @@ fn a_selected_line_that_is_not_utf8_offers_no_way_to_rewrite_it() {
     for _ in 0..3 {
         h.step();
     }
-    assert!(h.query_by_label("Stage 1 selected line(s)").is_none());
+    assert!(h.query_by_label("Stage 1 selected line").is_none());
     assert!(h.query_by_label("Discard selected…").is_none());
     assert_eq!(h.query_all_by_label("Not UTF-8: stage the whole file").count(), 2, "the hunk's notice, and the toolbar's in place of the buttons");
     click(&mut h, "Stage file");
@@ -4250,9 +4267,9 @@ fn unstage_selected_line_takes_only_that_line_out_of_the_index() {
     open_diff(&mut h, DiffSource::Staged, "Unstage hunk");
     // Rows: one, new a. Pick "new a".
     click_line(&mut h, "Unstage hunk", 0, 2.0);
-    pump_for_label(&mut h, "Unstage 1 selected line(s)");
+    pump_for_label(&mut h, "Unstage 1 selected line");
     assert!(h.query_by_label("Discard selected…").is_none(), "a staged diff has nothing in the working tree to discard");
-    click(&mut h, "Unstage 1 selected line(s)");
+    click(&mut h, "Unstage 1 selected line");
     wait_for(&mut h, "the line to be unstaged", || in_index(&f) == "one\nnew b\ntwo\nthree\n");
     assert_eq!(on_disk(&f), edited, "unstaging leaves the file alone");
     wait_until_quiet(&mut h);
@@ -4400,7 +4417,7 @@ fn a_rebase_row_is_reordered_by_its_handle_and_selected_by_a_click() {
     let mut h = harness(&f);
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::Rebase(Box::new(gitem::views::rebase::RebaseView::new(Some(base)))));
-    pump_for_label(&mut h, "Rebase 3 commit(s)");
+    pump_for_label(&mut h, "Rebase 3 commits");
     pump_for_label(&mut h, "three");
     // Oldest first. Drag the handle of "three" above "one".
     let order = |h: &Harness<GitemApp>| h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Rebase(r) = t { Some(r.items.iter().map(|i| i.text.clone()).collect::<Vec<_>>()) } else { None }).unwrap();
@@ -4585,7 +4602,7 @@ fn a_failure_that_leaves_an_operation_going_drops_the_queue() {
     pump_for_error(&mut h);
     wait_until_quiet(&mut h);
     assert!(r.f.git(&["tag"]).is_empty());
-    assert!(h.state().errors_showing()[0].contains("1 queued command(s) after it were not run"), "{:?}", h.state().errors_showing());
+    assert!(h.state().errors_showing()[0].contains("1 queued command after it was not run"), "{:?}", h.state().errors_showing());
 }
 
 /// AS-19: applies to every button that runs something, not only those checked by hand.
@@ -4863,7 +4880,7 @@ fn the_refs_holding_a_commit_load_when_asked_for() {
     wait_until_quiet(&mut h);
     assert!(!f.git.log.lock().unwrap().iter().skip(before).any(|e| e.command.contains("--contains")));
     click(&mut h, "Branches and tags with this commit");
-    pump_for_any(&mut h, "On 1 branch(es), 0 tag(s)");
+    pump_for_any(&mut h, "On 1 branch, 0 tags");
 }
 
 /// PF-15: blame takes minutes on a big file, and nobody asked for it.
@@ -4932,10 +4949,7 @@ fn a_late_ai_message_does_not_replace_what_was_typed() {
     settle(&mut h);
     h.state_mut().settings.ai = gitem_core::ai::AiConfig { provider: gitem_core::ai::AiProvider::OpenAiCompatible, base_url: ai.url.clone(), model: "m".into(), ..Default::default() };
     h.state_mut().repos[0].open_tab(Tab::changes());
-    pump_for_label(&mut h, "Generate with AI");
-    for _ in 0..5 {
-        h.step();
-    }
+    open_ai_menu(&mut h);
     click(&mut h, "Generate with AI");
     let typed = "typed while waiting";
     h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
@@ -4965,10 +4979,7 @@ fn an_ai_message_fills_a_box_nobody_has_touched() {
     settle(&mut h);
     h.state_mut().settings.ai = gitem_core::ai::AiConfig { provider: gitem_core::ai::AiProvider::OpenAiCompatible, base_url: ai.url.clone(), model: "m".into(), ..Default::default() };
     h.state_mut().repos[0].open_tab(Tab::changes());
-    pump_for_label(&mut h, "Generate with AI");
-    for _ in 0..5 {
-        h.step();
-    }
+    open_ai_menu(&mut h);
     click(&mut h, "Generate with AI");
     ai.release.send("from the model").unwrap();
     let t = Instant::now();
@@ -5232,6 +5243,7 @@ fn a_search_that_fails_says_so_and_drops_old_highlights() {
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::graph());
     pump_for_label(&mut h, "second");
+    click(&mut h, ".*");
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
     h.step();
     h.step();
@@ -5317,6 +5329,7 @@ fn menu_presets_refuse_a_merge_and_a_commit_from_elsewhere() {
     h.get_by_label("the merge").click_secondary();
     h.step();
     h.step();
+    click(&mut h, "Rewrite history ⏵");
     click(&mut h, "Drop…");
     pump_for_error(&mut h);
     assert!(h.state().errors_showing()[0].contains("merge commit"), "{:?}", h.state().errors_showing());
@@ -5327,6 +5340,7 @@ fn menu_presets_refuse_a_merge_and_a_commit_from_elsewhere() {
     h.get_by_label("on elsewhere").click_secondary();
     h.step();
     h.step();
+    click(&mut h, "Rewrite history ⏵");
     click(&mut h, "Reword…");
     pump_for_error(&mut h);
     assert!(h.state().errors_showing()[0].contains("isn't on the current branch"), "{:?}", h.state().errors_showing());
@@ -5345,6 +5359,7 @@ fn recompose_opens_the_composer_only_on_the_go_ahead() {
     h.get_by_label("first").click_secondary();
     h.step();
     h.step();
+    click(&mut h, "Rewrite history ⏵");
     click(&mut h, "Recompose from here…");
     pump_for_label(&mut h, "Cancel");
     for _ in 0..3 {
@@ -5484,15 +5499,15 @@ fn a_reload_keeps_the_line_selection_unless_those_lines_changed() {
     click_line(&mut h, "Stage hunk", 0, 2.0);
     h.step();
     h.step();
-    pump_for_label(&mut h, "Stage 1 selected line(s)");
+    pump_for_label(&mut h, "Stage 1 selected line");
 
     f.write("other.txt", "changed elsewhere\n");
     settle(&mut h);
-    assert!(h.query_by_label("Stage 1 selected line(s)").is_some(), "an unrelated file changed, and the selection was lost");
+    assert!(h.query_by_label("Stage 1 selected line").is_some(), "an unrelated file changed, and the selection was lost");
 
     f.write("a.txt", "one\nDIFFERENT\nthree\n");
     settle(&mut h);
-    assert!(h.query_by_label("Stage 1 selected line(s)").is_none(), "those lines changed, so the selection can't stand");
+    assert!(h.query_by_label("Stage 1 selected line").is_none(), "those lines changed, so the selection can't stand");
 }
 
 #[test]
@@ -5575,11 +5590,11 @@ fn the_first_jump_goes_to_the_first_conflict() {
     let mut h = harness(&f);
     open_merge(&mut h, "All ours");
     assert_eq!(merge_view_of(&h).unwrap().current_conflict(), None);
-    h.get_by_label("▼").click();
+    h.get_by_label(gitem::chrome::icon::CARET_DOWN).click();
     h.step();
     h.step();
     assert_eq!(merge_view_of(&h).unwrap().current_conflict(), Some(0));
-    h.get_by_label("▼").click();
+    h.get_by_label(gitem::chrome::icon::CARET_DOWN).click();
     h.step();
     h.step();
     assert_eq!(merge_view_of(&h).unwrap().current_conflict(), Some(1));
@@ -6294,7 +6309,7 @@ fn clean_deletes_what_it_lists_and_says_what_it_leaves() {
     click(&mut h, "Clean");
     click(&mut h, "Include folders");
     wait_until_quiet(&mut h);
-    pump_for_label(&mut h, "1 item(s) would be deleted");
+    pump_for_label(&mut h, "1 item would be deleted");
     pump_for_any_contains(&mut h, "Left alone");
     assert!(h.query_by_label_contains("nested/").is_some());
     click(&mut h, "Delete these…");
@@ -6458,6 +6473,7 @@ fn the_current_filter_works_on_a_branch_with_no_upstream() {
     settle(&mut h);
     open_tab_now(&mut h, Tab::graph());
     pump_for_label(&mut h, "on elsewhere");
+    click(&mut h, "Filters \u{e136}");
     click(&mut h, "Current");
     let t = Instant::now();
     while h.query_by_label("on elsewhere").is_some() {
@@ -6561,4 +6577,522 @@ fn checking_out_a_remote_branch_with_a_local_one_of_that_name_switches_to_it() {
     run_from_palette(&mut h, "origin/main");
     wait_for(&mut h, "switched", || f.git(&["branch", "--show-current"]).trim() == "main");
     no_errors(&h);
+}
+
+// ---- The interface (Phase 8)
+
+fn two_changed_files(f: &Fx) {
+    sample_history(f);
+    f.write("a.txt", "one\nTWO\nthree\nmore\n");
+    f.write("b.txt", "fn other() {}\n");
+}
+
+/// The Changes tab in front, with its list on screen.
+fn changes_up(h: &mut Harness<GitemApp>, file: &str) {
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(h, file);
+    wait_until_quiet(h);
+}
+
+/// A window of this size, with default settings apart from `settings`.
+fn sized_harness<'a>(f: &Fx, size: egui::Vec2, settings: gitem_core::settings::Settings) -> Harness<'a, GitemApp> {
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, settings);
+    app.git = Ok(f.git.clone());
+    let root = f.root.clone();
+    let mut opened = false;
+    Harness::builder().with_size(size).with_max_steps(5).build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    )
+}
+
+/// With frames as far apart as a real display's, as a double click needs.
+fn fast_clock_harness<'a>(f: &Fx) -> Harness<'a, GitemApp> {
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, no_details());
+    app.git = Ok(f.git.clone());
+    let root = f.root.clone();
+    let mut opened = false;
+    Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5).with_step_dt(1.0 / 60.0).build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    )
+}
+
+fn no_details() -> gitem_core::settings::Settings {
+    gitem_core::settings::Settings { details_on_open: false, ..Default::default() }
+}
+
+fn checks_changes_screen(tree: bool) {
+    let f = Fx::new();
+    two_changed_files(&f);
+    let mut h = harness(&f);
+    h.state_mut().settings.changes_tree = tree;
+    settle(&mut h);
+    changes_up(&mut h, "a.txt");
+    let tabs = tab_titles(&h).len();
+    click(&mut h, "a.txt");
+    pump_for_label(&mut h, "Stage file");
+    wait_until_quiet(&mut h);
+    // The diff is beside the list, and both the list and the message box stayed.
+    assert_eq!(tab_titles(&h).len(), tabs, "no new tab");
+    assert!(h.query_by_label("b.txt").is_some());
+    assert!(h.get_by_role(egui::accesskit::Role::MultilineTextInput).rect().left() < h.get_by_label("Stage file").rect().left());
+    // Its own tab is still there for anyone who wants one, as are the menu's routes.
+    click(&mut h, "Open in tab");
+    wait_until_quiet(&mut h);
+    assert_eq!(tab_titles(&h).len(), tabs + 1);
+    assert!(tab_titles(&h).iter().any(|t| t == "a.txt (Unstaged)"));
+}
+
+#[test]
+fn a_click_on_a_changed_file_shows_its_diff_beside_the_list() {
+    checks_changes_screen(false);
+}
+
+#[test]
+fn the_tree_list_shows_the_diff_beside_it_too() {
+    checks_changes_screen(true);
+}
+
+#[test]
+fn a_narrow_changes_pane_opens_the_diff_in_a_tab_as_before() {
+    let f = Fx::new();
+    two_changed_files(&f);
+    // Narrower than the app's own minimum, as a pane of a split can be.
+    let mut h = sized_harness(&f, vec2(700.0, 600.0), no_details());
+    settle(&mut h);
+    changes_up(&mut h, "a.txt");
+    click(&mut h, "a.txt");
+    wait_until_quiet(&mut h);
+    assert!(tab_titles(&h).iter().any(|t| t == "a.txt (Unstaged)"), "{:?}", tab_titles(&h));
+}
+
+#[test]
+fn a_double_click_stages_the_file_and_its_diff_goes_with_it() {
+    let f = Fx::new();
+    two_changed_files(&f);
+    let mut h = fast_clock_harness(&f);
+    settle(&mut h);
+    changes_up(&mut h, "a.txt");
+    // Inside the double-click time, on a clock that isn't a test's quarter of a second a frame.
+    h.get_by_label("a.txt").click();
+    h.step();
+    h.get_by_label("a.txt").click();
+    h.step();
+    wait_for(&mut h, "a.txt to be staged", || f.git(&["status", "--short"]).contains("M  a.txt"));
+    wait_until_quiet(&mut h);
+    // Space takes it back, since the keyboard follows the same file.
+    assert!(h.query_by_label("Unstage file").is_some(), "the diff went to the staged list with it");
+    h.key_press(egui::Key::Space);
+    wait_for(&mut h, "a.txt to be unstaged", || f.git(&["status", "--short"]).contains(" M a.txt"));
+    no_errors(&h);
+}
+
+#[test]
+fn the_keyboard_walks_the_changed_files_and_stages_them() {
+    let f = Fx::new();
+    two_changed_files(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    changes_up(&mut h, "a.txt");
+    h.key_press(egui::Key::ArrowDown);
+    h.step();
+    pump_for_label(&mut h, "Stage file");
+    h.key_press(egui::Key::ArrowDown);
+    wait_until_quiet(&mut h);
+    h.key_press(egui::Key::Space);
+    wait_for(&mut h, "b.txt to be staged", || f.git(&["status", "--short"]).contains("M  b.txt"));
+    wait_until_quiet(&mut h);
+    assert!(f.git(&["status", "--short"]).contains(" M a.txt"), "only the current file");
+    // Its menu, which has been a mouse's alone.
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F10);
+    pump_for_label(&mut h, "Unstage");
+    no_errors(&h);
+}
+
+#[test]
+fn keys_stay_out_of_a_text_box() {
+    let f = Fx::new();
+    two_changed_files(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    changes_with_message(&mut h, "typing");
+    h.key_press(egui::Key::Space);
+    wait_until_quiet(&mut h);
+    assert!(!f.git(&["status", "--short"]).contains("M  "), "a space in the message stages nothing");
+}
+
+#[test]
+fn a_dialog_keeps_clicks_off_the_app_behind_it_and_lets_the_window_close() {
+    let f = Fx::new();
+    two_changed_files(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    changes_up(&mut h, "a.txt");
+    let row = h.get_by_label("a.txt").rect().center();
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_branch(None)));
+    wait_until_quiet(&mut h);
+    // What's behind it takes no click.
+    h.event(egui::Event::PointerMoved(row));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: row, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("Stage file").is_none(), "the click reached the list behind the dialog");
+    // The window's own controls aren't behind anything.
+    h.get_by_label("Close window").click();
+    h.step();
+    let closing = h.output().viewport_output.values().any(|v| v.commands.contains(&egui::ViewportCommand::Close));
+    h.step();
+    let closing = closing || h.output().viewport_output.values().any(|v| v.commands.contains(&egui::ViewportCommand::Close));
+    assert!(closing, "the close button took no click");
+}
+
+#[test]
+fn a_click_as_a_dialog_appears_does_nothing() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Confirm { title: "Delete it".into(), body: "Sure?".into(), label: "Do it".into(), op: ops::tag_create("too-soon", None, None, false) });
+    h.step();
+    // In the first moments, as the second half of a double click would be.
+    h.get_by_label("Do it").click();
+    h.step();
+    assert_no_op_started(&mut h, "that click wasn't aimed at this");
+    assert!(h.query_by_label("Do it").is_some(), "the question is still there");
+    click(&mut h, "Do it");
+    wait_for(&mut h, "the tag", || f.git(&["tag"]).contains("too-soon"));
+}
+
+#[test]
+fn enter_submits_a_form_from_its_field_and_a_pick_field_takes_the_typing() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "side"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Form(forms::new_branch(None)));
+    wait_until_quiet(&mut h);
+    h.event(egui::Event::Text("via-enter".into()));
+    h.step();
+    h.key_press(egui::Key::Enter);
+    wait_for(&mut h, "the branch", || f.git(&["branch"]).contains("via-enter"));
+    wait_until_quiet(&mut h);
+    // A form whose first field is a picker.
+    h.state_mut().apply_action(&ctx, Action::Form(forms::set_upstream("main".into(), vec!["origin/main".into()])));
+    wait_until_quiet(&mut h);
+    pump_for_label(&mut h, "origin/main");
+    h.event(egui::Event::Text("zzz".into()));
+    h.step();
+    h.step();
+    assert!(h.query_by_label("origin/main").is_none(), "the typing reached the picker and narrowed it");
+}
+
+#[test]
+fn enter_answers_a_question_that_loses_nothing_and_not_one_that_does() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Confirm { title: "Loses".into(), body: "Sure?".into(), label: "Do it".into(), op: ops::tag_create("risky", None, None, false) });
+    wait_until_quiet(&mut h);
+    h.key_press(egui::Key::Enter);
+    assert_no_op_started(&mut h, "Enter doesn't answer a question about losing something");
+    click(&mut h, "Cancel");
+    h.state_mut().apply_action(&ctx, Action::Confirm { title: "Safe".into(), body: "Fine?".into(), label: "Do it".into(), op: ops::tag_create("safe", None, None, false).lossless() });
+    wait_until_quiet(&mut h);
+    h.key_press(egui::Key::Enter);
+    wait_for(&mut h, "the tag", || f.git(&["tag"]).contains("safe"));
+}
+
+#[test]
+fn the_close_guard_covers_a_changed_rebase_plan() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::rebase(Some("HEAD~1".into())));
+    pump_for_label(&mut h, "Rebase 1 commit");
+    wait_until_quiet(&mut h);
+    assert!(h.state().window_at_stake().is_empty(), "an untouched plan is no loss");
+    for (_, t) in h.state_mut().repos[0].dock.iter_all_tabs_mut() {
+        if let Tab::Rebase(r) = t {
+            r.items[0].action = gitem_core::rebase::RebaseAction::Drop;
+        }
+    }
+    assert_eq!(h.state().window_at_stake().len(), 1, "{:?}", h.state().window_at_stake());
+}
+
+#[test]
+fn a_note_being_typed_counts_and_a_pull_request_being_written_counts() {
+    let mut v = gitem::views::launchpad::LaunchpadView::default();
+    assert!(v.unsaved().is_none());
+    v.write_for_test("A title", "A description");
+    assert!(v.unsaved().is_some());
+    let mut r = gitem::views::review::ReviewView::default();
+    assert!(r.unsaved().is_none());
+    r.write_for_test("a thought");
+    assert!(r.unsaved().is_some());
+}
+
+#[test]
+fn many_repositories_leave_the_window_controls_on_screen() {
+    let parent = tempfile::tempdir().unwrap();
+    let mut roots = Vec::new();
+    for i in 0..9 {
+        let root = parent.path().canonicalize().unwrap().join(format!("a-repository-with-a-really-rather-long-name-{i}"));
+        std::fs::create_dir(&root).unwrap();
+        real_git().run(Some(&root), &["init", "-q", "-b", "main"]).unwrap();
+        roots.push(root);
+    }
+    let f = Fx::new();
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    for r in &roots {
+        h.state_mut().open_repo(&ctx, r, false);
+    }
+    wait_until_quiet(&mut h);
+    let edge = h.ctx.content_rect().right();
+    for name in ["Close window", "Maximize window", "Minimize window", "Command palette"] {
+        assert!(h.get_by_label(name).rect().right() <= edge + 0.5, "{name} is off screen");
+    }
+    // The ones that don't fit are in a list, and the one in use is on show.
+    assert!(h.query_by_label("a-repository-with-a-really-rather-long-name-8").is_some());
+    assert!(h.query_by_label_contains(gitem::chrome::icon::DOTS_THREE).is_some(), "the rest are a click away");
+}
+
+#[test]
+fn f1_lists_the_keys_and_can_be_narrowed() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.key_press(egui::Key::F1);
+    pump_for_label(&mut h, "Keyboard shortcuts");
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("Ctrl+Shift+K").is_some());
+    h.event(egui::Event::Text("fetch".into()));
+    h.step();
+    h.step();
+    assert!(h.query_by_label("Ctrl+Shift+F").is_some());
+    assert!(h.query_by_label("Ctrl+Shift+K").is_none());
+    h.key_press(egui::Key::Escape);
+    h.step();
+    h.step();
+    assert!(h.query_by_label("Keyboard shortcuts").is_none());
+}
+
+#[test]
+fn keys_close_a_tab_and_go_to_a_repository() {
+    let f = Fx::new();
+    sample_history(&f);
+    let other = Fx::new();
+    let mut h = harness(&f);
+    settle(&mut h);
+    let before = tab_titles(&h).len();
+    let ctx = h.ctx.clone();
+    h.state_mut().repos[0].open_tab(Tab::Tools(Box::default()));
+    wait_until_quiet(&mut h);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::W);
+    wait_until_quiet(&mut h);
+    assert_eq!(tab_titles(&h).len(), before, "{:?}", tab_titles(&h));
+    h.state_mut().open_repo(&ctx, &other.root, false);
+    wait_until_quiet(&mut h);
+    assert_eq!(h.state().active, 1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
+    h.step();
+    h.step();
+    assert_eq!(h.state().active, 0);
+}
+
+#[test]
+fn the_merge_banner_names_both_sides_and_the_tool_goes_on_to_the_next_file() {
+    let f = Fx::new();
+    f.write("a.txt", "base\n");
+    f.write("b.txt", "base\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "side"]);
+    f.write("a.txt", "side\n");
+    f.write("b.txt", "side\n");
+    f.commit("on side");
+    f.git(&["switch", "-q", "main"]);
+    f.write("a.txt", "main\n");
+    f.write("b.txt", "main\n");
+    f.commit("on main");
+    assert!(f.git.run(Some(&f.root), &["merge", "side"]).is_err() || f.git(&["status", "--short"]).contains("UU"));
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "Merging side into main");
+    click(&mut h, "Resolve");
+    pump_for_label(&mut h, "Next file");
+    assert!(h.query_by_label("File 1 of 2").is_some());
+    click(&mut h, "Next file");
+    pump_for_label(&mut h, "File 2 of 2");
+    // Once the last is done, the merge is one click away.
+    click(&mut h, "All ours");
+    click(&mut h, "Save and mark resolved");
+    pump_for_label(&mut h, "Next file: a.txt");
+    click(&mut h, "Next file: a.txt");
+    pump_for_label(&mut h, "All ours");
+    click(&mut h, "All ours");
+    click(&mut h, "Save and mark resolved");
+    pump_for_label(&mut h, "Commit merge…");
+}
+
+#[test]
+fn a_rebase_conflict_offers_continue_and_names_the_branch() {
+    let f = Fx::new();
+    f.write("c.txt", "base\n");
+    f.commit("base");
+    f.git(&["switch", "-q", "-c", "topic"]);
+    f.write("c.txt", "topic\n");
+    f.commit("on topic");
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "main\n");
+    f.commit("on main");
+    f.git(&["switch", "-q", "topic"]);
+    assert!(f.git.run(Some(&f.root), &["rebase", "main"]).is_err() || f.git(&["status", "--short"]).contains("UU"));
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "Rebasing topic onto main (step 1 of 1)");
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "Continue rebase");
+    assert!(h.get_by_label("Continue rebase").accesskit_node().is_disabled(), "not with a conflict left");
+    assert!(h.query_by_label("Commit to topic (rebasing)").is_some(), "HEAD is detached, but that's not the story");
+    // The tool's sides read for a rebase, once it has read the status (AS-43).
+    h.state_mut().repos[0].open_tab(Tab::merge("c.txt"));
+    pump_for_label(&mut h, "All upstream");
+    assert!(h.query_by_label("All your commit").is_some());
+}
+
+#[test]
+fn an_empty_repository_points_at_a_first_commit_and_offers_no_dead_ends() {
+    let f = Fx::new();
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "No commits yet");
+    assert!(h.query_by_label("Add remote…").is_some());
+    assert!(h.get_by_label("Pull").accesskit_node().is_disabled(), "there's nothing to pull from");
+    assert!(h.get_by_label("Fetch").accesskit_node().is_disabled());
+    click(&mut h, "Publish");
+    pump_for_label(&mut h, "Name");
+    pump_for_label(&mut h, "URL");
+}
+
+#[test]
+fn details_only_show_beside_views_that_have_commits() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert!(h.query_by_label("No commit selected").is_none(), "nothing picked, so no panel taking room");
+    let head = f.git(&["rev-parse", "HEAD"]);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Inspect(head.trim().to_string()));
+    pump_for_label(&mut h, "Open all");
+    h.state_mut().repos[0].open_tab(Tab::Settings(Box::default()));
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("Open all").is_none(), "Settings has nothing to do with a commit");
+}
+
+#[test]
+fn opening_the_graph_shows_the_head_commit() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = sized_harness(&f, vec2(1500.0, 940.0), Default::default());
+    settle(&mut h);
+    pump_for_label(&mut h, "Open all");
+    assert_eq!(h.state().repos[0].inspect.sha.as_deref(), Some(f.git(&["rev-parse", "HEAD"]).trim()));
+}
+
+#[test]
+fn the_rail_keeps_a_few_views_and_the_more_list_doesnt_pile_up_tabs() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert!(h.query_by_label("Reflog").is_none());
+    let before = tab_titles(&h).len();
+    click(&mut h, "More");
+    click(&mut h, "Reflog");
+    wait_until_quiet(&mut h);
+    assert!(tab_titles(&h).iter().any(|t| t == "Reflog"), "{:?}", tab_titles(&h));
+    click(&mut h, "More");
+    click(&mut h, "Health");
+    wait_until_quiet(&mut h);
+    let now = tab_titles(&h);
+    assert!(now.iter().any(|t| t == "Health") && !now.iter().any(|t| t == "Reflog"), "{now:?}");
+    assert_eq!(now.len(), before + 1);
+    // All of them on the rail is a setting away.
+    h.state_mut().settings.rail_full = true;
+    h.step();
+    h.step();
+    assert!(h.query_by_label("Reflog").is_some());
+}
+
+#[test]
+fn the_commit_menu_fits_a_short_window() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["tag", "v1"]);
+    f.git(&["branch", "side"]);
+    let mut h = sized_harness(&f, vec2(1000.0, 500.0), no_details());
+    settle(&mut h);
+    pump_for_label(&mut h, "second");
+    h.get_by_label("second").click_secondary();
+    wait_until_quiet(&mut h);
+    for item in ["Show details", "Copy SHA", "Export ⏵"] {
+        let r = h.get_by_label(item).rect();
+        assert!(r.top() >= 0.0 && r.bottom() <= 500.0, "{item} at {r:?}");
+    }
+}
+
+#[test]
+fn wrapped_lines_take_the_rows_they_need() {
+    use gitem::views::diffview::wrapped_lines;
+    assert_eq!(wrapped_lines(0, 10), 1);
+    assert_eq!(wrapped_lines(10, 10), 1);
+    assert_eq!(wrapped_lines(11, 10), 2);
+}
+
+#[test]
+fn wrap_works_in_both_diff_layouts_and_keeps_the_hunk_actions() {
+    let f = Fx::new();
+    f.write("long.txt", "short\n");
+    f.commit("base");
+    let long = "word ".repeat(400);
+    f.write("long.txt", &format!("short\n{long}\nafter\n"));
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::diff(DiffSource::Unstaged, Some("long.txt".into())));
+    pump_for_label(&mut h, "Wrap");
+    click(&mut h, "Wrap");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    click(&mut h, "Unified");
+    wait_until_quiet(&mut h);
+    click(&mut h, "Stage hunk");
+    wait_for(&mut h, "the hunk to be staged", || f.git(&["status", "--short"]).contains("M  long.txt"));
 }

@@ -45,7 +45,7 @@ impl TreeView {
         };
         let q = self.filter.to_lowercase();
         let shown: Vec<&String> = list.iter().filter(|f| q.is_empty() || f.to_lowercase().contains(&q)).collect();
-        ui.label(RichText::new(format!("{} file(s) at this commit", shown.len())).small().color(p.dim));
+        ui.label(RichText::new(format!("{} at this commit", plural(shown.len(), "file", "files"))).small().color(p.dim));
         ui.spacing_mut().item_spacing.y = 0.0;
         egui::ScrollArea::vertical().id_salt("tree").auto_shrink([false, false]).show_rows(ui, 22.0, shown.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;

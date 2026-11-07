@@ -750,3 +750,12 @@ fn line_counts_dont_download_a_partial_clones_files() {
     assert_eq!(repo.diff(&DiffSource::Commit(head), None, &DiffOpts::default()).unwrap().len(), 1);
     assert!(missing() < before);
 }
+
+#[test]
+fn a_confirm_preview_names_the_files_even_when_they_go_over_stdin() {
+    let names: Vec<String> = (0..1200).map(|i| format!("folder/a-really-rather-long-file-name-number-{i}.txt")).collect();
+    let preview = gitem_core::ops::discard_paths(&names).preview();
+    assert!(!preview.contains("--pathspec-from-file"), "{}", &preview[..200.min(preview.len())]);
+    assert!(preview.contains("number-0.txt") && preview.contains("and 1195 more"), "{}", &preview[..200.min(preview.len())]);
+    assert!(preview.len() < 1000, "a question stays short: {}", preview.len());
+}

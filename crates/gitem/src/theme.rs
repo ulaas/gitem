@@ -390,10 +390,12 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
     w.hovered.fg_stroke = Stroke::new(1.0, p.text);
     w.hovered.bg_stroke = Stroke::new(1.0, p.accent);
     w.hovered.corner_radius = radius;
-    w.active.bg_fill = p.selection;
-    w.active.weak_bg_fill = p.selection;
+    // Being pressed, or having the keyboard. Selected and switched-on things use the
+    // selection's fill, so this mustn't look like that: a thick outline says "here".
+    w.active.bg_fill = p.button_hover;
+    w.active.weak_bg_fill = p.button_hover;
     w.active.fg_stroke = Stroke::new(1.0, p.text);
-    w.active.bg_stroke = Stroke::new(1.0, p.accent);
+    w.active.bg_stroke = Stroke::new(2.0, p.accent);
     w.active.corner_radius = radius;
     w.open.bg_fill = p.button_hover;
     w.open.weak_bg_fill = p.button_hover;

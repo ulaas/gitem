@@ -32,6 +32,8 @@ pub enum Action {
     OpenTab(Tab),
     /// Show a commit in the Inspect panel.
     Inspect(String),
+    /// The same, unless one's showing already.
+    InspectFirst(String),
     OpenUrl(String),
     Copy(String),
     Toast(String),
@@ -68,6 +70,12 @@ pub enum Action {
     GraphHide(String),
     /// Open a terminal in a folder, optionally running a command there.
     OpenTerminal(PathBuf, Option<String>),
+    /// Close this repository's tab, asking first if that would lose something.
+    CloseRepo(PathBuf),
+    /// Its folder has gone. Ask where to, and open it from there.
+    LocateRepo(PathBuf),
+    /// A view from the rail's More list, which takes over from the last one.
+    OpenFromMore(Tab),
     /// The open pull request for a branch, for the status bar.
     BranchPr(Option<(String, u64, String)>),
     /// Something changed on the hosting provider, so its lists are out of date.
@@ -116,6 +124,9 @@ pub struct Cx<'a> {
     pub out: &'a mut Vec<Action>,
     /// A dialog is showing, drawn after the views and with its own keyboard shortcuts.
     pub dialog_open: bool,
+    /// This is the view the user is working in, when several panes are showing. A key press
+    /// outside a text field belongs to one of them.
+    pub in_front: bool,
 }
 
 impl Cx<'_> {

@@ -97,7 +97,7 @@ impl ContributorsView {
         let q = self.filter.to_lowercase();
         let max = list.iter().map(|c| c.commits).max().unwrap_or(1).max(1) as f32;
         let total: u32 = list.iter().map(|c| c.commits).sum();
-        ui.label(RichText::new(format!("{} people, {total} commits", list.len())).small().color(p.dim));
+        ui.label(RichText::new(format!("{}, {}", plural(list.len(), "person", "people"), plural(total as usize, "commit", "commits"))).small().color(p.dim));
         let shown: Vec<&Contributor> = list.iter().filter(|c| q.is_empty() || c.name.to_lowercase().contains(&q) || c.email.to_lowercase().contains(&q)).collect();
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut clicked = None;

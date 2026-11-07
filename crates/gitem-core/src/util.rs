@@ -119,6 +119,11 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
 }
 
 /// At most `n` bytes of `s`, cut on a character boundary (names can be non-ASCII).
+/// "1 file", "2 files", for a word that takes an s.
+pub fn count_of(n: usize, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
 pub fn prefix(s: &str, n: usize) -> &str {
     let mut end = s.len().min(n);
     while !s.is_char_boundary(end) {
