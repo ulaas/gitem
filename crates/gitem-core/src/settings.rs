@@ -124,9 +124,6 @@ pub struct Settings {
     pub inline_blame: bool,
     pub inline_blame_format: String,
     pub code_lens: bool,
-    pub blame_ignore_ws: bool,
-    pub blame_detect_moves: bool,
-    pub heatmap_age_days: u32,
     // Avatars
     pub gravatar: bool,
     // Behaviour
@@ -194,6 +191,28 @@ pub struct GraphLayout {
     pub widths: std::collections::HashMap<String, f32>,
 }
 
+impl Settings {
+    /// Every preference back to its default, keeping where the user was and what they keep
+    /// coming back to, none of which they'd think of as a preference.
+    pub fn with_default_preferences(&self) -> Self {
+        let c = self.clone();
+        Self {
+            recent_repos: c.recent_repos,
+            open_repos: c.open_repos,
+            workspaces: c.workspaces,
+            favorite_branches: c.favorite_branches,
+            pinned_prs: c.pinned_prs,
+            snoozed_prs: c.snoozed_prs,
+            archived_sessions: c.archived_sessions,
+            palette_recent: c.palette_recent,
+            session_tabs: c.session_tabs,
+            session_layouts: c.session_layouts,
+            unknown: c.unknown,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -212,9 +231,6 @@ impl Default for Settings {
             inline_blame: true,
             inline_blame_format: "{author}, {ago} · {subject}".to_string(),
             code_lens: true,
-            blame_ignore_ws: false,
-            blame_detect_moves: false,
-            heatmap_age_days: 90,
             gravatar: false,
             auto_fetch_minutes: 0,
             confirm_destructive: true,
@@ -417,6 +433,21 @@ fn write_settings(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resetting_preferences_keeps_where_the_user_was() {
+        let mut s = Settings { theme: ThemeChoice::Paper, ui_scale: 1.5, ..Default::default() };
+        s.ai.custom_instructions = "be brief".into();
+        s.recent_repos.push("a".into());
+        s.open_repos.push("b".into());
+        s.workspaces.push(Workspace { name: "w".into(), repos: Vec::new() });
+        s.favorite_branches.push("f".into());
+        s.unknown.insert("from_a_newer_version".into(), Value::Bool(true));
+        let r = s.with_default_preferences();
+        assert_eq!((r.theme, r.ui_scale, r.ai.custom_instructions.as_str()), (ThemeChoice::Dark, 1.0, ""));
+        assert_eq!((r.recent_repos, r.open_repos, r.workspaces.len(), r.favorite_branches), (s.recent_repos, s.open_repos, 1, s.favorite_branches));
+        assert!(r.unknown.contains_key("from_a_newer_version"));
+    }
     use serde_json::json;
 
     fn merged(base: Value, mine: Value, disk: Value) -> Value {

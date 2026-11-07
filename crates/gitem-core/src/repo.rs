@@ -349,12 +349,18 @@ impl Repo {
             a.push("--all-match".into());
         }
         if let Some(x) = &q.grep {
-            if q.all_match {
-                a.extend(x.split('|').map(|t| format!("--grep={t}")));
-            } else {
-                a.push(format!("--grep={x}"));
+            // Each its own `--grep`: git takes any of them, or all of them with `--all-match`.
+            a.extend(x.split(GREP_TERMS).map(|t| format!("--grep={t}")));
+            if !q.fixed_strings {
+                a.push("--extended-regexp".into());
             }
-            a.push(if q.fixed_strings { "--fixed-strings".into() } else { "--extended-regexp".into() });
+        }
+        // For `--author` and `--committer` as well, so an email can have a `+` in it.
+        if q.fixed_strings {
+            a.push("--fixed-strings".into());
+        }
+        if q.no_walk {
+            a.push("--no-walk".into());
         }
         if q.regex_ignore_case {
             a.push("--regexp-ignore-case".into());
@@ -926,24 +932,36 @@ impl Repo {
         for l in text.split('\0').map(|l| l.trim_start_matches('\n')).filter(|l| !l.is_empty()) {
             *m.entry(l.to_string()).or_default() += 1;
         }
-        Ok(m.into_iter().collect())
+        // Files since deleted are in that history, but there's nothing left to open.
+        let tree = self.git.run_raw(Some(&self.root), &["ls-tree", "-r", "--name-only", "-z", rev_arg(rev)?])?.into_result()?.text();
+        let now: std::collections::HashSet<&str> = tree.split('\0').collect();
+        Ok(m.into_iter().filter(|(p, _)| now.contains(p.as_str())).collect())
     }
 
     /// How well this repository is tuned for its size.
     pub fn health(&self) -> Result<RepoHealth> {
-        let is_on = |k: &str| self.config_get(k).is_some_and(|v| matches!(v.to_lowercase().as_str(), "true" | "yes" | "on" | "1"));
+        // In the order git reads them, so the last one for a key is the one in force.
+        let config = self.config_list()?;
+        let in_force = |k: &str| config.iter().rev().find(|e| e.key.eq_ignore_ascii_case(k));
+        let is_on = |k: &str| in_force(k).is_some_and(|e| matches!(e.value.to_lowercase().as_str(), "true" | "yes" | "on" | "1"));
+        let registered = config.iter().any(|e| e.key.eq_ignore_ascii_case("maintenance.repo") && same_folder(&e.value, &self.root));
         let tracked = self.run(&["ls-files", "-z"])?.stdout.iter().filter(|b| **b == 0).count();
         let commits: u64 = self.git.run_raw(Some(&self.root), &["rev-list", "--count", "--all"])?.text().trim().parse().unwrap_or(0);
         let stats = self.count_objects()?;
         let stat = |key: &str| -> String { stats.lines().find_map(|l| l.strip_prefix(key).map(|v| v.trim_start_matches(':').trim().to_string())).unwrap_or_default() };
-        let items = vec![
-            HealthItem { label: "Commit-graph cache".into(), detail: "Speeds up history walks and the commit graph.".into(), config: vec![("core.commitGraph".into(), "true".into()), ("fetch.writeCommitGraph".into(), "true".into())], enabled: is_on("fetch.writeCommitGraph") },
-            HealthItem { label: "Untracked cache".into(), detail: "Speeds up status by remembering untracked folders.".into(), config: vec![("core.untrackedCache".into(), "true".into())], enabled: is_on("core.untrackedCache") },
-            HealthItem { label: "File system monitor".into(), detail: "Lets status skip scanning files that didn't change, in your terminal and editor. gitem turns it off for its own reads, since it starts a program named by the repository's config.".into(), config: vec![("core.fsmonitor".into(), "true".into())], enabled: is_on("core.fsmonitor") },
-            HealthItem { label: "Large-repository index".into(), detail: "Index format for repositories with many files.".into(), config: vec![("feature.manyFiles".into(), "true".into())], enabled: is_on("feature.manyFiles") },
-            HealthItem { label: "Sparse index".into(), detail: "Smaller index when using sparse checkout.".into(), config: vec![("index.sparse".into(), "true".into())], enabled: is_on("index.sparse") },
-            HealthItem { label: "Scheduled maintenance".into(), detail: "Git keeps this repository optimized in the background.".into(), config: vec![("maintenance.auto".into(), "true".into()), ("maintenance.strategy".into(), "incremental".into())], enabled: self.config_get("maintenance.strategy").is_some() },
+        let mut items = vec![
+            HealthItem { label: "Commit-graph cache".into(), detail: "Speeds up history walks and the commit graph.".into(), config: vec![("core.commitGraph".into(), "true".into()), ("fetch.writeCommitGraph".into(), "true".into())], enabled: is_on("fetch.writeCommitGraph"), ..Default::default() },
+            HealthItem { label: "Untracked cache".into(), detail: "Speeds up status by remembering untracked folders.".into(), config: vec![("core.untrackedCache".into(), "true".into())], enabled: is_on("core.untrackedCache"), ..Default::default() },
+            HealthItem { label: "File system monitor".into(), detail: "Lets status skip scanning files that didn't change, in your terminal and editor. gitem turns it off for its own reads, since it starts a program named by the repository's config.".into(), config: vec![("core.fsmonitor".into(), "true".into())], enabled: is_on("core.fsmonitor"), ..Default::default() },
+            HealthItem { label: "Large-repository index".into(), detail: "Index format for repositories with many files.".into(), config: vec![("feature.manyFiles".into(), "true".into())], enabled: is_on("feature.manyFiles"), ..Default::default() },
+            HealthItem { label: "Sparse index".into(), detail: "Smaller index when using sparse checkout.".into(), config: vec![("index.sparse".into(), "true".into())], enabled: is_on("index.sparse"), ..Default::default() },
+            HealthItem { label: "Scheduled maintenance".into(), detail: "Git keeps this repository optimized in the background, using a task it adds to your system's scheduler.".into(), enabled: registered, maintenance: true, ..Default::default() },
         ];
+        for item in &mut items {
+            // Only what's on can be undone, and only here if that's where it's on.
+            let scope = item.config.iter().filter_map(|(k, _)| in_force(k)).map(|e| e.scope.as_str()).find(|s| !matches!(*s, "local" | "worktree"));
+            item.set_elsewhere = scope.filter(|_| item.enabled).map(String::from);
+        }
         Ok(RepoHealth { tracked_files: tracked, commits, loose_objects: stat("count"), pack_size: stat("size-pack"), items })
     }
 
@@ -1003,11 +1021,15 @@ impl Repo {
         Ok(v)
     }
 
-    /// Commit timestamps for activity heatmaps.
-    pub fn commit_times(&self, rev: &str, author: Option<&str>, since: &str) -> Result<Vec<i64>> {
+    /// Commit timestamps for activity heatmaps, of one person if an email is given. Git matches
+    /// after `.mailmap` has joined a person's addresses, as the Contributors list does. The
+    /// brackets stop `ann@x` from also finding `joann@x`.
+    pub fn commit_times(&self, rev: &str, author_email: Option<&str>, since: &str) -> Result<Vec<i64>> {
         let mut a: Vec<String> = vec!["log".into(), "--format=%at".into(), format!("--since={since}"), rev_arg(rev)?.to_string()];
-        if let Some(x) = author {
-            a.push(format!("--author={x}"));
+        if let Some(x) = author_email {
+            a.push(format!("--author=<{x}>"));
+            a.push("--fixed-strings".into());
+            a.push("--regexp-ignore-case".into());
         }
         a.push("--".into());
         let o = self.run_raw_v(&a)?;
@@ -1095,6 +1117,8 @@ impl Repo {
                 s.bad = Some(sha_of(x));
             }
         }
+        s.culprit = culprit_in(&log);
+        s.only_skipped = s.culprit.is_none() && log.lines().any(|l| l.starts_with("# only skipped commits left to test"));
         s.log = log;
         s
     }
@@ -1113,10 +1137,6 @@ impl Repo {
             }
         }
         Ok(v)
-    }
-
-    pub fn lfs_available(&self) -> bool {
-        self.git.run_raw(None, &["lfs", "version"]).map(|o| o.ok()).unwrap_or(false)
     }
 
     pub fn sparse_patterns(&self) -> Vec<String> {
@@ -1138,6 +1158,47 @@ impl Repo {
         }
         let o = self.run(&a)?;
         Ok(o.text().lines().filter_map(|l| l.strip_prefix("Would remove ").map(crate::diff::unquote_path)).collect())
+    }
+
+    /// The version of each file `b` has that differs from the merge base of `a` and `b`.
+    pub fn compare_blobs(&self, a: &str, b: &str) -> Result<HashMap<String, String>> {
+        let range = format!("{}...{}", rev_arg(a)?, rev_arg(b)?);
+        let o = self.run_v(&["diff".to_string(), "--raw".to_string(), "--no-abbrev".to_string(), "--no-renames".to_string(), "-z".to_string(), range, "--".to_string()])?;
+        let text = o.text();
+        let mut fields = text.split('\0');
+        let mut out = HashMap::new();
+        while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+            if let Some(blob) = meta.split_whitespace().nth(3) {
+                out.insert(path.to_string(), blob.to_string());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Untracked repositories inside this one. `git clean` leaves them out of what it lists,
+    /// and doesn't delete them, without saying so.
+    pub fn clean_left_alone(&self) -> Result<Vec<String>> {
+        let o = self.run(&["status", "--porcelain", "-z", "--untracked-files=all"])?;
+        Ok(o.text().split('\0').filter_map(|e| e.strip_prefix("?? ")).filter(|p| p.ends_with('/') && self.is_nested_repo(p)).map(String::from).collect())
+    }
+
+    /// Dates git can't read count as "now" with no complaint, so `after:notadate` finds
+    /// nothing and `before:notadate` finds everything. A date that came out as this very
+    /// moment is one of those, unless it asked for that.
+    pub fn check_search_dates(&self, q: &LogQuery) -> Result<()> {
+        for (name, value) in [("after", &q.since), ("before", &q.until)] {
+            let Some(value) = value else { continue };
+            let low = value.to_lowercase();
+            if ["now", "today", "0 "].iter().any(|w| low.contains(w)) {
+                continue;
+            }
+            let out = self.run_v(&["rev-parse".to_string(), format!("--since={value}")])?.text();
+            let when: i64 = out.trim().rsplit('=').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            if (crate::util::now_ts() - when).abs() < 5 {
+                return Err(Error::Other(format!("Git can't read \"{value}\" as a date for {name}:. Try 2024-01-31 or \"2 weeks ago\".")));
+            }
+        }
+        Ok(())
     }
 
     /// Whether an untracked path is a repository of its own, which `git clean` leaves alone
@@ -1239,6 +1300,41 @@ impl Repo {
     }
 }
 
+/// Stands between message terms in `LogQuery::grep`. Nobody types it, unlike `|`.
+pub const GREP_TERMS: char = '\u{1f}';
+
+/// Whether a path from git's config is this folder, however each was spelled.
+fn same_folder(a: &str, b: &Path) -> bool {
+    let plain = |p: &str| {
+        let p = p.strip_prefix(r"\\?\").unwrap_or(p).replace('\\', "/");
+        let p = p.trim_end_matches('/');
+        if cfg!(windows) { p.to_lowercase() } else { p.to_string() }
+    };
+    plain(a) == plain(&b.to_string_lossy())
+}
+
+/// The commit git's verdict names. Its log says `# first 'bad' commit: [sha] subject`, or
+/// without the quotes in older versions, or with the user's own word for "bad".
+fn culprit_in(log: &str) -> Option<String> {
+    log.lines().find_map(|l| {
+        let rest = l.strip_prefix("# first ")?;
+        let (_, after) = rest.split_once(" commit: [")?;
+        after.split(']').next().map(String::from)
+    })
+}
+
+/// A regular expression matching just this text.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if r"\.+*?()|[]{}^$".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Whether a command failed because the revision it was given can't exist yet, on a
 /// branch with no commits. An ordinary state, and not worth a raw `fatal:`.
 fn has_no_commits(stderr: &str) -> bool {
@@ -1332,10 +1428,15 @@ fn merge_numstat(files: &mut [FileChange], numstat: &str) {
 
 /// GitLens-style search syntax: `message:` / `=:`, `author:` / `@:`, `commit:` / `#:`,
 /// `file:` / `?:`, `change:` / `~:`, `after:`, `before:`, `is:merge`, `-is:merge`,
-/// `ref:`. Bare words search the message.
+/// `ref:`. Bare words search the message, as plain text, and all of them must be there.
+/// `re:` takes a regular expression, for anything else, such as `re:fix|feat`.
 pub fn parse_search(input: &str) -> LogQuery {
-    let mut q = LogQuery { regex_ignore_case: true, ..Default::default() };
+    // Stash commits are how git stores them, not anybody's history.
+    let mut q = LogQuery { regex_ignore_case: true, exclude_stash: true, fixed_strings: true, ..Default::default() };
     let mut msg: Vec<String> = Vec::new();
+    let mut patterns: Vec<String> = Vec::new();
+    let mut commits = false;
+    let mut refs = false;
     for tok in tokenize(input) {
         let (k, v) = match tok.split_once(':') {
             Some((k, v)) if !v.is_empty() => (k.to_string(), v.to_string()),
@@ -1349,22 +1450,38 @@ pub fn parse_search(input: &str) -> LogQuery {
                 msg.push(v);
                 q.invert_grep = true;
             }
-            "commit" | "#" => q.revs.push(v),
+            "re" | "regex" => patterns.push(v),
+            "commit" | "#" => {
+                commits = true;
+                q.revs.push(v);
+            }
             "file" | "?" => q.paths.push(v),
             "change" | "~" => q.pickaxe_g = Some(v),
             "changes" | "s" => q.pickaxe_s = Some(v),
             "after" | "since" => q.since = Some(v),
             "before" | "until" => q.until = Some(v),
-            "ref" => q.revs.push(v),
+            "ref" => {
+                refs = true;
+                q.revs.push(v);
+            }
             "is" | "type" if v == "merge" => q.merges_only = true,
             "" if v == "@me" => q.author = Some(v),
             "-is" if v == "merge" => q.no_merges = true,
             _ => msg.push(tok),
         }
     }
-    if !msg.is_empty() {
-        q.grep = Some(msg.join("|"));
+    // Git has one setting for the whole search, so with a pattern in it the words are escaped.
+    if !patterns.is_empty() {
+        q.fixed_strings = false;
+        msg = msg.iter().map(|m| regex_escape(m)).chain(patterns).collect();
     }
+    if !msg.is_empty() {
+        // Words narrow a search down. With `-message:` it's commits that have none of them.
+        q.all_match = msg.len() > 1 && !q.invert_grep;
+        q.grep = Some(msg.join(&GREP_TERMS.to_string()));
+    }
+    // A commit asked for by name is that commit. With a branch too, the branch is the history.
+    q.no_walk = commits && !refs;
     if q.revs.is_empty() {
         q.all = true;
     }
@@ -1415,5 +1532,36 @@ mod tests {
         assert_eq!(q.grep.as_deref(), Some("hello"));
         assert_eq!(q.revs, vec!["abc123"]);
         assert!(!q.all);
+        assert!(q.no_walk, "a commit by name is that commit alone");
+    }
+
+    #[test]
+    fn search_words_are_plain_text_and_all_required() {
+        let q = parse_search("fix(auth) C++");
+        assert!(q.fixed_strings && q.all_match);
+        assert_eq!(q.grep.as_deref().unwrap().split(GREP_TERMS).collect::<Vec<_>>(), ["fix(auth)", "C++"]);
+        assert!(q.exclude_stash, "stash commits aren't history");
+
+        let q = parse_search("fix(auth) re:feat|chore");
+        assert!(!q.fixed_strings, "a pattern means regular expressions");
+        assert_eq!(q.grep.as_deref().unwrap().split(GREP_TERMS).collect::<Vec<_>>(), [r"fix\(auth\)", "feat|chore"], "the plain word stays plain");
+
+        let q = parse_search("-message:wip -message:temp");
+        assert!(q.invert_grep && !q.all_match, "none of them, not just not all of them");
+    }
+
+    #[test]
+    fn a_branch_search_walks_history() {
+        assert!(!parse_search("ref:main").no_walk);
+        assert!(!parse_search("ref:main #:abc").no_walk);
+    }
+
+    #[test]
+    fn bisect_verdicts_are_read_from_the_log() {
+        assert_eq!(culprit_in("# bad: [aaa] x\n# first 'bad' commit: [abc123] the bug\n").as_deref(), Some("abc123"));
+        assert_eq!(culprit_in("# first bad commit: [def] old git\n").as_deref(), Some("def"));
+        assert_eq!(culprit_in("# first 'broken' commit: [fed] own words\n").as_deref(), Some("fed"));
+        assert_eq!(culprit_in("# possible first 'bad' commit: [abc] only skipped\n"), None);
+        assert_eq!(culprit_in("git bisect good abc\n"), None);
     }
 }

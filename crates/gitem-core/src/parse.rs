@@ -488,7 +488,7 @@ pub fn parse_config(out: &str) -> Vec<ConfigEntry> {
 
 /// Commit stats stream for file history and contributors:
 /// `git log --format=<sep>%H%x00... --numstat -z`.
-pub const STAT_LOG_FORMAT: &str = "--format=\x01%H%x00%an%x00%ae%x00%at%x00%s";
+pub const STAT_LOG_FORMAT: &str = "--format=\x01%H%x00%aN%x00%aE%x00%at%x00%s";
 
 pub struct StatCommit {
     pub sha: String,

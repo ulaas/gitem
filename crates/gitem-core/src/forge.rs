@@ -43,9 +43,6 @@ impl ForgeKind {
             Self::GoogleSource => "Google Source",
         }
     }
-    pub fn pr_word(self) -> &'static str {
-        if self == Self::GitLab { "merge request" } else { "pull request" }
-    }
 }
 
 /// A repository on a hosting provider, identified from a remote URL.
@@ -112,7 +109,9 @@ pub fn parse_remote_url(url: &str) -> Option<(String, String)> {
 
 pub fn identify(url: &str, custom: &[CustomHost]) -> Option<RemoteRepo> {
     let (host, path) = parse_remote_url(url)?;
-    if let Some(c) = custom.iter().find(|c| c.host.eq_ignore_ascii_case(&host)) {
+    // People paste a whole address here, which would otherwise never match.
+    let bare = |h: &str| h.trim().trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string();
+    if let Some(c) = custom.iter().find(|c| bare(&c.host).eq_ignore_ascii_case(&host)) {
         let api = (!c.api_base.is_empty()).then(|| c.api_base.trim_end_matches('/').to_string());
         return Some(RemoteRepo { kind: c.kind, host, path, api_base: api, templates: c.templates.clone() });
     }
@@ -443,6 +442,9 @@ impl LaunchpadGroup {
     }
 }
 
+/// How many pull requests or issues a host is asked for, per source.
+pub const LIST_LIMIT: usize = 50;
+
 pub fn launchpad_group(pr: &PullRequest, me: &str) -> LaunchpadGroup {
     let mine = !me.is_empty() && pr.author.eq_ignore_ascii_case(me);
     if pr.requested_reviewers.iter().any(|r| r.eq_ignore_ascii_case(me)) && !me.is_empty() {
@@ -452,13 +454,17 @@ pub fn launchpad_group(pr: &PullRequest, me: &str) -> LaunchpadGroup {
         return LaunchpadGroup::Draft;
     }
     if mine {
-        if pr.mergeable == "CONFLICTING" || pr.checks == "FAILURE" {
+        if pr.mergeable == "CONFLICTING" || matches!(pr.checks.as_str(), "FAILURE" | "ERROR") {
             return LaunchpadGroup::Blocked;
         }
         if pr.review_decision == "CHANGES_REQUESTED" {
             return LaunchpadGroup::ChangesRequested;
         }
         if pr.review_decision == "APPROVED" {
+            return LaunchpadGroup::Mergeable;
+        }
+        // No decision at all means no review is required, unlike `REVIEW_REQUIRED`.
+        if pr.review_decision.is_empty() && pr.checks == "SUCCESS" && pr.mergeable == "MERGEABLE" {
             return LaunchpadGroup::Mergeable;
         }
         return LaunchpadGroup::WaitingForReview;
@@ -1418,6 +1424,25 @@ fn base64(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_custom_host_can_be_written_as_an_address() {
+        let host = |h: &str| CustomHost { host: h.to_string(), kind: ForgeKind::GitLab, api_base: String::new(), templates: Default::default() };
+        for written in ["git.example.invalid", "https://git.example.invalid", "https://git.example.invalid/", "  http://GIT.example.invalid/ "] {
+            let found = identify("https://git.example.invalid/a/b.git", &[host(written)]);
+            assert_eq!(found.map(|r| r.kind), Some(ForgeKind::GitLab), "{written}");
+        }
+    }
+
+    #[test]
+    fn my_pull_requests_go_where_their_state_says() {
+        let pr = |checks: &str, decision: &str, mergeable: &str| PullRequest { author: "me".into(), checks: checks.into(), review_decision: decision.into(), mergeable: mergeable.into(), ..Default::default() };
+        assert_eq!(launchpad_group(&pr("SUCCESS", "", "MERGEABLE"), "me"), LaunchpadGroup::Mergeable, "no reviews needed, and green");
+        assert_eq!(launchpad_group(&pr("SUCCESS", "REVIEW_REQUIRED", "MERGEABLE"), "me"), LaunchpadGroup::WaitingForReview);
+        assert_eq!(launchpad_group(&pr("PENDING", "", "MERGEABLE"), "me"), LaunchpadGroup::WaitingForReview);
+        assert_eq!(launchpad_group(&pr("ERROR", "", "MERGEABLE"), "me"), LaunchpadGroup::Blocked, "the card says checks are failing");
+        assert_eq!(launchpad_group(&pr("FAILURE", "APPROVED", "MERGEABLE"), "me"), LaunchpadGroup::Blocked);
+    }
 
     #[test]
     fn a_broken_percent_escape_is_kept_as_text() {

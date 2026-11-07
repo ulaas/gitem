@@ -350,6 +350,10 @@ pub struct BisectState {
     pub good: Vec<String>,
     pub bad: Option<String>,
     pub log: String,
+    /// Git has named the commit that introduced the bug, and is done.
+    pub culprit: Option<String>,
+    /// Everything left to test was skipped, so git can't narrow it down further.
+    pub only_skipped: bool,
 }
 
 /// One tuning option of Repository Health.
@@ -359,6 +363,10 @@ pub struct HealthItem {
     pub detail: String,
     pub config: Vec<(String, String)>,
     pub enabled: bool,
+    /// Which config outside this repository turns it on, as Undo here can't change that.
+    pub set_elsewhere: Option<String>,
+    /// Turned on and off with `git maintenance`, not by setting `config`.
+    pub maintenance: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -414,8 +422,10 @@ pub struct LogQuery {
     pub invert_grep: bool,
     /// Every message term must match, not just one.
     pub all_match: bool,
-    /// Treat message terms as plain text rather than regular expressions.
+    /// Treat message and author terms as plain text rather than regular expressions.
     pub fixed_strings: bool,
+    /// Just the commits named in `revs`, not their history as well.
+    pub no_walk: bool,
     /// `paths` are exact file names, not search patterns.
     pub literal_paths: bool,
     /// Ref globs passed as `--exclude=<glob>` before `--all`.

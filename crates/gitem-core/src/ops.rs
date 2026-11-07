@@ -463,6 +463,16 @@ pub fn branch_create(name: &str, start: Option<&str>, switch: bool) -> GitOp {
     GitOp::new(format!("Create branch {name}")).names(&[name, start.unwrap_or_default()]).step_v(a)
 }
 
+/// A new branch of the user's own, whatever it starts from. Git would otherwise set a remote
+/// branch as its upstream, which makes Push refuse, and counts ahead and behind against it.
+pub fn branch_start_work(name: &str, start: Option<&str>) -> GitOp {
+    let mut a = v(&["switch", "--no-track", "-c", name]);
+    if let Some(s) = start {
+        a.push(s.to_string());
+    }
+    GitOp::new(format!("Create branch {name}")).names(&[name, start.unwrap_or_default()]).step_v(a)
+}
+
 pub fn branch_rename(old: &str, new: &str) -> GitOp {
     GitOp::new(format!("Rename {old} to {new}")).names(&[old, new]).step(&["branch", "-m", old, new])
 }
@@ -807,6 +817,20 @@ pub fn worktree_add(path: &str, branch: Option<&str>, new_branch: Option<&str>, 
         a.push(s.to_string());
     }
     GitOp::new(format!("Add worktree {path}")).names(&[path, branch.unwrap_or_default(), new_branch.unwrap_or_default(), start.unwrap_or_default()]).step_v(a)
+}
+
+/// A new worktree on a new branch, with no upstream, as for [`branch_start_work`].
+pub fn worktree_start_work(path: &str, name: &str, start: Option<&str>) -> GitOp {
+    let mut a = v(&["worktree", "add", "--no-track", "-b", name, path]);
+    if let Some(s) = start {
+        a.push(s.to_string());
+    }
+    GitOp::new(format!("Add worktree {path}")).names(&[path, name, start.unwrap_or_default()]).step_v(a)
+}
+
+/// Git asks for force twice to remove a locked worktree.
+pub fn worktree_remove_locked(path: &str) -> GitOp {
+    GitOp::new(format!("Remove locked worktree {path}")).step(&["worktree", "remove", "--force", "--force", path])
 }
 
 pub fn worktree_remove(path: &str, force: bool) -> GitOp {
@@ -1194,6 +1218,17 @@ pub fn split_command_line(s: &str) -> Vec<String> {
 // ---- GitLens-parity commands ---------------------------------------------------
 
 /// Undo the last commit, keeping its changes staged.
+/// Adds this repository to git's list, and git's task to the system scheduler if it isn't there.
+pub fn maintenance_start() -> GitOp {
+    GitOp::new("Turn on scheduled maintenance").step(&["maintenance", "start"])
+}
+
+/// Takes this repository off the list. The task stays, as other repositories may be on it.
+/// `start` also set the two settings, which aren't worth leaving behind.
+pub fn maintenance_unregister() -> GitOp {
+    GitOp::new("Turn off scheduled maintenance").step(&["maintenance", "unregister"]).step(&["config", "--local", "--unset", "maintenance.auto"]).allow_fail().step(&["config", "--local", "--unset", "maintenance.strategy"]).allow_fail()
+}
+
 pub fn undo_commit() -> GitOp {
     GitOp::new("Undo commit").step(&["reset", "--soft", "HEAD~1"])
 }

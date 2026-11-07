@@ -181,6 +181,8 @@ pub fn fuzzy_score(needle: &str, hay: &str) -> Option<i32> {
 
 /// A score and the matched character positions. A run of the typed text beats
 /// scattered letters, and one starting at a word beats one inside a word.
+const MAX_FUZZY_GAP: usize = 8;
+
 pub fn fuzzy_match(needle: &str, hay: &str) -> Option<(i32, Vec<u32>)> {
     let wanted: Vec<char> = needle.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
     if wanted.is_empty() {
@@ -208,6 +210,13 @@ pub fn fuzzy_match(needle: &str, hay: &str) -> Option<(i32, Vec<u32>)> {
         if at_word(found) {
             score += 10;
         }
+        // Letters strewn across a label are chance, unless each one starts a word.
+        if let Some(l) = last
+            && found - l > MAX_FUZZY_GAP
+            && !at_word(found)
+        {
+            return None;
+        }
         positions.push(found as u32);
         last = Some(found);
         pos = found + 1;
@@ -218,6 +227,14 @@ pub fn fuzzy_match(needle: &str, hay: &str) -> Option<(i32, Vec<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn letters_strewn_across_a_label_dont_match() {
+        assert!(fuzzy_match("tag", "Create Tag").is_some());
+        assert!(fuzzy_match("cb", "Create Branch").is_some(), "each starts a word");
+        assert!(fuzzy_match("ca", "Cherry-pick a Commit").is_some());
+        assert!(fuzzy_match("zq", "zxxxxxxxxxxxxxxxxq").is_none(), "far apart and mid-word");
+    }
 
     #[test]
     fn files_in_other_encodings_read_as_text() {

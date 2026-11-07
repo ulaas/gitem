@@ -14,6 +14,8 @@ use serde_json::Value;
 const TAIL_BYTES: u64 = 512 * 1024;
 const HEAD_BYTES: u64 = 256 * 1024;
 const MAX_FILES: usize = 300;
+/// How far back to look for them. Each one read for the first time costs its two ends.
+const MAX_LOOKED_AT: usize = 5000;
 /// A file written this recently means the agent is active.
 const WORKING_SECS: i64 = 20;
 
@@ -246,12 +248,18 @@ pub fn scan(roots: &[(&'static str, PathBuf)], worktrees: &[String], now: i64) -
         let mut files = Vec::new();
         collect_jsonl(root, 4, &mut files);
         files.sort_by_key(|x| std::cmp::Reverse(x.1));
-        files.truncate(MAX_FILES);
+        files.truncate(MAX_LOOKED_AT);
+        // The limit is on sessions here. Other projects' can't push this one's out of it.
+        let mut found = 0;
         for (path, modified) in files {
+            if found >= MAX_FILES {
+                break;
+            }
             let Some(t) = parse_file(&path, modified) else { continue };
             if !wanted.contains(&norm(&t.cwd)) {
                 continue;
             }
+            found += 1;
             // Copilot keeps one `<id>/events.jsonl` per session.
             let named = if path.file_stem().is_some_and(|s| s == "events") { path.parent().and_then(Path::file_name) } else { path.file_stem() };
             let id = if t.id.is_empty() { named.map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() } else { t.id };
@@ -340,6 +348,24 @@ pub fn scan_all(worktrees: &[String], now: i64) -> Vec<AgentSession> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Other projects being busier doesn't make this one's sessions disappear.
+    #[test]
+    fn other_projects_cant_push_a_repositorys_sessions_out() {
+        let d = tempfile::tempdir().unwrap();
+        let line = |cwd: &str| format!("{}
+", serde_json::json!({"cwd": cwd, "sessionId": cwd, "gitBranch": "main", "type": "user", "message": {"role": "user", "content": "hi"}}));
+        std::fs::write(d.path().join("mine.jsonl"), line("/repo/mine")).unwrap();
+        for i in 0..(super::MAX_FILES + 20) {
+            std::fs::write(d.path().join(format!("other-{i}.jsonl")), line(&format!("/repo/other-{i}"))).unwrap();
+        }
+        // Older than all the others.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(d.path().join("mine.jsonl")).unwrap().set_modified(old).unwrap();
+        let found = super::scan(&[("Claude Code", d.path().to_path_buf())], &["/repo/mine".to_string()], crate::util::now_ts());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].cwd, "/repo/mine");
+    }
 
     #[test]
     fn a_session_id_that_is_not_plain_has_no_resume_command() {

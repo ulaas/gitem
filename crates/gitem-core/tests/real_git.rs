@@ -953,6 +953,7 @@ fn richer_search_filters() {
     // Options set by the graph's search toggles.
     let mut q = parse_search("=:feat. =:alpha");
     q.all_match = true;
+    q.fixed_strings = false;
     assert_eq!(f.repo.log(&q).unwrap().len(), 1);
     q.fixed_strings = true;
     q.grep = Some("feat.".into());

@@ -286,10 +286,6 @@ pub fn list_all() -> Vec<(String, String)> {
     v
 }
 
-pub fn forge_token(host: &str) -> Option<String> {
-    get(&format!("{PREFIX_FORGE}{host}")).ok().flatten().map(|c| c.secret).filter(|s| !s.is_empty())
-}
-
 pub fn set_forge_token(host: &str, user: &str, token: &str) -> Result<()> {
     store(&format!("{PREFIX_FORGE}{host}"), user, token)
 }
