@@ -75,6 +75,18 @@ pub struct Tag {
     pub tagger: String,
 }
 
+impl Branch {
+    /// How to name this branch as a revision. Git reads a bare name as a tag first, so with a
+    /// tag of the same name around the short name would mean that tag: merging the branch
+    /// would merge the tag's older commit. Then, and only then, the full name is used.
+    pub fn rev_among(&self, tags: &[Tag]) -> String {
+        if self.name.starts_with("refs/") || !tags.iter().any(|t| t.name == self.name) {
+            return self.name.clone();
+        }
+        format!("{}{}", if self.is_remote { "refs/remotes/" } else { "refs/heads/" }, self.name)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Remote {
     pub name: String,
@@ -236,6 +248,9 @@ pub struct RepoStatus {
     /// The operation is waiting on the user and ordinary commits are part of it, as at a
     /// rebase edit step. Conflicts still come first.
     pub op_allows_commits: bool,
+    /// A squash merge is staged and waiting for its commit. Git keeps no other mark of it,
+    /// and `op` stays `None`.
+    pub squash_pending: bool,
 }
 
 impl RepoStatus {
@@ -373,6 +388,8 @@ pub struct SignatureInfo {
 /// Filters for `git log`. Every field maps to a git flag.
 #[derive(Debug, Clone, Default)]
 pub struct LogQuery {
+    /// Every ref, but not HEAD as `all` would add, so a hidden current branch stays hidden.
+    pub all_refs_only: bool,
     pub revs: Vec<String>,
     pub all: bool,
     pub limit: usize,

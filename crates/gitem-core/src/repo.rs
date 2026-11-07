@@ -1,7 +1,6 @@
 //! Read-only repository queries. Mutations live in [`crate::ops`].
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use crate::diff::{FileDiff, parse_unified};
 use crate::model::*;
@@ -17,9 +16,6 @@ pub struct Repo {
     pub common_dir: PathBuf,
     /// What its config can run, and whether that's allowed. See [`crate::trust`].
     pub trust: crate::trust::RepoTrust,
-    /// Remote names as last read by [`Repo::remotes`], shared by clones. Every `log` needs
-    /// them to label its refs, and asking git each time doubled the processes it took.
-    remote_names: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 /// A revision as a command-line argument. Anything starting with a dash would be read as
@@ -126,7 +122,10 @@ impl Repo {
     pub fn open(mut git: GitExe, path: &Path) -> Result<Self> {
         // The caller's may have come from another repository.
         git.neutral = Default::default();
-        let o = git.run(Some(path), &["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"])?;
+        let o = git.run_raw(Some(path), &["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"])?;
+        if !o.ok() {
+            return Err(no_work_tree_message(&git, path, &o.stderr).map_or_else(|| Error::Git(o.stderr.trim().to_string()), Error::Other));
+        }
         let text = o.text();
         let mut lines = text.lines();
         let root = PathBuf::from(lines.next().unwrap_or_default());
@@ -137,12 +136,12 @@ impl Repo {
         if trust.restricted() {
             git.neutral = trust.neutral.clone();
         }
-        Ok(Self { git, root, git_dir, common_dir, trust, remote_names: Arc::default() })
+        Ok(Self { git, root, git_dir, common_dir, trust })
     }
 
     /// For commands that need no repository, such as `diff --no-index` outside any.
     pub fn outside_any(git: GitExe, root: PathBuf, git_dir: PathBuf) -> Self {
-        Self { git, root, common_dir: git_dir.clone(), git_dir, trust: Default::default(), remote_names: Arc::default() }
+        Self { git, root, common_dir: git_dir.clone(), git_dir, trust: Default::default() }
     }
 
     /// The user has answered. The answer is kept, so it isn't asked again until the list changes.
@@ -198,6 +197,26 @@ impl Repo {
         self.git.run_opts(Some(&self.root), args, &opts, &mut |_| {})
     }
 
+    /// `log --numstat` and the like, which nobody clicked on and which read every file's
+    /// contents. In a partial clone each missing one would be downloaded, one by one and
+    /// perhaps asking for a password, so here git fails instead. What it had printed by then
+    /// is still good. If that's nothing at all, the same log without the line counts is
+    /// what there is to show.
+    fn run_stats(&self, args: &[String]) -> Result<GitOutput> {
+        let env = vec![("GIT_LITERAL_PATHSPECS".to_string(), "1".to_string()), ("GIT_NO_LAZY_FETCH".to_string(), "1".to_string())];
+        let opts = RunOpts { env, ..Default::default() };
+        let o = self.git.run_opts(Some(&self.root), args, &opts, &mut |_| {})?;
+        if o.ok() || !o.stdout.is_empty() || !args.iter().any(|a| a == "--numstat") || !self.is_partial_clone() {
+            return Ok(o);
+        }
+        let plain: Vec<String> = args.iter().filter(|a| *a != "--numstat").cloned().collect();
+        self.git.run_opts(Some(&self.root), &plain, &opts, &mut |_| {})
+    }
+
+    fn is_partial_clone(&self) -> bool {
+        self.git.run_raw(Some(&self.root), &["config", "--get-regexp", r"^remote\..*\.promisor$"]).is_ok_and(|o| o.ok())
+    }
+
     // ---- status ------------------------------------------------------------
 
     pub fn status(&self) -> Result<RepoStatus> {
@@ -207,6 +226,7 @@ impl Repo {
             st.head_sha.clear();
         }
         self.fill_op(&mut st);
+        st.squash_pending = st.op == RepoOp::None && self.git_dir.join("SQUASH_MSG").exists();
         Ok(st)
     }
 
@@ -273,17 +293,16 @@ impl Repo {
         Ok(out.split('\0').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect())
     }
 
-    /// Message git prepared for the in-progress merge/revert/cherry-pick.
+    /// Message git prepared for the in-progress merge/revert/cherry-pick, or for a squash
+    /// merge, which keeps its own file and leaves no other sign.
     pub fn prepared_message(&self) -> Option<String> {
-        std::fs::read_to_string(self.git_dir.join("MERGE_MSG")).ok().map(|s| {
-            s.lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n").trim_end().to_string()
-        })
+        ["MERGE_MSG", "SQUASH_MSG"].iter().find_map(|f| std::fs::read_to_string(self.git_dir.join(f)).ok()).map(|s| without_conflict_notes(&s))
     }
 
     // ---- log ---------------------------------------------------------------
 
     pub fn log(&self, q: &LogQuery) -> Result<Vec<Commit>> {
-        let mut a: Vec<String> = vec!["log".into(), parse::LOG_FORMAT.into(), "--decorate=short".into()];
+        let mut a: Vec<String> = vec!["log".into(), "-z".into(), parse::LOG_FORMAT.into(), "--decorate=full".into()];
         if q.limit > 0 {
             a.push(format!("--max-count={}", q.limit));
         }
@@ -298,6 +317,9 @@ impl Repo {
         }
         if q.all {
             a.push("--all".into());
+        }
+        if q.all_refs_only {
+            a.push("--glob=refs/*".into());
         }
         if q.first_parent {
             a.push("--first-parent".into());
@@ -360,23 +382,49 @@ impl Repo {
         for r in &q.revs {
             a.push(rev_arg(r)?.to_string());
         }
-        if !q.paths.is_empty() && q.line_range.is_none() {
-            a.push("--".into());
+        // Always, or a branch named like a file or folder beside it is "ambiguous".
+        a.push("--".into());
+        if q.line_range.is_none() {
             a.extend(q.paths.iter().cloned());
         }
         let o = if q.literal_paths { self.run_literal(&a)? } else { self.run_raw_v(&a)? };
         if !o.ok() {
             // An unborn branch simply has no commits yet.
-            let unborn_head = q.revs.iter().any(|r| r == "HEAD") && o.stderr.contains("unknown revision");
-            if unborn_head || o.stderr.contains("does not have any commits") || o.stderr.contains("bad default revision") {
+            if q.revs.iter().any(|r| r == "HEAD") && has_no_commits(&o.stderr) || o.stderr.contains("does not have any commits") || o.stderr.contains("bad default revision") {
                 return Ok(Vec::new());
             }
             return Err(Error::Git(o.stderr.trim().to_string()));
         }
-        let mut commits = parse::parse_log(&o.text());
-        let remotes = self.remote_names();
-        parse::mark_remote_refs(&mut commits, &remotes);
-        Ok(commits)
+        Ok(parse::parse_log(&o.text()))
+    }
+
+    /// For every merge this query would walk, its first parent. `--no-merges` leaves them out
+    /// of the list while their children still name them, which is what lets the graph draw
+    /// each child down to a commit that's really there.
+    pub fn merge_first_parents(&self, q: &LogQuery) -> Result<HashMap<String, String>> {
+        let mut a: Vec<String> = vec!["rev-list".into(), "--merges".into(), "--parents".into()];
+        if q.exclude_stash {
+            a.push("--exclude=refs/stash".into());
+        }
+        a.extend(q.excludes.iter().map(|x| format!("--exclude={x}")));
+        if q.all {
+            a.push("--all".into());
+        }
+        if q.all_refs_only {
+            a.push("--glob=refs/*".into());
+        }
+        if q.first_parent {
+            a.push("--first-parent".into());
+        }
+        for r in &q.revs {
+            a.push(rev_arg(r)?.to_string());
+        }
+        a.push("--".into());
+        let text = self.run_v(&a)?.text();
+        Ok(text.lines().filter_map(|l| {
+            let mut f = l.split_whitespace();
+            Some((f.next()?.to_string(), f.next()?.to_string()))
+        }).collect())
     }
 
     pub fn commit(&self, rev: &str) -> Result<Commit> {
@@ -384,15 +432,8 @@ impl Repo {
         self.log(&q)?.into_iter().next().ok_or_else(|| Error::Git(format!("no such commit: {rev}")))
     }
 
-    fn remote_names(&self) -> Vec<String> {
-        if let Some(known) = self.remote_names.lock().ok().and_then(|n| n.clone()) {
-            return known;
-        }
-        self.run(&["remote"]).map(|o| o.text().lines().map(String::from).collect()).unwrap_or_default()
-    }
-
     pub fn signature(&self, rev: &str) -> Result<SignatureInfo> {
-        let o = self.run(&["log", "-1", "--format=%G?%x00%GS%x00%GK", rev_arg(rev)?])?;
+        let o = self.run(&["log", "-1", "--format=%G?%x00%GS%x00%GK", rev_arg(rev)?, "--"])?;
         let t = o.text();
         let f: Vec<&str> = t.trim_end().split('\0').collect();
         Ok(SignatureInfo {
@@ -420,7 +461,12 @@ impl Repo {
     }
 
     pub fn resolve(&self, rev: &str) -> Result<String> {
-        Ok(self.run(&["rev-parse", "--verify", "--quiet", &format!("{}^{{commit}}", rev_arg(rev)?)])?.text().trim().to_string())
+        // Quiet, so git gives no reason of its own.
+        let o = self.git.run_raw(Some(&self.root), &["rev-parse", "--verify", "--quiet", &format!("{}^{{commit}}", rev_arg(rev)?)])?;
+        if !o.ok() {
+            return Err(Error::Git(if rev == "HEAD" { "This branch has no commits yet.".to_string() } else { format!("There's no commit called \"{rev}\".") }));
+        }
+        Ok(o.text().trim().to_string())
     }
 
     pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
@@ -429,7 +475,7 @@ impl Repo {
 
     /// (a-only, b-only) commit counts.
     pub fn ahead_behind(&self, a: &str, b: &str) -> Result<(u32, u32)> {
-        let o = self.run(&["rev-list", "--left-right", "--count", &format!("{}...{}", rev_arg(a)?, rev_arg(b)?)])?.text();
+        let o = self.run(&["rev-list", "--left-right", "--count", &format!("{}...{}", rev_arg(a)?, rev_arg(b)?), "--"])?.text();
         let mut p = o.split_whitespace().map(|x| x.parse().unwrap_or(0));
         Ok((p.next().unwrap_or(0), p.next().unwrap_or(0)))
     }
@@ -447,11 +493,7 @@ impl Repo {
     }
 
     pub fn remotes(&self) -> Result<Vec<Remote>> {
-        let remotes = parse::parse_remotes(&self.run(&["remote", "-v"])?.text());
-        if let Ok(mut names) = self.remote_names.lock() {
-            *names = Some(remotes.iter().map(|r| r.name.clone()).collect());
-        }
-        Ok(remotes)
+        Ok(parse::parse_remotes(&self.run(&["remote", "-v"])?.text()))
     }
 
     pub fn stashes(&self) -> Result<Vec<Stash>> {
@@ -472,10 +514,8 @@ impl Repo {
         if !self.root.join(".gitmodules").exists() {
             return Ok(Vec::new());
         }
-        let o = self.git.run_raw(Some(&self.root), &["submodule", "status"])?;
-        if !o.ok() {
-            return Ok(Vec::new());
-        }
+        // A broken `.gitmodules` would otherwise look like having no submodules at all.
+        let o = self.run(&["submodule", "status"])?;
         let mut subs = parse::parse_submodules(&o.text());
         if !subs.is_empty() {
             let cfg = self.git.run_raw(Some(&self.root), &["config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.(url|path)$"])?;
@@ -500,9 +540,12 @@ impl Repo {
     }
 
     pub fn reflog(&self, rev: &str, limit: usize) -> Result<Vec<ReflogEntry>> {
-        let o = self.git.run_raw(Some(&self.root), &["reflog", "show", parse::REFLOG_FORMAT, &format!("--max-count={limit}"), rev_arg(rev)?])?;
+        let o = self.git.run_raw(Some(&self.root), &["reflog", "show", parse::REFLOG_FORMAT, &format!("--max-count={limit}"), rev_arg(rev)?, "--"])?;
         if !o.ok() {
-            return Ok(Vec::new());
+            if has_no_commits(&o.stderr) {
+                return Ok(Vec::new());
+            }
+            return Err(Error::Git(o.stderr.trim().to_string()));
         }
         Ok(parse::parse_reflog(&o.text()))
     }
@@ -533,7 +576,13 @@ impl Repo {
 
     pub fn tracked_files(&self, rev: Option<&str>) -> Result<Vec<String>> {
         let o = match rev {
-            Some(r) => self.run(&["ls-tree", "-r", "--name-only", "-z", rev_arg(r)?])?,
+            Some(r) => {
+                let o = self.git.run_raw(Some(&self.root), &["ls-tree", "-r", "--name-only", "-z", rev_arg(r)?])?;
+                if !o.ok() && has_no_commits(&o.stderr) {
+                    return Ok(Vec::new());
+                }
+                o.into_result()?
+            }
             None => self.run(&["ls-files", "-z", "--cached", "--deduplicate"])?,
         };
         Ok(o.text().split('\0').filter(|s| !s.is_empty()).map(String::from).collect())
@@ -542,70 +591,82 @@ impl Repo {
     pub fn commit_files(&self, sha: &str) -> Result<Vec<FileChange>> {
         let sha = rev_arg(sha)?;
         // One command for both, since each would detect renames all over again.
-        let o = self.run(&["show", "--format=", "-M", "-m", "--first-parent", "--raw", "--numstat", "-z", sha])?;
+        let o = self.run(&["show", "--format=", "-M", "-m", "--first-parent", "--raw", "--numstat", "-z", sha, "--"])?;
         Ok(parse::parse_raw_numstat(&o.text()))
     }
 
     pub fn compare_files(&self, a: &str, b: &str, three_dot: bool) -> Result<Vec<FileChange>> {
         let (a, b) = (rev_arg(a)?, rev_arg(b)?);
         let spec = if three_dot { format!("{a}...{b}") } else { format!("{a}..{b}") };
-        let ns = self.run(&["diff", "-M", "--name-status", "-z", &spec])?;
+        let ns = self.run(&["diff", "-M", "--name-status", "-z", &spec, "--"])?;
         let mut files = parse::parse_name_status(&ns.text());
-        let st = self.run(&["diff", "-M", "--numstat", "-z", &spec])?;
+        let st = self.run(&["diff", "-M", "--numstat", "-z", &spec, "--"])?;
         merge_numstat(&mut files, &st.text());
         Ok(files)
     }
 
     pub fn diff(&self, src: &DiffSource, path: Option<&str>, opts: &DiffOpts) -> Result<Vec<FileDiff>> {
         check_source_revs(src)?;
+        let files = self.diff_paths(src, path.map(|p| vec![p]).unwrap_or_default(), opts)?;
+        // Asked about one file, git can't see where a renamed one came from, and says it's
+        // new with every line added. A new file is rare enough to ask about the whole change.
+        if let (Some(p), [f]) = (path, files.as_slice())
+            && f.is_new
+            && let Some(old) = self.rename_source(src, p)
+        {
+            return self.diff_paths(src, vec![p, &old], opts);
+        }
+        Ok(files)
+    }
+
+    fn diff_paths(&self, src: &DiffSource, paths: Vec<&str>, opts: &DiffOpts) -> Result<Vec<FileDiff>> {
         let mut a: Vec<String> = Vec::new();
-        let add_path = |a: &mut Vec<String>| {
-            if let Some(p) = path {
-                a.push("--".into());
-                a.push(p.to_string());
-            }
+        let finish = |a: &mut Vec<String>| {
+            // Even with no path: a branch named like a file is "ambiguous" otherwise.
+            a.push("--".into());
+            a.extend(paths.iter().map(|p| p.to_string()));
         };
         match src {
             DiffSource::Unstaged => {
                 a.push("diff".into());
                 a.extend(opts.args());
-                add_path(&mut a);
+                finish(&mut a);
             }
             DiffSource::Staged => {
                 a.push("diff".into());
                 a.push("--cached".into());
                 a.extend(opts.args());
-                add_path(&mut a);
+                finish(&mut a);
             }
             DiffSource::WorkingVsHead => {
                 a.push("diff".into());
                 a.extend(opts.args());
-                a.push("HEAD".into());
-                add_path(&mut a);
+                a.push(self.head_or_empty_tree());
+                finish(&mut a);
             }
             DiffSource::Commit(sha) => {
                 a.extend(["show".to_string(), "--format=".into(), "-m".into(), "--first-parent".into()]);
                 a.extend(opts.args());
                 a.push(sha.clone());
-                add_path(&mut a);
+                finish(&mut a);
             }
             DiffSource::Range(x, y) => {
                 a.push("diff".into());
                 a.extend(opts.args());
                 a.push(format!("{x}..{y}"));
-                add_path(&mut a);
+                finish(&mut a);
             }
             DiffSource::MergeBase(x, y) => {
                 a.push("diff".into());
                 a.extend(opts.args());
                 a.push(format!("{x}...{y}"));
-                add_path(&mut a);
+                finish(&mut a);
             }
             DiffSource::WorkingVs(r) => {
                 a.push("diff".into());
                 a.extend(opts.args());
                 a.push(r.clone());
-                add_path(&mut a);
+                finish(&mut a);
             }
             DiffSource::Untracked => {
                 a.push("diff".into());
@@ -613,7 +674,7 @@ impl Repo {
                 a.extend(opts.args());
                 a.push("--".into());
                 a.push("/dev/null".into());
-                a.push(path.unwrap_or_default().to_string());
+                a.push(paths.first().copied().unwrap_or_default().to_string());
             }
             DiffSource::Files(x, y) => {
                 a.push("diff".into());
@@ -632,20 +693,52 @@ impl Repo {
         Ok(parse_unified(&o.text()))
     }
 
+    /// The file `path` was renamed from in this change, if it was.
+    fn rename_source(&self, src: &DiffSource, path: &str) -> Option<String> {
+        let mut a: Vec<String> = match src {
+            DiffSource::Staged => vec!["diff".into(), "--cached".into()],
+            DiffSource::WorkingVsHead => vec!["diff".into(), self.head_or_empty_tree()],
+            DiffSource::Commit(s) => vec!["show".into(), "--format=".into(), "-m".into(), "--first-parent".into(), s.clone()],
+            DiffSource::Range(x, y) => vec!["diff".into(), format!("{x}..{y}")],
+            DiffSource::MergeBase(x, y) => vec!["diff".into(), format!("{x}...{y}")],
+            DiffSource::WorkingVs(r) => vec!["diff".into(), r.clone()],
+            DiffSource::Unstaged | DiffSource::Untracked | DiffSource::Files(..) => return None,
+        };
+        a.extend(["-M".into(), "--name-status".into(), "-z".into(), "--".into()]);
+        let o = self.run_raw_v(&a).ok()?;
+        parse::parse_name_status(&o.text()).into_iter().find(|f| f.path == path).and_then(|f| f.orig_path)
+    }
+
+    /// What "the last commit" is to compare with, also on a branch that doesn't have one yet.
+    fn head_or_empty_tree(&self) -> String {
+        if self.git.run_raw(Some(&self.root), &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok_and(|o| o.ok()) {
+            return "HEAD".to_string();
+        }
+        // Worked out, not written down: it differs between SHA-1 and SHA-256 repositories.
+        let opts = RunOpts { stdin: Some(Vec::new()), ..Default::default() };
+        let args = ["hash-object", "-t", "tree", "--stdin"].map(String::from);
+        self.git.run_opts(Some(&self.root), &args, &opts, &mut |_| {}).map(|o| o.text().trim().to_string()).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "HEAD".to_string())
+    }
+
     /// Full textual diff, used for AI prompts and patch export.
     pub fn diff_text(&self, src: &DiffSource) -> Result<String> {
         check_source_revs(src)?;
         let opts = DiffOpts::default();
-        let args: Vec<String> = match src {
+        // `color.ui` set by the runner doesn't reach `color.diff`, and a colour code or an
+        // external tool's output is no use to anything reading this.
+        let flags = ["--no-color".to_string(), "--no-ext-diff".to_string()];
+        let mut args: Vec<String> = match src {
             DiffSource::Staged => vec!["diff".into(), "--cached".into(), format!("-U{}", opts.context)],
             DiffSource::Unstaged => vec!["diff".into(), format!("-U{}", opts.context)],
-            DiffSource::WorkingVsHead => vec!["diff".into(), "HEAD".into()],
+            DiffSource::WorkingVsHead => vec!["diff".into(), self.head_or_empty_tree()],
             DiffSource::Commit(s) => vec!["show".into(), "--format=".into(), "-m".into(), "--first-parent".into(), s.clone()],
             DiffSource::Range(a, b) => vec!["diff".into(), format!("{a}..{b}")],
             DiffSource::MergeBase(a, b) => vec!["diff".into(), format!("{a}...{b}")],
             DiffSource::WorkingVs(r) => vec!["diff".into(), r.clone()],
             _ => return Err(Error::Other("unsupported diff source".into())),
         };
+        args.extend(flags);
+        args.push("--".into());
         Ok(self.run_v(&args)?.text())
     }
 
@@ -655,22 +748,20 @@ impl Repo {
     pub fn patch_bytes(&self, src: &DiffSource) -> Result<Vec<u8>> {
         check_source_revs(src)?;
         // A converted text is no use as a patch, and it would run a program besides.
-        let flags = ["--binary".to_string(), "--full-index".to_string(), "--no-textconv".to_string(), "--no-ext-diff".to_string()];
+        let flags = ["--binary", "--full-index", "--no-textconv", "--no-ext-diff", "--no-color"].map(String::from);
         let mut args: Vec<String> = match src {
             DiffSource::Staged => vec!["diff".into(), "--cached".into()],
             DiffSource::Unstaged => vec!["diff".into()],
-            DiffSource::WorkingVsHead => vec!["diff".into()],
-            DiffSource::Commit(s) => vec!["show".into(), "--format=".into(), "-m".into(), "--first-parent".into()].into_iter().chain(flags.iter().cloned()).chain([s.clone()]).collect(),
+            DiffSource::WorkingVsHead => vec!["diff".into(), self.head_or_empty_tree()],
+            DiffSource::Commit(s) => vec!["show".into(), "--format=".into(), "-m".into(), "--first-parent".into(), s.clone()],
             DiffSource::Range(a, b) => vec!["diff".into(), format!("{a}..{b}")],
             DiffSource::MergeBase(a, b) => vec!["diff".into(), format!("{a}...{b}")],
             DiffSource::WorkingVs(r) => vec!["diff".into(), r.clone()],
             _ => return Err(Error::Other("unsupported diff source".into())),
         };
-        if !matches!(src, DiffSource::Commit(_)) {
-            args.extend(flags);
-        }
+        args.extend(flags);
+        args.push("--".into());
         if *src == DiffSource::WorkingVsHead {
-            args.push("HEAD".into());
             return self.diff_with_untracked(&args);
         }
         Ok(self.run_v(&args)?.stdout)
@@ -738,16 +829,20 @@ impl Repo {
     /// All commits touching a path, following renames, with line stats.
     pub fn file_history_points(&self, path: &str, limit: usize) -> Result<Vec<FileHistoryPoint>> {
         let o = self
-            .run_literal(&[
+            .run_stats(&[
                 "log".into(),
+                "-z".into(),
                 parse::STAT_LOG_FORMAT.into(),
                 "--numstat".into(),
                 "--follow".into(),
                 format!("--max-count={limit}"),
                 "--".into(),
                 path.to_string(),
-            ])?
-            .into_result()?;
+            ])?;
+        // Output means a partial clone's missing file cut it short: this much is true.
+        if !o.ok() && o.stdout.is_empty() {
+            return Err(Error::Git(o.stderr.trim().to_string()));
+        }
         Ok(parse::parse_stat_log(&o.text())
             .into_iter()
             .map(|c| FileHistoryPoint {
@@ -766,12 +861,19 @@ impl Repo {
     /// Commits touching a folder, a whole branch, or everything, for Visual
     /// History. Renames are only followed for single files.
     pub fn history_points(&self, path: Option<&str>, rev: &str, limit: usize) -> Result<Vec<FileHistoryPoint>> {
-        let mut a: Vec<String> = vec!["log".into(), parse::STAT_LOG_FORMAT.into(), "--numstat".into(), format!("--max-count={limit}"), rev_arg(rev)?.to_string()];
+        let mut a: Vec<String> = vec!["log".into(), "-z".into(), parse::STAT_LOG_FORMAT.into(), "--numstat".into(), format!("--max-count={limit}"), rev_arg(rev)?.to_string(), "--".into()];
         if let Some(p) = path {
-            a.push("--".into());
             a.push(p.to_string());
         }
-        let o = self.run_literal(&a)?.into_result()?;
+        let o = self.run_stats(&a)?;
+        if !o.ok() {
+            if rev == "HEAD" && has_no_commits(&o.stderr) {
+                return Ok(Vec::new());
+            }
+            if o.stdout.is_empty() {
+                return Err(Error::Git(o.stderr.trim().to_string()));
+            }
+        }
         Ok(parse::parse_stat_log(&o.text())
             .into_iter()
             .map(|c| FileHistoryPoint { sha: c.sha, author: c.author, email: c.email, time: c.time, subject: c.subject, additions: c.additions, deletions: c.deletions, path: c.path.unwrap_or_default() })
@@ -787,32 +889,41 @@ impl Repo {
         for r in revs {
             a.push(rev_arg(r)?.to_string());
         }
-        let o = self.run_raw_v(&a)?;
+        a.push("--".into());
+        // Commits past a failure simply have no figures, as with a partial clone's missing files.
+        let o = self.run_stats(&a)?;
         Ok(parse::parse_commit_stats(&o.text()))
     }
 
     /// Files that would conflict if `a` and `b` merged, found without touching
     /// the working tree. Only adds unreferenced objects, which `gc` removes.
     pub fn predict_conflicts(&self, a: &str, b: &str) -> Result<Vec<String>> {
-        let o = self.git.run_raw(Some(&self.root), &["merge-tree", "--write-tree", "--name-only", "--no-messages", rev_arg(a)?, rev_arg(b)?])?;
+        let o = self.git.run_raw(Some(&self.root), &["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", rev_arg(a)?, rev_arg(b)?])?;
         match o.code {
             0 => Ok(Vec::new()),
-            1 => Ok(o.text().lines().skip(1).filter(|l| !l.is_empty()).map(String::from).collect()),
+            1 => Ok(o.text().split('\0').skip(1).filter(|l| !l.is_empty()).map(String::from).collect()),
             _ => Err(Error::Git(o.stderr.trim().to_string())),
         }
     }
 
     /// (path, size in bytes) of every file at `rev`.
     pub fn file_sizes(&self, rev: &str) -> Result<Vec<(String, u64)>> {
-        let o = self.run(&["ls-tree", "-r", "-l", "-z", rev_arg(rev)?])?;
-        Ok(parse::parse_ls_tree_sizes(&o.text()))
+        let o = self.git.run_raw(Some(&self.root), &["ls-tree", "-r", "-l", "-z", rev_arg(rev)?])?;
+        if !o.ok() && rev == "HEAD" && has_no_commits(&o.stderr) {
+            return Ok(Vec::new());
+        }
+        Ok(parse::parse_ls_tree_sizes(&o.into_result()?.text()))
     }
 
     /// (path, commits touching it) over recent history.
     pub fn file_activity(&self, rev: &str, limit: usize) -> Result<Vec<(String, u64)>> {
-        let o = self.run(&["log", "--format=", "--name-only", &format!("--max-count={limit}"), rev_arg(rev)?])?;
+        let o = self.git.run_raw(Some(&self.root), &["log", "-z", "--format=", "--name-only", &format!("--max-count={limit}"), rev_arg(rev)?, "--"])?;
+        if !o.ok() && rev == "HEAD" && has_no_commits(&o.stderr) {
+            return Ok(Vec::new());
+        }
+        let text = o.into_result()?.text();
         let mut m: HashMap<String, u64> = HashMap::new();
-        for l in o.text().lines().filter(|l| !l.is_empty()) {
+        for l in text.split('\0').map(|l| l.trim_start_matches('\n')).filter(|l| !l.is_empty()) {
             *m.entry(l.to_string()).or_default() += 1;
         }
         Ok(m.into_iter().collect())
@@ -858,13 +969,16 @@ impl Repo {
     }
 
     pub fn contributors(&self, rev: &str, with_stats: bool) -> Result<Vec<Contributor>> {
-        let mut a: Vec<String> = vec!["log".into(), parse::STAT_LOG_FORMAT.into(), rev_arg(rev)?.to_string()];
+        let mut a: Vec<String> = vec!["log".into(), "-z".into(), parse::STAT_LOG_FORMAT.into(), rev_arg(rev)?.to_string(), "--".into()];
         if with_stats {
-            a.push("--numstat".into());
+            a.insert(3, "--numstat".into());
         }
-        let raw = self.run_raw_v(&a)?;
-        if !raw.ok() {
-            return Ok(Vec::new());
+        let raw = self.run_stats(&a)?;
+        if !raw.ok() && raw.stdout.is_empty() {
+            if has_no_commits(&raw.stderr) {
+                return Ok(Vec::new());
+            }
+            return Err(Error::Git(raw.stderr.trim().to_string()));
         }
         let me = self.config_get("user.email").unwrap_or_default().to_lowercase();
         let mut map: HashMap<String, Contributor> = HashMap::new();
@@ -895,7 +1009,14 @@ impl Repo {
         if let Some(x) = author {
             a.push(format!("--author={x}"));
         }
+        a.push("--".into());
         let o = self.run_raw_v(&a)?;
+        if !o.ok() {
+            if has_no_commits(&o.stderr) {
+                return Ok(Vec::new());
+            }
+            return Err(Error::Git(o.stderr.trim().to_string()));
+        }
         Ok(o.text().lines().filter_map(|l| l.trim().parse().ok()).collect())
     }
 
@@ -936,7 +1057,11 @@ impl Repo {
             "sendemail-validate",
             "fsmonitor-watchman",
         ];
-        let dir = self.config_get("core.hooksPath").map(|p| self.root.join(p)).unwrap_or_else(|| self.common_dir.join("hooks"));
+        // As a path, so `~/` means what it means to git. Hooks run at the top of the working
+        // tree, so a relative one starts there. `rev-parse --git-path` would say the same,
+        // were it not that reads turn hooks off.
+        let hooks_path = self.git.run_raw(Some(&self.root), &["config", "--type=path", "--get", "core.hooksPath"]).ok().filter(|o| o.ok()).map(|o| o.text().trim().to_string());
+        let dir = hooks_path.map(|p| self.root.join(p)).unwrap_or_else(|| self.common_dir.join("hooks"));
         NAMES
             .iter()
             .map(|n| {
@@ -1012,7 +1137,13 @@ impl Repo {
             a.push("-x");
         }
         let o = self.run(&a)?;
-        Ok(o.text().lines().filter_map(|l| l.strip_prefix("Would remove ").map(String::from)).collect())
+        Ok(o.text().lines().filter_map(|l| l.strip_prefix("Would remove ").map(crate::diff::unquote_path)).collect())
+    }
+
+    /// Whether an untracked path is a repository of its own, which `git clean` leaves alone
+    /// without saying so and a diff can't look into.
+    pub fn is_nested_repo(&self, path: &str) -> bool {
+        self.root.join(path).join(".git").exists()
     }
 
     pub fn count_objects(&self) -> Result<String> {
@@ -1047,14 +1178,14 @@ impl Repo {
     /// there, since it may have been renamed.
     pub fn prev_revision(&self, path: &str, sha: &str) -> Option<(String, String)> {
         let full = self.resolve(sha).ok()?;
-        let args: Vec<String> = ["log", "--follow", "--format=%x01%H", "--name-only", "--max-count=3", &full, "--", path].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["log", "-z", "--follow", "--format=%x01%H", "--name-only", "--max-count=3", &full, "--", path].iter().map(|s| s.to_string()).collect();
         let o = self.run_literal(&args).ok()?;
         let text = o.text();
         let mut records = text.split('\x01').filter(|r| !r.trim().is_empty());
         records.find_map(|r| {
-            let mut lines = r.lines().filter(|l| !l.trim().is_empty());
-            let found = lines.next()?.trim();
-            let name = lines.next()?.trim();
+            let mut fields = r.split('\0').map(|l| l.trim_start_matches('\n')).filter(|l| !l.is_empty());
+            let found = fields.next()?;
+            let name = fields.next()?;
             (found != full).then(|| (found.to_string(), name.to_string()))
         })
     }
@@ -1083,9 +1214,12 @@ impl Repo {
 
     /// What `log` costs for a list of people, for those who don't need dates or line counts.
     pub fn people(&self, rev: &str) -> Result<Vec<Contributor>> {
-        let raw = self.git.run_raw(Some(&self.root), &["shortlog", "-sne", rev_arg(rev)?])?;
+        let raw = self.git.run_raw(Some(&self.root), &["shortlog", "-sne", rev_arg(rev)?, "--"])?;
         if !raw.ok() {
-            return Ok(Vec::new());
+            if has_no_commits(&raw.stderr) {
+                return Ok(Vec::new());
+            }
+            return Err(Error::Git(raw.stderr.trim().to_string()));
         }
         let me = self.config_get("user.email").unwrap_or_default().to_lowercase();
         let mut map: HashMap<String, Contributor> = HashMap::new();
@@ -1103,6 +1237,47 @@ impl Repo {
         let (Ok(a), Ok(b)) = (rev_arg(a), rev_arg(b)) else { return false };
         self.git.run_raw(Some(&self.root), &["merge-base", "--is-ancestor", a, b]).map(|o| o.ok()).unwrap_or(false)
     }
+}
+
+/// Whether a command failed because the revision it was given can't exist yet, on a
+/// branch with no commits. An ordinary state, and not worth a raw `fatal:`.
+fn has_no_commits(stderr: &str) -> bool {
+    ["does not have any commits", "bad default revision", "bad revision 'HEAD'", "unknown revision", "Not a valid object name HEAD", "ambiguous argument 'HEAD'"].iter().any(|m| stderr.contains(m))
+}
+
+/// A prepared message without git's note on what conflicted, the last thing in the file. Only
+/// that goes: a line starting with `#` can be the subject, as in "#123 fix login". The note
+/// starts with whatever `core.commentChar` is, which a `# Conflicts:` check would miss, and
+/// that kept in the message. The lines after it are each a comment too, which the check
+/// here uses so that a word in the message itself can't be taken for it.
+fn without_conflict_notes(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let note = lines.iter().rposition(|l| l.strip_suffix(" Conflicts:").is_some_and(|c| !c.is_empty() && !c.contains(char::is_alphanumeric)));
+    let kept = match note {
+        Some(at) => {
+            let mark = lines[at].strip_suffix(" Conflicts:").unwrap_or_default();
+            if lines[at + 1..].iter().all(|l| l.starts_with(mark)) { &lines[..at] } else { &lines[..] }
+        }
+        None => &lines[..],
+    };
+    kept.join("\n").trim_end().to_string()
+}
+
+/// What to say when a folder holds a repository but no working tree to show. `None` if
+/// that's not why git refused.
+fn no_work_tree_message(git: &GitExe, path: &Path, stderr: &str) -> Option<String> {
+    if !stderr.contains("must be run in a work tree") && !stderr.contains("cannot use bare repository") {
+        return None;
+    }
+    if path.file_name().is_some_and(|n| n == ".git") {
+        return Some(format!("{} is the .git folder inside a repository. Open the folder above it instead.", path.display()));
+    }
+    // Named outright, which is allowed where a bare repository found by looking isn't.
+    let dir = format!("--git-dir={}", path.display());
+    let trees = git.run_raw(Some(path), &[&dir, "worktree", "list", "--porcelain"]).ok().filter(|o| o.ok()).map(|o| parse::parse_worktrees(&o.text(), "")).unwrap_or_default();
+    let trees: Vec<String> = trees.into_iter().filter(|w| !w.bare).map(|w| w.path).collect();
+    let advice = if trees.is_empty() { "It has no linked worktree yet. Clone it, or add a worktree from a terminal, to work with its files.".to_string() } else { format!("Open one of its worktrees instead:\n{}", trees.join("\n")) };
+    Some(format!("{} is a bare repository: it holds history but no working files for gitem to show. {advice}", path.display()))
 }
 
 /// Each side of a range counts, because the left one is what starts the argument.

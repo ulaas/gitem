@@ -177,7 +177,7 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
     if !b.is_current {
         if b.is_remote {
             if item(ui, "Check out as local branch") {
-                cx.run(ops::checkout_remote(&name));
+                cx.run(ops::checkout_remote(&name, &cx.data.remote_names()));
             }
         } else if item(ui, "Switch to") {
             cx.run(ops::checkout(&name));
@@ -316,14 +316,14 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             cx.form(forms::push_form(Some(name.clone()), remotes, b.upstream.is_some(), cx.settings.confirm_destructive));
         }
     } else if item(ui, "Delete on remote…") {
-        cx.confirm("Delete remote branch", &format!("Delete {name} on the remote? This affects everyone using it."), "Delete on remote", ops::branch_delete_remote(&name));
+        cx.confirm("Delete remote branch", &format!("Delete {name} on the remote? This affects everyone using it."), "Delete on remote", ops::branch_delete_remote(&name, &cx.data.remote_names()));
     }
     ui.separator();
     if item(ui, "Copy name") {
         cx.copy(name.clone());
     }
     if let Some(f) = cx.forge() {
-        let short = if b.is_remote { name.split_once('/').map(|x| x.1).unwrap_or(&name).to_string() } else { name.clone() };
+        let short = if b.is_remote { gitem_core::parse::split_remote_ref(&name, &cx.data.remote_names()).1.to_string() } else { name.clone() };
         let branch_url = f.branch_url(&short);
         let base = cx.data.base_branch();
         let pr_url = f.new_pr_url(&base, &short);

@@ -702,9 +702,9 @@ mod tests {
 
     #[test]
     fn reset_form_runs_each_mode() {
-        check("opens on mixed, the mode that loses nothing", reset_form(s("abc")), &[], "reset --mixed abc");
+        check("opens on mixed, the mode that loses nothing", reset_form(s("abc")), &[], "reset --mixed abc --");
         for (mode, flag) in [("Mixed: keep file changes, unstage them", "--mixed"), ("Soft: keep file changes and staging", "--soft"), ("Keep: reset, but keep local changes", "--keep"), ("Hard: discard all local changes", "--hard")] {
-            check(mode, reset_form(s("abc")), &[("mode", mode)], &format!("reset {flag} abc"));
+            check(mode, reset_form(s("abc")), &[("mode", mode)], &format!("reset {flag} abc --"));
         }
         assert!(reset_form(s("abc")).danger);
     }
@@ -722,7 +722,7 @@ mod tests {
         relabel(&mut f, &["Hard: A", "Hard: B", "Soft: C", "Soft: D"]);
         for (label, flag) in [("Hard: A", "--mixed"), ("Hard: B", "--soft"), ("Soft: C", "--keep"), ("Soft: D", "--hard")] {
             set(&mut f, "mode", label);
-            assert_eq!(outcome(&submit(&mut f).unwrap()), format!("reset {flag} abc"));
+            assert_eq!(outcome(&submit(&mut f).unwrap()), format!("reset {flag} abc --"));
         }
         let mut f = merge_form(s("x"));
         relabel(&mut f, &["squash", "squash no-ff", "no-commit", "Birle\u{15f}tir", "ff-only"]);
@@ -757,7 +757,7 @@ mod tests {
         check("message", stash_form(vec![]), &[("message", " wip now "), ("untracked", "0")], "stash push -m 'wip now'");
         check("keep index", stash_form(vec![]), &[("keep_index", "1")], "stash push --include-untracked --keep-index");
         check("staged only leaves untracked out", stash_form(vec![]), &[("staged", "1")], "stash push --staged");
-        check("named files", stash_form(sv(&["a b", "c"])), &[("untracked", "0")], "stash push -- 'a b' c");
+        check("named files", stash_form(sv(&["a b", "c"])), &[("untracked", "0")], "stash push -- ':(literal)a b' :(literal)c");
         check("rename", stash_rename(s("stash@{1}"), s("abc"), s("old")), &[("message", "new")], "stash store -m new abc && stash drop stash@{2}");
         check("to a branch", stash_to_branch(s("stash@{0}"), s("abc")), &[("name", "x")], "stash branch x stash@{0}");
     }
@@ -838,7 +838,7 @@ mod tests {
         check("patch, three-way if plain fails", apply_patch_form(), &[("file", "f")], "apply --whitespace=nowarn f && apply --whitespace=nowarn --3way f");
         check("patch", apply_patch_form(), &[("file", "f"), ("three", "0")], "apply --whitespace=nowarn f");
         check("email patch", apply_patch_form(), &[("file", "f"), ("am", "1")], "am --3way f");
-        check("export", format_patch_form(s("a..b")), &[("dir", "/o")], "format-patch -o /o a..b");
+        check("export", format_patch_form(s("a..b")), &[("dir", "/o")], "format-patch -o /o a..b --");
         check("archive, zip by default", archive_form(s("abc")), &[("path", "o.zip")], "archive --format=zip -o o.zip abc");
         check("archive tar.gz", archive_form(s("abc")), &[("path", "o"), ("format", "tar.gz")], "archive --format=tar.gz -o o abc");
         check("note", note_form(s("abc"), s("")), &[("note", "hello")], "notes add -f -F - abc <<< hello");

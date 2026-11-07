@@ -2,20 +2,16 @@
 //! so they can be tested without spawning git.
 use crate::model::*;
 
-/// Field separator inside a record and record terminator for `git log` formats.
-pub const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%D%x00%s%x00%b%x1e";
+/// Fields of a `git log` record, for use with `-z`. Only NUL separates anything: it's the
+/// one byte a commit message or an author's name can't hold, so nothing in a commit can
+/// end its record early or hide it from the graph.
+pub const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%D%x00%s%x00%b";
+const LOG_FIELDS: usize = 11;
 
 pub fn parse_log(out: &str) -> Vec<Commit> {
     let mut v = Vec::new();
-    for rec in out.split('\x1e') {
-        let rec = rec.trim_start_matches(['\n', '\r']);
-        if rec.is_empty() {
-            continue;
-        }
-        let f: Vec<&str> = rec.split('\0').collect();
-        if f.len() < 11 {
-            continue;
-        }
+    let fields: Vec<&str> = out.split('\0').collect();
+    for f in fields.chunks_exact(LOG_FIELDS) {
         v.push(Commit {
             sha: f[0].to_string(),
             parents: f[1].split_whitespace().map(String::from).collect(),
@@ -33,7 +29,6 @@ pub fn parse_log(out: &str) -> Vec<Commit> {
     v
 }
 
-/// Parse `%D`: `HEAD -> main, origin/main, tag: v1, refs/stash`.
 /// `git tag` and `git branch` refuse a name starting with a dash, but `update-ref` and
 /// fetch don't, so a server can deliver one, and it would then be an option wherever it's
 /// used as a revision. These are named in full, like `refs/tags/--output=x`, which is what
@@ -42,36 +37,41 @@ pub fn safe_ref_name(prefix: &str, short: &str) -> String {
     if short.starts_with('-') { format!("{prefix}{short}") } else { short.to_string() }
 }
 
+/// Parse `%D` from `--decorate=full`: `HEAD -> refs/heads/main, refs/remotes/origin/main,
+/// tag: refs/tags/v1, refs/stash`. The full names are what tell a branch `fork/x` from `x` on
+/// a remote called `fork`, and a branch called `grafted` from the mark on a shallow boundary.
 pub fn parse_decoration(d: &str) -> Vec<RefLabel> {
     let mut v = Vec::new();
+    let branch = |part: &str, current: bool| RefLabel { kind: RefKind::Branch, name: safe_ref_name("refs/heads/", part.strip_prefix("refs/heads/").unwrap_or(part)), current };
     for part in d.split(", ").filter(|p| !p.is_empty()) {
         if let Some(b) = part.strip_prefix("HEAD -> ") {
-            v.push(RefLabel { kind: RefKind::Branch, name: safe_ref_name("refs/heads/", b), current: true });
+            v.push(branch(b, true));
         } else if part == "HEAD" {
             v.push(RefLabel { kind: RefKind::Head, name: "HEAD".into(), current: true });
         } else if let Some(t) = part.strip_prefix("tag: ") {
-            v.push(RefLabel { kind: RefKind::Tag, name: safe_ref_name("refs/tags/", t), current: false });
+            v.push(RefLabel { kind: RefKind::Tag, name: safe_ref_name("refs/tags/", t.strip_prefix("refs/tags/").unwrap_or(t)), current: false });
         } else if part == "refs/stash" {
             v.push(RefLabel { kind: RefKind::Stash, name: "stash".into(), current: false });
-        } else if part.contains('/') && !part.starts_with("refs/heads/") {
-            // Slash-named local branches are disambiguated by `mark_remote_refs`.
-            v.push(RefLabel { kind: RefKind::Remote, name: safe_ref_name("refs/remotes/", part), current: false });
-        } else {
-            v.push(RefLabel { kind: RefKind::Branch, name: safe_ref_name("refs/heads/", part), current: false });
+        } else if let Some(r) = part.strip_prefix("refs/remotes/") {
+            v.push(RefLabel { kind: RefKind::Remote, name: safe_ref_name("refs/remotes/", r), current: false });
+        } else if part != "grafted" && part != "replaced" {
+            // Not refs at all, those two: marks git adds for a shallow boundary or a
+            // replaced commit. Anything else is a ref outside the usual places, by its full name.
+            v.push(branch(part, false));
         }
     }
     v
 }
 
-/// `%D` cannot distinguish `feature/x` from `origin/x`. Fix labels using the
-/// known remote names: anything not under `<remote>/` is a local branch.
-pub fn mark_remote_refs(commits: &mut [Commit], remotes: &[String]) {
-    for c in commits {
-        for r in &mut c.refs {
-            if r.kind == RefKind::Remote && !remotes.iter().any(|m| r.name.starts_with(&format!("{m}/"))) {
-                r.kind = RefKind::Branch;
-            }
-        }
+/// Which remote a remote-tracking branch's short name belongs to, and its name there. A
+/// remote can have a slash in its name, so the first slash isn't enough: the longest known
+/// remote that fits wins. With none known, the first slash is the best there is.
+pub fn split_remote_ref<'a>(name: &'a str, remotes: &[String]) -> (&'a str, &'a str) {
+    let name = name.strip_prefix("refs/remotes/").unwrap_or(name);
+    let known = remotes.iter().filter(|r| name.len() > r.len() + 1 && name.starts_with(r.as_str()) && name.as_bytes()[r.len()] == b'/').max_by_key(|r| r.len());
+    match known {
+        Some(r) => (&name[..r.len()], &name[r.len() + 1..]),
+        None => name.split_once('/').unwrap_or(("origin", name)),
     }
 }
 
@@ -126,7 +126,8 @@ pub fn parse_track(t: &str) -> (u32, u32, bool) {
     (num("ahead"), num("behind"), false)
 }
 
-pub const TAG_FORMAT: &str = "--format=%(refname:short)%00%(objectname)%00%(objecttype)%00%(creatordate:unix)%00%(subject)%00%(creator)%00%(*objectname)";
+/// The full name, as `refname:short` says `tags/foo` when a branch `foo` exists too.
+pub const TAG_FORMAT: &str = "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(creatordate:unix)%00%(subject)%00%(creator)%00%(*objectname)";
 
 pub fn parse_tags(out: &str) -> Vec<Tag> {
     let mut v = Vec::new();
@@ -137,7 +138,7 @@ pub fn parse_tags(out: &str) -> Vec<Tag> {
         }
         let annotated = f[2] == "tag";
         v.push(Tag {
-            name: safe_ref_name("refs/tags/", f[0]),
+            name: safe_ref_name("refs/tags/", f[0].strip_prefix("refs/tags/").unwrap_or(f[0])),
             sha: if annotated && !f[6].is_empty() { f[6].to_string() } else { f[1].to_string() },
             annotated,
             date: f[3].parse().unwrap_or(0),
@@ -148,11 +149,13 @@ pub fn parse_tags(out: &str) -> Vec<Tag> {
     v
 }
 
+/// `git remote -v`: `name<tab>url (fetch)`, with a partial clone's `[blob:none]` after that.
+/// A URL can have spaces in it, as a local path often does.
 pub fn parse_remotes(out: &str) -> Vec<Remote> {
     let mut v: Vec<Remote> = Vec::new();
     for line in out.lines() {
-        let mut it = line.split_whitespace();
-        let (Some(name), Some(url), Some(kind)) = (it.next(), it.next(), it.next()) else { continue };
+        let Some((name, rest)) = line.split_once('\t') else { continue };
+        let Some((url, kind)) = rest.rsplit_once(" (fetch)").map(|(u, _)| (u, "fetch")).or_else(|| rest.rsplit_once(" (push)").map(|(u, _)| (u, "push"))) else { continue };
         let idx = match v.iter().position(|r| r.name == name) {
             Some(i) => i,
             None => {
@@ -484,7 +487,7 @@ pub fn parse_config(out: &str) -> Vec<ConfigEntry> {
 }
 
 /// Commit stats stream for file history and contributors:
-/// `git log --format=<sep>%H%x00... --numstat`.
+/// `git log --format=<sep>%H%x00... --numstat -z`.
 pub const STAT_LOG_FORMAT: &str = "--format=\x01%H%x00%an%x00%ae%x00%at%x00%s";
 
 pub struct StatCommit {
@@ -500,24 +503,22 @@ pub struct StatCommit {
 
 pub fn parse_stat_log(out: &str) -> Vec<StatCommit> {
     let mut v: Vec<StatCommit> = Vec::new();
-    for line in out.lines() {
-        if let Some(rec) = line.strip_prefix('\x01') {
-            let f: Vec<&str> = rec.split('\0').collect();
-            if f.len() >= 5 {
-                v.push(StatCommit {
-                    sha: f[0].to_string(),
-                    author: f[1].to_string(),
-                    email: f[2].to_string(),
-                    time: f[3].parse().unwrap_or(0),
-                    subject: f[4].to_string(),
-                    additions: 0,
-                    deletions: 0,
-                    path: None,
-                });
-            }
+    let mut it = out.split('\0');
+    while let Some(tok) = it.next() {
+        if let Some(sha) = tok.strip_prefix('\x01') {
+            let mut field = || it.next().unwrap_or("").to_string();
+            let (author, email, time, subject) = (field(), field(), field(), field());
+            v.push(StatCommit { sha: sha.to_string(), author, email, time: time.parse().unwrap_or(0), subject, additions: 0, deletions: 0, path: None });
         } else if let Some(c) = v.last_mut() {
-            let mut p = line.splitn(3, '\t');
+            let mut p = tok.trim_start_matches('\n').splitn(3, '\t');
             if let (Some(a), Some(d), Some(path)) = (p.next(), p.next(), p.next()) {
+                // A rename gives no name here, and then the old and the new one on their own.
+                let path = if path.is_empty() {
+                    let _old = it.next();
+                    it.next().unwrap_or("")
+                } else {
+                    path
+                };
                 c.additions += a.parse().unwrap_or(0);
                 c.deletions += d.parse().unwrap_or(0);
                 if c.path.is_none() {
@@ -581,7 +582,7 @@ mod tests {
 
     #[test]
     fn log_roundtrip() {
-        let s = "abc\0p1 p2\0Ann\0a@x\0100\0Bob\0b@x\0200\0HEAD -> main, tag: v1, origin/main\0subj\0body line\n\x1e\ndef\0\0A\0a\01\0B\0b\02\0\0s2\0\x1e";
+        let s = "abc\0p1 p2\0Ann\0a@x\0100\0Bob\0b@x\0200\0HEAD -> refs/heads/main, tag: refs/tags/v1, refs/remotes/origin/main\0subj\0body line\n\0def\0\0A\0a\01\0B\0b\02\0\0s2\0\0";
         let c = parse_log(s);
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].parents, vec!["p1", "p2"]);
@@ -594,11 +595,35 @@ mod tests {
     }
 
     #[test]
-    fn slash_branch_not_remote() {
-        let mut c = vec![Commit { refs: parse_decoration("feature/x, origin/main"), ..Default::default() }];
-        mark_remote_refs(&mut c, &["origin".to_string()]);
-        assert_eq!(c[0].refs[0].kind, RefKind::Branch);
-        assert_eq!(c[0].refs[1].kind, RefKind::Remote);
+    fn full_names_say_which_kind_a_ref_is() {
+        let refs = parse_decoration("refs/heads/fork/x, refs/remotes/fork/x, refs/heads/grafted, grafted, replaced");
+        let got: Vec<(RefKind, &str)> = refs.iter().map(|r| (r.kind, r.name.as_str())).collect();
+        assert_eq!(got, vec![(RefKind::Branch, "fork/x"), (RefKind::Remote, "fork/x"), (RefKind::Branch, "grafted")]);
+    }
+
+    #[test]
+    fn a_remote_with_a_slash_in_its_name_is_found_whole() {
+        let remotes = vec!["a".to_string(), "a/b".to_string()];
+        assert_eq!(split_remote_ref("a/b/c", &remotes), ("a/b", "c"));
+        assert_eq!(split_remote_ref("a/c", &remotes), ("a", "c"));
+        assert_eq!(split_remote_ref("other/c/d", &remotes), ("other", "c/d"));
+        assert_eq!(split_remote_ref("refs/remotes/a/--x", &remotes), ("a", "--x"));
+    }
+
+    #[test]
+    fn a_remote_url_can_have_spaces_and_a_filter_after_it() {
+        let r = parse_remotes("origin\tC:/my repos/x.git (fetch)\norigin\tC:/my repos/x.git (push)\npart\thttps://h/x (fetch) [blob:none]\npart\thttps://h/x (push)\n");
+        assert_eq!((r[0].name.as_str(), r[0].fetch_url.as_str(), r[0].push_url.as_str()), ("origin", "C:/my repos/x.git", "C:/my repos/x.git"));
+        assert_eq!((r[1].name.as_str(), r[1].fetch_url.as_str(), r[1].push_url.as_str()), ("part", "https://h/x", "https://h/x"));
+    }
+
+    #[test]
+    fn stat_log_finds_the_new_name_of_a_rename_and_keeps_odd_subjects() {
+        let c = parse_stat_log("\x01aaa\0Ann\0a@x\0100\0a \x01 subject\0\n1\t2\t\0src/old.txt\0src/new.txt\0\x01bbb\0Ann\0a@x\099\0s\0\n3\t4\tsrc/old.txt\0\x01ccc\0B\0b@x\098\0empty\0\0");
+        assert_eq!(c.len(), 3);
+        assert_eq!((c[0].path.as_deref(), c[0].additions, c[0].subject.as_str()), (Some("src/new.txt"), 1, "a \x01 subject"));
+        assert_eq!((c[1].path.as_deref(), c[1].deletions), (Some("src/old.txt"), 4));
+        assert_eq!(c[2].path, None);
     }
 
     #[test]

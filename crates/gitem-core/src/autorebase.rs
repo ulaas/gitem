@@ -18,6 +18,8 @@ pub struct Summary {
     /// HEAD when the rebase finished. Empty if it stopped early.
     pub end: String,
     pub resolved: Vec<String>,
+    /// Conflicted to git, and merged here with no need to ask the model.
+    pub merged_without_ai: Vec<String>,
     /// Why the rebase stopped early, with the rebase left in progress.
     pub paused: Option<String>,
 }
@@ -28,11 +30,18 @@ impl Summary {
             Some(why) => format!("The rebase onto {onto} stopped: {why}\n\nFinish it from the banner at the top of the window, or undo it below.\n"),
             None => format!("Rebased onto {onto}.\n"),
         };
-        if self.resolved.is_empty() {
+        if self.resolved.is_empty() && self.merged_without_ai.is_empty() {
             s.push_str("\nNo conflicts needed resolving.\n");
-        } else {
+        }
+        if !self.resolved.is_empty() {
             s.push_str("\nResolved with AI, so please review these:\n");
             for f in &self.resolved {
+                s.push_str(&format!("  {f}\n"));
+            }
+        }
+        if !self.merged_without_ai.is_empty() {
+            s.push_str("\nMerged without asking the AI, as the two sides didn't really clash:\n");
+            for f in &self.merged_without_ai {
                 s.push_str(&format!("  {f}\n"));
             }
         }
@@ -90,10 +99,11 @@ fn run_steps(repo: &Repo, onto: &str, instructions: &str, review: bool, complete
         let conflicts: Vec<String> = st.conflicts().map(|e| e.path.clone()).collect();
         for path in &conflicts {
             match resolve_file(repo, path, instructions, complete) {
-                Ok(()) => {
+                Ok(asked) => {
                     ops::mark_resolved(path).run(&repo.git, root, None, &mut |_| {})?;
-                    if !sum.resolved.contains(path) {
-                        sum.resolved.push(path.clone());
+                    let list = if asked { &mut sum.resolved } else { &mut sum.merged_without_ai };
+                    if !list.contains(path) {
+                        list.push(path.clone());
                     }
                 }
                 Err(why) => {
@@ -119,14 +129,19 @@ fn run_steps(repo: &Repo, onto: &str, instructions: &str, review: bool, complete
     Ok(())
 }
 
-fn resolve_file(repo: &Repo, path: &str, instructions: &str, complete: &dyn Fn(&str, &str) -> Result<String>) -> std::result::Result<(), String> {
+/// Writes the merged file. Says whether the model was asked anything.
+fn resolve_file(repo: &Repo, path: &str, instructions: &str, complete: &dyn Fn(&str, &str) -> Result<String>) -> std::result::Result<bool, String> {
     if repo.ai_ignored(path) {
         return Err("your AI ignore rules keep this file out of AI requests, so it wasn't sent".to_string());
     }
     let asked_about = repo.unmerged_signature(path);
     let (b, o, t) = (repo.stage_content(1, path), repo.stage_content(2, path), repo.stage_content(3, path));
     if o.is_empty() || t.is_empty() {
-        return Err("one side deleted this file, which needs your decision".to_string());
+        // Stage numbers are the second-last field of each `ls-files -u` line: a side with
+        // none really deleted it, and a side with an empty file just made it empty.
+        let has_stage = |n: &str| asked_about.lines().any(|l| l.split_whitespace().nth(2) == Some(n));
+        let what = if has_stage("2") && has_stage("3") { "one side emptied this file" } else { "one side deleted this file" };
+        return Err(format!("{what}, which needs your decision"));
     }
     let text = |x: &[u8]| -> Option<String> { if util::is_binary(x) { None } else { std::str::from_utf8(x).ok().map(String::from) } };
     let (Some(bt), Some(ot), Some(tt)) = (text(&b), text(&o), text(&t)) else {
@@ -138,8 +153,10 @@ fn resolve_file(repo: &Repo, path: &str, instructions: &str, complete: &dyn Fn(&
         Ok(d) if worktree_uses_crlf(d, [&bt, &ot, &tt]) => MergeDoc::checked_with_git(&repo.git, &to_crlf(&bt), &to_crlf(&ot), &to_crlf(&tt)),
         _ => MergeDoc::checked_with_git(&repo.git, &bt, &ot, &tt),
     };
+    let mut asked = false;
     for r in &mut doc.regions {
         if let Region::Conflict { base, ours, theirs, resolution } = r {
+            asked = true;
             let (s, u) = ai::conflict_prompt(path, &plain_text(base), &plain_text(ours), &plain_text(theirs), instructions);
             let reply = ai::clean_message(&complete(&s, &u).map_err(|e: Error| e.to_string())?);
             if reply.trim() == ai::UNSURE {
@@ -150,12 +167,13 @@ fn resolve_file(repo: &Repo, path: &str, instructions: &str, complete: &dyn Fn(&
     }
     let merged = doc.render("ours", "theirs");
     if has_conflict_markers(&merged) {
-        return Err("the AI's answer still had conflict markers".to_string());
+        return Err(if asked { "the AI's answer still had conflict markers" } else { "the file itself has lines that look like conflict markers" }.to_string());
     }
     // The model can take minutes, and nothing stops someone aborting meanwhile. This answer
     // is for that conflict alone, and mustn't land on whatever the file has become.
     if !matches!(repo.current_op(), RepoOp::Rebase | RepoOp::RebaseInteractive) || repo.unmerged_signature(path) != asked_about {
         return Err("the rebase moved on while waiting for the AI, so its answer wasn't used".to_string());
     }
-    std::fs::write(repo.root.join(path), merged).map_err(|e| e.to_string())
+    std::fs::write(repo.root.join(path), merged).map_err(|e| e.to_string())?;
+    Ok(asked)
 }

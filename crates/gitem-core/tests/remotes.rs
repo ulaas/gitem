@@ -197,7 +197,7 @@ fn prune_removes_branches_deleted_on_the_remote_and_flags_their_locals() {
     n.a.run(ops::checkout("main"));
     n.b.fetch();
     assert!(n.b.branch("origin/gone").is_some());
-    n.a.run(ops::branch_delete_remote("origin/gone"));
+    n.a.run(ops::branch_delete_remote("origin/gone", &[]));
     assert!(n.remote_sha("refs/heads/gone").is_none());
     assert!(n.a.branch("gone").unwrap().upstream_gone, "the local branch's upstream is gone");
     n.b.fetch();

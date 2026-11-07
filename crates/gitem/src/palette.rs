@@ -483,7 +483,10 @@ impl PaletteState {
             }
             for b in cx.data.remote_branches() {
                 let n = b.name.clone();
-                let mut it = item("Check out", b.name.clone(), move |cx| cx.run(ops::checkout_remote(&n)));
+                let mut it = item("Check out", b.name.clone(), move |cx| {
+                    let remotes = cx.data.remote_names();
+                    cx.run(ops::checkout_remote(&n, &remotes));
+                });
                 (it.glyph, it.detail, it.record) = (icon::CLOUD, b.subject.clone(), false);
                 items.push(it);
             }

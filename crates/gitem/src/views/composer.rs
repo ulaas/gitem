@@ -78,8 +78,17 @@ impl ComposerView {
     }
 
     fn create(&mut self, cx: &mut Cx, live: &[String], st: &gitem_core::model::RepoStatus) {
-        let plan: Vec<(String, Vec<String>)> = self.groups.iter().map(|g| (g.message.clone(), g.files.iter().filter(|f| live.contains(f)).cloned().collect())).collect();
-        self.running = Some(Running { start: st.head_sha.clone(), messages: plan.iter().map(|(m, _)| m.clone()).collect() });
+        let plan: Vec<ops::ComposedCommit> = self
+            .groups
+            .iter()
+            .map(|g| {
+                let files: Vec<String> = g.files.iter().filter(|f| live.contains(f)).cloned().collect();
+                // A staged rename goes in whole, or the old name stays behind to be deleted later.
+                let renamed_from = st.entries.iter().filter(|e| e.is_staged() && files.contains(&e.path)).filter_map(|e| e.orig_path.clone()).collect();
+                ops::ComposedCommit { message: g.message.clone(), files, renamed_from }
+            })
+            .collect();
+        self.running = Some(Running { start: st.head_sha.clone(), messages: plan.iter().map(|c| c.message.clone()).collect() });
         self.confirm_partial.clear();
         cx.run(ops::compose_commits(&plan));
     }

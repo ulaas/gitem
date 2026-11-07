@@ -325,8 +325,8 @@ fn a_patch_that_can_not_apply_at_all_changes_nothing() {
     assert_eq!(f.q(&["status", "--short"]), "");
 }
 
-fn plan(groups: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
-    groups.iter().map(|(m, f)| (m.to_string(), f.iter().map(|s| s.to_string()).collect())).collect()
+fn plan(groups: &[(&str, &[&str])]) -> Vec<ops::ComposedCommit> {
+    groups.iter().map(|(m, f)| ops::ComposedCommit { message: m.to_string(), files: f.iter().map(|s| s.to_string()).collect(), ..Default::default() }).collect()
 }
 
 #[test]
@@ -723,7 +723,7 @@ fn clone_with_remote_branch() -> (Fx, PathBuf) {
 #[test]
 fn checkout_remote_makes_a_tracking_branch_of_the_short_name() {
     let (f, _bare) = clone_with_remote_branch();
-    f.run(ops::checkout_remote("origin/feature/x"));
+    f.run(ops::checkout_remote("origin/feature/x", &[]));
     assert_eq!(f.q(&["branch", "--show-current"]), "feature/x");
     assert_eq!(f.q(&["rev-parse", "--abbrev-ref", "@{u}"]), "origin/feature/x");
     assert_eq!(f.read("b.txt"), "b\n");
@@ -735,7 +735,7 @@ fn checkout_remote_with_the_local_name_taken_fails_and_moves_nothing() {
     let (f, _bare) = clone_with_remote_branch();
     let main = f.q(&["rev-parse", "main"]);
     f.q(&["branch", "feature/x"]);
-    assert!(f.fails(ops::checkout_remote("origin/feature/x")));
+    assert!(f.fails(ops::checkout_remote("origin/feature/x", &[])));
     assert_eq!(f.q(&["rev-parse", "feature/x"]), main);
     assert_eq!(f.q(&["branch", "--show-current"]), "main");
 }

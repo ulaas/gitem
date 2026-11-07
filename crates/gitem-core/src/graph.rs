@@ -48,6 +48,40 @@ impl Lanes {
 }
 
 /// Compute rows for commits ordered children-before-parents.
+/// The parents to draw, when a filter leaves commits out of the list. Git still names the real
+/// parents, which would each start a lane that never ends. With `first_parent`, only the first
+/// is followed. `hidden_merges` maps each merge left out to its first parent, so a child is
+/// drawn down to the next commit that's in the list.
+pub fn parents_for_filters(commits: &[Commit], first_parent: bool, hidden_merges: Option<&std::collections::HashMap<String, String>>) -> Vec<Commit> {
+    commits
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            if first_parent {
+                c.parents.truncate(1);
+            }
+            if let Some(map) = hidden_merges {
+                let mut seen = Vec::with_capacity(c.parents.len());
+                for p in &c.parents {
+                    let mut p = p;
+                    // Merges in a row, and never for ever whatever the map says.
+                    for _ in 0..map.len() {
+                        match map.get(p) {
+                            Some(next) => p = next,
+                            None => break,
+                        }
+                    }
+                    if !seen.contains(p) {
+                        seen.push(p.clone());
+                    }
+                }
+                c.parents = seen;
+            }
+            c
+        })
+        .collect()
+}
+
 pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
     let mut lanes = Lanes::default();
     let mut rows = Vec::with_capacity(commits.len());

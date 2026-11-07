@@ -497,9 +497,9 @@ fn taking_theirs_with_ours_unchanged_keeps_their_final_newline() {
 /// Every parser over the same text. Their job is to survive git output they didn't
 /// expect, including a future version's.
 fn all_parsers(s: &str) {
-    let mut commits = parse::parse_log(s);
-    parse::mark_remote_refs(&mut commits, &["origin".to_string(), s.to_string()]);
+    parse::parse_log(s);
     parse::parse_decoration(s);
+    parse::split_remote_ref(s, &["origin".to_string(), s.to_string()]);
     parse::parse_branches(s);
     parse::parse_track(s);
     parse::parse_tags(s);

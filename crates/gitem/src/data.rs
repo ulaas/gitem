@@ -267,6 +267,10 @@ impl RepoData {
         self.refs.get().map(|r| r.branches.as_slice()).unwrap_or(&[])
     }
 
+    pub fn remote_names(&self) -> Vec<String> {
+        self.remotes().iter().map(|r| r.name.clone()).collect()
+    }
+
     pub fn local_branches(&self) -> impl Iterator<Item = &Branch> {
         self.branches().iter().filter(|b| !b.is_remote)
     }

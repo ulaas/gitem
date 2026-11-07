@@ -88,7 +88,7 @@ fn log_output(n: usize) -> String {
     for i in 0..n {
         let parent = if i + 1 < n { format!("{:040x}", i + 1) } else { String::new() };
         let refs = if i % 500 == 0 { format!("tag: v{i}, origin/b{i}") } else { String::new() };
-        s.push_str(&format!("{i:040x}\0{parent}\0Ann\0a@example.com\01500000000\0Ann\0a@example.com\01500000000\0{refs}\0subject {i}\0body\x1e\n"));
+        s.push_str(&format!("{i:040x}\0{parent}\0Ann\0a@example.com\01500000000\0Ann\0a@example.com\01500000000\0{refs}\0subject {i}\0body\0"));
     }
     s
 }
@@ -113,7 +113,7 @@ fn laying_out_a_long_graph_scales() {
             } else {
                 format!("{:040x}", i + 1)
             };
-            s.push_str(&format!("{i:040x}\0{parents}\0A\0a@x\01\0A\0a@x\01\0\0s\0\x1e\n"));
+            s.push_str(&format!("{i:040x}\0{parents}\0A\0a@x\01\0A\0a@x\01\0\0s\0\0"));
         }
         s
     };

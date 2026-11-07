@@ -672,7 +672,7 @@ fn ops_refuse_a_name_that_git_would_read_as_an_option() {
     let repo = f.open();
     let bad = "--hard";
     let forced = ops::reset(bad, ops::ResetMode::Mixed);
-    assert_eq!(forced.steps[0].args, ["reset", "--mixed", "--hard"], "this is what it would have run");
+    assert_eq!(forced.steps[0].args, ["reset", "--mixed", "--hard", "--"], "this is what it would have run");
     let cases: Vec<GitOp> = vec![
         forced,
         ops::checkout(bad),
@@ -786,7 +786,7 @@ fn hooks_see_the_users_locale_and_no_literal_path_mode() {
     f.write("[id].txt", "two\n");
     f.write("id.txt", "changed too\n");
     let repo = f.open();
-    let plan = vec![("just the bracket file".to_string(), vec!["[id].txt".to_string()])];
+    let plan = vec![ops::ComposedCommit { message: "just the bracket file".to_string(), files: vec!["[id].txt".to_string()], ..Default::default() }];
     ops::compose_commits(&plan).run(&repo.git, Some(&repo.root), None, &mut |_| {}).unwrap();
     assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "lc=[] literal=[]");
     let committed = q(&f.root, &["show", "--name-only", "--format=", "HEAD"]);

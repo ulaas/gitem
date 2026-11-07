@@ -273,7 +273,7 @@ impl Sidebar {
         }
         if resp.double_clicked() && !b.is_current {
             if b.is_remote {
-                cx.run(ops::checkout_remote(&b.name));
+                cx.run(ops::checkout_remote(&b.name, &cx.data.remote_names()));
             } else {
                 cx.run(ops::checkout(&b.name));
             }

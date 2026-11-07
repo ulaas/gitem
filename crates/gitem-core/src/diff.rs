@@ -59,7 +59,7 @@ impl FileDiff {
     }
 }
 
-fn unquote_path(p: &str) -> String {
+pub(crate) fn unquote_path(p: &str) -> String {
     let p = p.trim_end_matches('\t');
     let p = p.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(p);
     p.replace("\\\"", "\"").replace("\\\\", "\\").replace("\\t", "\t")
@@ -291,9 +291,12 @@ pub fn side_by_side(f: &FileDiff) -> Vec<SideRow> {
                     for k in 0..dels.len().max(adds.len()) {
                         let d = dels.get(k).map(|&x| (x, &h.lines[x]));
                         let a = adds.get(k).map(|&x| (x, &h.lines[x]));
+                        // The two read the same, so the only difference has to be said.
+                        let same = matches!((d, a), (Some((_, x)), Some((_, y))) if x.text == y.text);
+                        let shown = |x: usize, l: &DiffLine| if same { format!("{}{}", l.text, line_end_mark(h, x)) } else { l.text.clone() };
                         rows.push(SideRow {
-                            left: d.map(|(_, l)| (l.old_no.unwrap_or(0), l.text.clone())),
-                            right: a.map(|(_, l)| (l.new_no.unwrap_or(0), l.text.clone())),
+                            left: d.map(|(x, l)| (l.old_no.unwrap_or(0), shown(x, l))),
+                            right: a.map(|(x, l)| (l.new_no.unwrap_or(0), shown(x, l))),
                             left_kind: d.map(|_| LineKind::Del),
                             right_kind: a.map(|_| LineKind::Add),
                             hunk: hi,
@@ -307,6 +310,18 @@ pub fn side_by_side(f: &FileDiff) -> Vec<SideRow> {
         }
     }
     rows
+}
+
+/// How a line ends, for lines whose text alone wouldn't show what changed.
+fn line_end_mark(h: &Hunk, at: usize) -> &'static str {
+    let l = &h.lines[at];
+    let no_newline = h.lines.get(at + 1).is_some_and(|n| n.kind == LineKind::NoNewline);
+    match (l.cr, no_newline) {
+        (true, true) => " [CR, no newline]",
+        (true, false) => " [CR]",
+        (false, true) => " [no newline]",
+        (false, false) => " [LF]",
+    }
 }
 
 /// Byte ranges that differ between two lines, for intra-line highlighting.
@@ -460,11 +475,7 @@ pub fn build_patch(f: &FileDiff, hunk_idx: usize, selected: Option<&[usize]>, mo
             (false, _) => put(sign, l, no_newline),
         }
     }
-    let mut out = String::new();
-    for hl in &f.header {
-        out.push_str(hl);
-        out.push('\n');
-    }
+    let mut out = patch_header(f, mode, old_n, new_n);
     // `git apply` starts searching at the position the patch is applied to. That
     // file isn't the one this hunk's other side was numbered against, and other
     // unstaged hunks shift those numbers, so a patch in a file of repeated blocks
@@ -482,6 +493,22 @@ pub fn build_patch(f: &FileDiff, hunk_idx: usize, selected: Option<&[usize]>, mo
     out.push_str(&format!("@@ -{old_at},{old_n} +{new_at},{new_n} @@\n"));
     out.push_str(&body);
     Some(out)
+}
+
+/// The lines before the hunk. The diff's own header says what happens to the whole file,
+/// which is wrong for a patch doing only part of that, and `git apply` holds it to its word.
+fn patch_header(f: &FileDiff, mode: PatchMode, old_n: u32, new_n: u32) -> String {
+    let path = f.display_path();
+    // Taking back part of a staged rename: the rename stays, and this changes the new file.
+    let keeps_rename = f.is_rename && mode == PatchMode::Reverse;
+    // A new file that part of stays, when taking back only some of its lines. Or a deleted
+    // file that part of stays, when staging only some of its deletion.
+    let partly_new = f.is_new && mode == PatchMode::Reverse && old_n > 0;
+    let partly_deleted = f.is_deleted && mode == PatchMode::Forward && new_n > 0;
+    if !keeps_rename && !partly_new && !partly_deleted {
+        return f.header.iter().map(|l| format!("{l}\n")).collect();
+    }
+    format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n")
 }
 
 #[cfg(test)]

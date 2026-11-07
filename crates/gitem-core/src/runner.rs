@@ -285,11 +285,15 @@ impl GitExe {
         }
         let start = Instant::now();
         let mut cmd = Command::new(&self.path);
-        // Stable, parseable output regardless of the user's configuration.
-        cmd.args(["-c", "core.quotepath=off", "-c", "color.ui=false", "-c", "core.pager=cat"]);
-        cmd.args(["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "log.showSignature=false", "-c", "i18n.logOutputEncoding=UTF-8"]);
-        // `git config` runs nothing, and has to report what the repository really says.
+        // `git config` runs nothing, and has to report what the repository really says. Its
+        // list would show every one of these as if someone had set them.
         let is_config = args.first().is_some_and(|a| a == "config");
+        if !is_config {
+            // Stable, parseable output regardless of the user's configuration.
+            cmd.args(["-c", "core.quotepath=off", "-c", "color.ui=false", "-c", "core.pager=cat"]);
+            cmd.args(["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "log.showSignature=false", "-c", "i18n.logOutputEncoding=UTF-8"]);
+            cmd.args(["-c", "diff.srcPrefix=a/", "-c", "diff.dstPrefix=b/", "-c", "diff.suppressBlankEmpty=false", "-c", "log.showRoot=true"]);
+        }
         if !opts.is_write && !is_config {
             cmd.args(READ_FLAGS);
             cmd.args(["-c", NO_HOOKS]);
@@ -527,7 +531,7 @@ fn works(p: &Path) -> bool {
 }
 
 fn display_arg(a: &str) -> String {
-    let a = crate::util::mask_url_credentials(a);
+    let a = crate::util::mask_url_credentials(a.strip_prefix(crate::ops::LITERAL).unwrap_or(a));
     if a.chars().any(|c| c.is_whitespace() || c == '"') {
         format!("\"{}\"", a.replace('"', "\\\""))
     } else {

@@ -4,7 +4,7 @@ gitem_testenv::isolate!();
 
 use std::path::Path;
 
-use gitem_core::diff::{PatchMode, build_patch};
+use gitem_core::diff::{LineKind, PatchMode, build_patch};
 use gitem_core::merge::{MergeDoc, Resolution};
 use gitem_core::model::*;
 use gitem_core::ops::{self, GitOp};
@@ -1430,13 +1430,84 @@ fn people_are_read_from_shortlog_with_the_same_answer_as_the_full_list() {
     assert_eq!((quick[0].name.as_str(), quick[0].email.as_str(), quick[0].commits, quick[0].is_you), (full[0].name.as_str(), full[0].email.as_str(), full[0].commits, full[0].is_you));
 }
 
-/// Labels on a log come from the remotes read last, not a command per log.
+/// Unstaging one hunk of a staged rename used to undo the whole rename.
 #[test]
-fn a_log_uses_the_remote_names_it_already_has() {
+fn unstaging_a_hunk_of_a_staged_rename_keeps_the_rename() {
+    let f = Fx::new();
+    let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+    f.write("old.txt", &body);
+    f.commit_all("base");
+    f.repo.git.run(Some(&f.repo.root), &["mv", "old.txt", "new.txt"]).unwrap();
+    f.write("new.txt", &body.replace("line 2\n", "line two\n").replace("line 29\n", "line twenty-nine\n"));
+    f.run(ops::stage_all());
+    let d = f.repo.diff(&DiffSource::Staged, None, &DiffOpts::default()).unwrap();
+    assert!(d[0].is_rename);
+    assert_eq!(d[0].hunks.len(), 2);
+    let p = build_patch(&d[0], 1, None, PatchMode::Reverse).unwrap();
+    f.run(ops::apply_patch("Unstage hunk", p, true, true));
+    let st = f.repo.status().unwrap();
+    let e = st.entries.iter().find(|e| e.path == "new.txt").unwrap();
+    assert_eq!(e.orig_path.as_deref(), Some("old.txt"), "{:?}", st.entries);
+    assert_eq!(e.index, FileStatus::Renamed);
+    assert_eq!(e.worktree, FileStatus::Modified, "the edit taken back is still on disk");
+    assert_eq!(st.entries.len(), 1, "{:?}", st.entries);
+    let staged = String::from_utf8(f.repo.git.run(Some(&f.repo.root), &["show", ":new.txt"]).unwrap().stdout).unwrap();
+    assert!(staged.contains("line two") && staged.contains("line 29\n"));
+}
+
+/// Git holds a patch to what its header says about the whole file.
+#[test]
+fn part_of_a_new_or_deleted_file_can_be_staged_or_taken_back() {
+    let f = Fx::new();
+    f.write("gone.txt", "one\ntwo\nthree\n");
+    f.commit_all("base");
+    std::fs::remove_file(f.repo.root.join("gone.txt")).unwrap();
+    let d = f.repo.diff(&DiffSource::Unstaged, Some("gone.txt"), &DiffOpts::default()).unwrap();
+    assert!(d[0].is_deleted);
+    let del: Vec<usize> = d[0].hunks[0].lines.iter().enumerate().filter(|(_, l)| l.text == "two").map(|(i, _)| i).collect();
+    let p = build_patch(&d[0], 0, Some(&del), PatchMode::Forward).unwrap();
+    f.run(ops::apply_patch("Stage lines", p, true, false));
+    let index = |p: &str| String::from_utf8(f.repo.git.run(Some(&f.repo.root), &["show", &format!(":{p}")]).unwrap().stdout).unwrap();
+    assert_eq!(index("gone.txt"), "one\nthree\n");
+    assert!(!f.repo.root.join("gone.txt").exists());
+
+    f.write("new.txt", "a\nb\nc\n");
+    f.run(ops::stage_paths(&["new.txt".to_string()]));
+    let d = f.repo.diff(&DiffSource::Staged, Some("new.txt"), &DiffOpts::default()).unwrap();
+    assert!(d[0].is_new);
+    let add: Vec<usize> = d[0].hunks[0].lines.iter().enumerate().filter(|(_, l)| l.text == "b").map(|(i, _)| i).collect();
+    let p = build_patch(&d[0], 0, Some(&add), PatchMode::Reverse).unwrap();
+    f.run(ops::apply_patch("Unstage lines", p, true, true));
+    assert_eq!(index("new.txt"), "a\nc\n");
+    assert_eq!(f.read("new.txt"), "a\nb\nc\n", "the working file isn't touched");
+
+    // All of it still removes or adds the whole file, as before.
+    let d = f.repo.diff(&DiffSource::Staged, Some("new.txt"), &DiffOpts::default()).unwrap();
+    let p = build_patch(&d[0], 0, None, PatchMode::Reverse).unwrap();
+    f.run(ops::apply_patch("Unstage hunk", p, true, true));
+    let st = f.repo.status().unwrap();
+    assert_eq!(st.entries.iter().find(|e| e.path == "new.txt").unwrap().worktree, FileStatus::Untracked);
+}
+
+#[test]
+fn a_change_of_line_ending_alone_says_so_side_by_side() {
+    let f = Fx::new();
+    f.write("a.txt", "same\nother\n");
+    f.commit_all("base");
+    f.write("a.txt", "same\r\nother\n");
+    let d = f.repo.diff(&DiffSource::Unstaged, None, &DiffOpts::default()).unwrap();
+    let rows = gitem_core::diff::side_by_side(&d[0]);
+    let row = rows.iter().find(|r| r.left_kind == Some(LineKind::Del)).unwrap();
+    assert_eq!(row.left.as_ref().unwrap().1, "same [LF]");
+    assert_eq!(row.right.as_ref().unwrap().1, "same [CR]");
+}
+
+/// Full ref names say which kind each is, so a log needs no other command to label them.
+#[test]
+fn a_log_is_one_command() {
     let f = Fx::new();
     f.write("a.txt", "a\n");
     f.commit_all("base");
-    f.repo.remotes().unwrap();
     let before = f.repo.git.log.lock().unwrap().len();
     f.repo.log(&LogQuery { limit: 1, revs: vec!["HEAD".into()], ..Default::default() }).unwrap();
     let log = f.repo.git.log.lock().unwrap();

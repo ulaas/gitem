@@ -444,9 +444,10 @@ fn fresh_base(fresh: &MergeDoc, ours: &[String], theirs: &[String]) -> Vec<Strin
 pub fn has_conflict_markers(text: &str) -> bool {
     let mut open = false;
     for l in text.lines() {
-        if l.starts_with("<<<<<<< ") {
+        // With or without a label: a model's answer may well leave it off.
+        if l == "<<<<<<<" || l.starts_with("<<<<<<< ") {
             open = true;
-        } else if open && l.starts_with(">>>>>>> ") {
+        } else if open && (l == ">>>>>>>" || l.starts_with(">>>>>>> ")) {
             return true;
         }
     }

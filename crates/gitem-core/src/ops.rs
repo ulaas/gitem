@@ -42,6 +42,8 @@ pub struct GitOp {
     pub fallback_note: Option<String>,
     /// A revision or name that would be read as an option. The op refuses to run.
     pub bad_arg: Option<String>,
+    /// Why this can't be done, said instead of running anything.
+    pub refused: Option<String>,
     /// Nobody asked for this just now, as with a scheduled fetch, so it runs no hooks.
     pub background: bool,
     /// This changes the repository's config by the user's own hand in gitem.
@@ -100,10 +102,22 @@ impl GitOp {
         self
     }
     /// Treat paths literally, so `pages/[id].tsx` can't match as a glob. Every op
-    /// acting on exact paths uses this; several of them discard data.
+    /// acting on exact paths uses this; several of them discard data. Marked name by name
+    /// rather than with `GIT_LITERAL_PATHSPECS`, which every hook the command runs would
+    /// inherit: a `post-index-change` or `pre-commit` that runs git with a glob of its own
+    /// would find it taken literally.
     pub fn literal(mut self) -> Self {
         for s in &mut self.steps {
-            s.env.push(("GIT_LITERAL_PATHSPECS".to_string(), "1".to_string()));
+            if let Some(at) = s.args.iter().position(|a| a == "--") {
+                for a in &mut s.args[at + 1..] {
+                    a.insert_str(0, LITERAL);
+                }
+            }
+            if s.args.iter().any(|a| a == "--pathspec-from-file=-")
+                && let Some(names) = &s.stdin
+            {
+                s.stdin = Some(names.split(|b| *b == 0).filter(|n| !n.is_empty()).flat_map(|n| [LITERAL.as_bytes(), n, b"\0"].concat()).collect());
+            }
         }
         self
     }
@@ -139,7 +153,8 @@ impl GitOp {
 
     /// Plain-text summary of the commands, shown in confirmation dialogs.
     pub fn preview(&self) -> String {
-        crate::util::mask_url_credentials(&self.steps.iter().map(|s| format!("git {}", s.args.join(" "))).collect::<Vec<_>>().join("\n"))
+        let shown = |a: &String| a.strip_prefix(LITERAL).unwrap_or(a).to_string();
+        crate::util::mask_url_credentials(&self.steps.iter().map(|s| format!("git {}", s.args.iter().map(shown).collect::<Vec<_>>().join(" "))).collect::<Vec<_>>().join("\n"))
     }
 
     /// One step, waiting out another program's lock: editors and agents run git beside
@@ -161,6 +176,9 @@ impl GitOp {
 
     /// Run all steps in order, stopping on the first hard failure.
     pub fn run(&self, git: &GitExe, cwd: Option<&Path>, cancel: Option<Arc<AtomicBool>>, on_line: &mut dyn FnMut(&str)) -> Result<Vec<GitOutput>> {
+        if let Some(why) = &self.refused {
+            return Err(crate::Error::Git(why.clone()));
+        }
         if let Some(bad) = &self.bad_arg {
             return Err(crate::Error::Git(format!("\"{bad}\" can't be used here: it starts with a dash, so git would read it as an option. Nothing was done.")));
         }
@@ -209,12 +227,43 @@ fn v<S: AsRef<str>>(a: &[S]) -> Vec<String> {
     a.iter().map(|s| s.as_ref().to_string()).collect()
 }
 
+/// The pathspec magic that makes a name mean just that name.
+pub const LITERAL: &str = ":(literal)";
+
+/// How many bytes of names go on a command line. Windows allows 32,767 characters for the
+/// whole of it, and git's own wrapper and options take some of that.
+const MAX_NAMES_ON_COMMAND_LINE: usize = 20_000;
+
+fn too_long_for_command_line(paths: &[String]) -> bool {
+    paths.iter().map(|p| p.len() + LITERAL.len() + 3).sum::<usize>() > MAX_NAMES_ON_COMMAND_LINE
+}
+
+fn nul_separated(paths: &[String]) -> Vec<u8> {
+    let mut names = Vec::new();
+    for p in paths {
+        names.extend_from_slice(p.as_bytes());
+        names.push(0);
+    }
+    names
+}
+
+/// One step of `base` over `paths`, with the names shown in its command line where they fit,
+/// and given over stdin where they don't.
+fn step_on_paths(op: GitOp, base: Vec<String>, paths: &[String]) -> GitOp {
+    let mut a = base;
+    if too_long_for_command_line(paths) {
+        a.extend(v(&["--pathspec-from-file=-", "--pathspec-file-nul"]));
+        return op.step_v(a).stdin(nul_separated(paths));
+    }
+    a.push("--".into());
+    a.extend_from_slice(paths);
+    op.step_v(a)
+}
+
 // ---- staging -----------------------------------------------------------------
 
 pub fn stage_paths(paths: &[String]) -> GitOp {
-    let mut a = v(&["add", "--"]);
-    a.extend_from_slice(paths);
-    GitOp::new(format!("Stage {} file(s)", paths.len())).step_v(a).literal()
+    step_on_paths(GitOp::new(format!("Stage {} file(s)", paths.len())), v(&["add"]), paths).literal()
 }
 
 pub fn stage_all() -> GitOp {
@@ -222,9 +271,8 @@ pub fn stage_all() -> GitOp {
 }
 
 pub fn unstage_paths(paths: &[String], has_head: bool) -> GitOp {
-    let mut a = if has_head { v(&["restore", "--staged", "--"]) } else { v(&["rm", "--cached", "-r", "--quiet", "--"]) };
-    a.extend_from_slice(paths);
-    GitOp::new(format!("Unstage {} file(s)", paths.len())).step_v(a).literal()
+    let base = if has_head { v(&["restore", "--staged"]) } else { v(&["rm", "--cached", "-r", "--quiet"]) };
+    step_on_paths(GitOp::new(format!("Unstage {} file(s)", paths.len())), base, paths).literal()
 }
 
 pub fn unstage_all(has_head: bool) -> GitOp {
@@ -240,26 +288,31 @@ pub fn unstage_all(has_head: bool) -> GitOp {
 /// so `paths` must leave out conflicted files. The list goes over stdin, since a large
 /// merge can hold more names than fit on a command line.
 pub fn unstage_during_op(paths: &[String]) -> GitOp {
-    let mut names = Vec::new();
-    for p in paths {
-        names.extend_from_slice(p.as_bytes());
-        names.push(0);
-    }
-    GitOp::new(format!("Unstage {} file(s)", paths.len())).step(&["restore", "--staged", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(names).literal()
+    GitOp::new(format!("Unstage {} file(s)", paths.len())).step(&["restore", "--staged", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(nul_separated(paths)).literal()
 }
 
 /// Discard worktree changes of tracked files.
 pub fn discard_paths(paths: &[String]) -> GitOp {
-    let mut a = v(&["restore", "--worktree", "--"]);
-    a.extend_from_slice(paths);
-    GitOp::new(format!("Discard changes in {} file(s)", paths.len())).step_v(a).literal()
+    step_on_paths(GitOp::new(format!("Discard changes in {} file(s)", paths.len())), v(&["restore", "--worktree"]), paths).literal()
 }
 
 /// Delete untracked paths through `git clean`, so nothing else can be affected.
 pub fn delete_untracked(paths: &[String]) -> GitOp {
-    let mut a = v(&["clean", "-f", "-d", "--"]);
-    a.extend_from_slice(paths);
-    GitOp::new(format!("Delete {} untracked file(s)", paths.len())).step_v(a).literal()
+    let mut op = GitOp::new(format!("Delete {} untracked file(s)", paths.len()));
+    // `clean` is the one of these that can't read its names from stdin.
+    let mut batch: Vec<String> = Vec::new();
+    for p in paths {
+        batch.push(p.clone());
+        if too_long_for_command_line(&batch) {
+            let last = batch.pop().unwrap_or_default();
+            op = step_on_paths(op, v(&["clean", "-f", "-d"]), &batch);
+            batch = vec![last];
+        }
+    }
+    if !batch.is_empty() {
+        op = step_on_paths(op, v(&["clean", "-f", "-d"]), &batch);
+    }
+    op.literal()
 }
 
 /// Apply a patch produced by `diff::build_patch` to the index or worktree.
@@ -340,23 +393,28 @@ pub fn commit(o: &CommitOpts) -> GitOp {
 /// `--only` needs paths git knows, and a new file isn't one yet. The names go over stdin,
 /// since a large plan can hold more than fit on a command line. All one op, so nothing
 /// queued can land in the middle, and a failure stops whatever is left.
-pub fn compose_commits(plan: &[(String, Vec<String>)]) -> GitOp {
+///
+/// A staged rename's old name has to be in the commit too, or the commit adds the new file
+/// and leaves the old one behind. It goes only to `commit`: it's gone from the disk, so
+/// `add` has nothing to find.
+pub fn compose_commits(plan: &[ComposedCommit]) -> GitOp {
     let mut op = GitOp::new(format!("Create {} commit(s)", plan.len()));
-    for (message, files) in plan {
-        let (mut names, mut literal) = (Vec::new(), Vec::new());
-        for f in files {
-            names.extend_from_slice(f.as_bytes());
-            names.push(0);
-            literal.extend_from_slice(b":(literal)");
-            literal.extend_from_slice(f.as_bytes());
-            literal.push(0);
-        }
-        op = op.step(&["add", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(names).env("GIT_LITERAL_PATHSPECS", "1");
-        // Marked name by name, not with the variable, which a hook would inherit: a
-        // `pre-commit` that runs git with a glob would find its pattern taken literally.
-        op = op.step(&["commit", "--cleanup=whitespace", "-m", message, "--only", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(literal);
+    for c in plan {
+        let mut all = c.files.clone();
+        all.extend(c.renamed_from.iter().cloned());
+        op = op.step(&["add", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(nul_separated(&c.files));
+        op = op.step(&["commit", "--cleanup=whitespace", "-m", &c.message, "--only", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(nul_separated(&all));
     }
-    op
+    op.literal()
+}
+
+/// One commit of a plan for [`compose_commits`].
+#[derive(Debug, Clone, Default)]
+pub struct ComposedCommit {
+    pub message: String,
+    pub files: Vec<String>,
+    /// The old names of any staged renames among `files`.
+    pub renamed_from: Vec<String>,
 }
 
 pub fn fixup_commit(sha: &str) -> GitOp {
@@ -370,6 +428,10 @@ fn short(s: &str) -> &str {
 // ---- branches ----------------------------------------------------------------
 
 pub fn checkout(target: &str) -> GitOp {
+    // A name a server delivered, shown in full, which `switch` won't take as a branch.
+    if let Some(short) = target.strip_prefix("refs/heads/") {
+        return GitOp::new(format!("Switch to {short}")).step(&["switch", "--end-of-options", short]);
+    }
     GitOp::new(format!("Switch to {target}")).names(&[target]).step(&["switch", target])
 }
 
@@ -378,8 +440,8 @@ pub fn checkout_detached(rev: &str) -> GitOp {
 }
 
 /// Track a remote branch with a new local branch of the short name.
-pub fn checkout_remote(remote_branch: &str) -> GitOp {
-    let local = remote_branch.split_once('/').map(|x| x.1).unwrap_or(remote_branch);
+pub fn checkout_remote(remote_branch: &str, remotes: &[String]) -> GitOp {
+    let local = crate::parse::split_remote_ref(remote_branch, remotes).1;
     GitOp::new(format!("Check out {remote_branch}")).names(&[local, remote_branch]).step(&["switch", "-c", local, "--track", remote_branch])
 }
 
@@ -404,8 +466,8 @@ pub fn branch_delete(name: &str, force: bool) -> GitOp {
     GitOp::new(format!("Delete branch {name}")).names(&[name]).step(&["branch", flag, name])
 }
 
-pub fn branch_delete_remote(remote_branch: &str) -> GitOp {
-    let (remote, b) = remote_branch.split_once('/').unwrap_or(("origin", remote_branch));
+pub fn branch_delete_remote(remote_branch: &str, remotes: &[String]) -> GitOp {
+    let (remote, b) = crate::parse::split_remote_ref(remote_branch, remotes);
     GitOp::new(format!("Delete remote branch {remote_branch}")).step(&["push", "--delete", "--", remote, b]).net()
 }
 
@@ -557,7 +619,7 @@ pub fn reset(rev: &str, mode: ResetMode) -> GitOp {
         ResetMode::Hard => "--hard",
         ResetMode::Keep => "--keep",
     };
-    GitOp::new(format!("Reset {flag} to {}", short(rev))).names(&[rev]).step(&["reset", flag, rev])
+    GitOp::new(format!("Reset {flag} to {}", short(rev))).names(&[rev]).step(&["reset", flag, rev, "--"])
 }
 
 pub fn restore_file_from(rev: &str, path: &str) -> GitOp {
@@ -650,13 +712,17 @@ pub fn stash_push(o: &StashOpts) -> GitOp {
     if o.staged_only {
         a.push("--staged".into());
     }
-    if !o.paths.is_empty() {
-        a.push("--".into());
-        a.extend_from_slice(&o.paths);
+    let mut op = GitOp::new("Stash changes");
+    if o.paths.is_empty() {
+        return op.step_v(a);
     }
-    // A whole-tree stash uses pathspec magic internally, which literal mode breaks.
-    let op = GitOp::new("Stash changes").step_v(a);
-    if o.paths.is_empty() { op } else { op.literal() }
+    // `stash` runs git again with all the names on its command line, whichever way it was
+    // given them. Too many, and it fails after saving the stash and before taking the
+    // changes out of the tree, so they'd be in both places.
+    if too_long_for_command_line(&o.paths) {
+        op.refused = Some(format!("That's too many files to stash by name ({}). Nothing was done. Stage them and stash what's staged, or stash everything.", o.paths.len()));
+    }
+    step_on_paths(op, a, &o.paths).literal()
 }
 
 pub fn stash_apply(sel: &str, pop: bool, index: bool) -> GitOp {
@@ -1046,7 +1112,7 @@ pub fn archive(rev: &str, output: &str, format: &str) -> GitOp {
 }
 
 pub fn format_patch(range: &str, out_dir: &str) -> GitOp {
-    GitOp::new("Create patches").names(&[range]).step(&["format-patch", "-o", out_dir, range])
+    GitOp::new("Create patches").names(&[range]).step(&["format-patch", "-o", out_dir, range, "--"])
 }
 
 pub fn sparse_set(patterns: &[String], cone: bool) -> GitOp {
@@ -1196,13 +1262,15 @@ mod tests {
         let l = pull(PullMode::Rebase, true);
         assert_eq!(args(&l), "pull --progress --rebase --autostash");
         assert!(l.network);
-        assert_eq!(args(&branch_delete_remote("origin/feature/x")), "push --delete -- origin feature/x");
+        assert_eq!(args(&branch_delete_remote("origin/feature/x", &[])), "push --delete -- origin feature/x");
+        assert_eq!(args(&branch_delete_remote("a/b/c", &["a".to_string(), "a/b".to_string()])), "push --delete -- a/b c");
         assert_eq!(args(&fetch_pr("origin", "pull/7/head", "pr/7")), "fetch -- origin pull/7/head:pr/7");
     }
 
     #[test]
     fn remote_branch_checkout_strips_remote() {
-        assert_eq!(args(&checkout_remote("origin/feature/x")), "switch -c feature/x --track origin/feature/x");
+        assert_eq!(args(&checkout_remote("origin/feature/x", &[])), "switch -c feature/x --track origin/feature/x");
+        assert_eq!(args(&checkout_remote("a/b/c", &["a/b".to_string()])), "switch -c c --track a/b/c");
     }
 
     #[test]
