@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=gitem
+Comment=A visual Git client
+Exec=gitem %F
+Icon=gitem
+Terminal=false
+Categories=Development;RevisionControl;

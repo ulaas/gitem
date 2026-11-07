@@ -23,6 +23,27 @@ jobs:
         with:
           draft: true
           files: target/dist/gitem-*-setup.exe
+  appimage:
+    # The oldest supported runner: an AppImage only starts on this glibc or newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
+      # By its release number, so a later one can't change what's built without someone asking.
+      # Unpacks itself rather than using FUSE, which runners don't have.
+      - name: Get appimagetool
+        run: |
+          curl -fsSL -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+      - run: bash packaging/linux/build-appimage.sh
+        env:
+          APPIMAGETOOL: ${{ github.workspace }}/appimagetool
+          APPIMAGE_EXTRACT_AND_RUN: 1
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: target/dist/gitem-*.AppImage
   unix:
     strategy:
       fail-fast: false

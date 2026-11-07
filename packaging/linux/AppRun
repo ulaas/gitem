@@ -1,0 +1,3 @@
+#!/bin/sh
+# Nothing is added to the library path: git and whatever it starts have to see the system's own.
+exec "$(dirname "$(readlink -f "$0")")/usr/bin/gitem" "$@"

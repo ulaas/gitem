@@ -1,0 +1,4 @@
+# Shell reads these, and CR is not whitespace to it, whatever the checkout on Windows wants.
+packaging/linux/AppRun text eol=lf
+packaging/linux/*.sh text eol=lf
+packaging/linux/*.desktop text eol=lf

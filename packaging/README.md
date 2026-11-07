@@ -10,3 +10,9 @@ Not here, because they need the owner's accounts or certificate:
 - winget, Homebrew and other store listings, which need a public release to point at.
 
 The update check also needs a public release to ask about. `DEFAULT_RELEASE_URL` in `crates/gitem-core/src/update.rs` is empty until there is one, and Settings has a field for the address meanwhile.
+
+## AppImage
+
+`linux/build-appimage.sh` builds the binary and wraps it with `appimagetool`, and `release.yml` runs it on the oldest supported Ubuntu runner, with appimagetool taken from its release 13. That release's checksum isn't pinned, as it couldn't be read from here.
+
+None of this has been run on Linux. What has: `packaging.rs` reads the files, and on Windows the script was run in Git Bash up to a stand-in for appimagetool, which shows the folder it lays out and nothing about the AppImage. The AppImage doesn't carry git, GTK or graphics libraries, so it needs them from the system, and nothing registers `gitem://` links or a menu entry.
