@@ -91,8 +91,10 @@ impl TextView {
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
+        // What ran may have written to the repository. It says nothing about the host, so
+        // this isn't Refresh, which would make Launchpad ask the host again.
         if self.text.poll() {
-            cx.out.push(Action::Refresh);
+            cx.out.push(Action::ReloadRepository);
         }
         if let Some(job) = self.job.take() {
             self.text.spawn(ui.ctx(), job);

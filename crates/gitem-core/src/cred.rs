@@ -199,48 +199,121 @@ mod file {
     fn path() -> std::path::PathBuf {
         crate::settings::config_dir().join("credentials.json")
     }
-    fn load() -> Store {
-        std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    /// Windows can refuse a file for a moment while another process replaces it, or a virus
+    /// scanner looks at it.
+    fn patiently<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+        for _ in 0..50 {
+            match f() {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => std::thread::sleep(std::time::Duration::from_millis(20)),
+                other => return other,
+            }
+        }
+        f()
     }
-    /// Through a temp file, so another process never reads a half-written store.
+    /// No file is an empty store. A file that can't be read isn't: treated as empty, the
+    /// next save would replace everything in it.
+    fn load() -> Result<Store> {
+        let p = path();
+        match patiently(|| std::fs::read(&p)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::new()),
+            Err(e) => Err(Error::Other(format!("Couldn't read {}: {e}", p.display()))),
+            Ok(b) => serde_json::from_slice(&b).map_err(|e| Error::Other(format!("{} is damaged ({e}). It's been left as it is, and nothing can be saved until it's fixed or moved away.", p.display()))),
+        }
+    }
+    /// Through a temp file, so a crash or another process never meets a half-written store. The
+    /// new file is always created private, so this also corrects a store made some other way.
     fn save(s: &Store) -> Result<()> {
         let p = path();
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
         let temp = p.with_extension(format!("tmp{}", std::process::id()));
+        let _ = std::fs::remove_file(&temp);
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let mut f = options.open(&temp)?;
         f.write_all(&serde_json::to_vec(s).map_err(|e| Error::Other(e.to_string()))?)?;
         drop(f);
-        std::fs::rename(&temp, p)?;
+        patiently(|| std::fs::rename(&temp, &p))?;
         Ok(())
     }
     fn locked() -> std::sync::MutexGuard<'static, ()> {
         LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// Held while a change reads and rewrites the file. Git runs a helper process per request,
+    /// so another process may be doing the same.
+    struct OtherProcesses(std::path::PathBuf);
+
+    impl OtherProcesses {
+        fn wait() -> Result<Self> {
+            let p = path().with_extension("lock");
+            if let Some(d) = p.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            let start = std::time::Instant::now();
+            loop {
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+                    Ok(_) => return Ok(Self(p)),
+                    Err(e) if matches!(e.kind(), std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied) => {
+                        // Left behind by a process that was killed. Nothing holds it this long.
+                        let stale = std::fs::metadata(&p).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() >= 10);
+                        if stale {
+                            let _ = std::fs::remove_file(&p);
+                        }
+                        if start.elapsed().as_secs() >= 15 {
+                            return Err(Error::Other(format!("Another gitem is holding {} for too long.", p.display())));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+    }
+
+    impl Drop for OtherProcesses {
+        fn drop(&mut self) {
+            let _ = patiently(|| std::fs::remove_file(&self.0));
+        }
+    }
+
     pub fn write(target: &str, username: &str, secret: &str) -> Result<()> {
         let _guard = locked();
-        let mut s = load();
+        let _others = OtherProcesses::wait()?;
+        let mut s = load()?;
         s.insert(target.to_string(), (username.to_string(), secret.to_string()));
         save(&s)
     }
     pub fn read(target: &str) -> Result<Option<StoredCred>> {
         let _guard = locked();
-        Ok(load().get(target).map(|(u, p)| StoredCred { target: target.to_string(), username: u.clone(), secret: p.clone() }))
+        Ok(load()?.get(target).map(|(u, p)| StoredCred { target: target.to_string(), username: u.clone(), secret: p.clone() }))
     }
     pub fn delete(target: &str) -> Result<()> {
         let _guard = locked();
-        let mut s = load();
+        let _others = OtherProcesses::wait()?;
+        let mut s = load()?;
         s.remove(target);
         save(&s)
     }
     pub fn list(prefix: &str) -> Vec<(String, String)> {
         let _guard = locked();
-        load().into_iter().filter(|(k, _)| k.starts_with(prefix)).map(|(k, (u, _))| (k, u)).collect()
+        load().unwrap_or_default().into_iter().filter(|(k, _)| k.starts_with(prefix)).map(|(k, (u, _))| (k, u)).collect()
+    }
+    /// What's wrong with the store, if anything.
+    pub fn problem() -> Option<String> {
+        let _guard = locked();
+        load().err().map(|e| e.to_string())
+    }
+}
+
+/// What's wrong with the store, for a view that would otherwise just show it empty.
+pub fn store_problem() -> Option<String> {
+    match backend() {
+        Backend::File => file::problem(),
+        _ => None,
     }
 }
 
@@ -373,16 +446,20 @@ pub fn git_credential_fill(git: &GitExe, url: &str) -> Option<(String, String)> 
     Some((f("username").unwrap_or_default(), f("password")?))
 }
 
-/// Remove an entry from git's configured helpers (`git credential reject`).
-pub fn git_credential_reject(git: &GitExe, url: &str) -> Result<()> {
-    if isolated() {
-        return Ok(());
+/// The entry "Add git credential" saves for `url`. Git asks a helper about a scheme and host,
+/// with a path only if `credential.useHttpPath` is on, so an entry with a path is otherwise
+/// never found. `keep_path` is for someone who has that on.
+pub fn git_credential_target(url: &str, keep_path: bool) -> Result<String> {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+    let rest = rest.trim_end_matches('/');
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = authority.rsplit('@').next().unwrap_or(authority).to_lowercase();
+    if host.is_empty() {
+        return Err(Error::Other("That address has no host in it.".to_string()));
     }
-    let opts = RunOpts { stdin: Some(format!("url={url}\n\n").into_bytes()), is_write: true, ..Default::default() };
-    // From a neutral folder, so that whatever folder gitem started in has no say.
-    let dir = std::env::temp_dir();
-    git.run_opts(Some(&dir), &["credential".to_string(), "reject".to_string()], &opts, &mut |_| {})?.into_result()?;
-    Ok(())
+    let scheme = scheme.to_lowercase();
+    Ok(if keep_path && !path.is_empty() { format!("{PREFIX_GIT}{scheme}://{host}/{}", path.trim_end_matches(".git").trim_end_matches('/')) } else { format!("{PREFIX_GIT}{scheme}://{host}") })
 }
 
 // ---- SSH keys ------------------------------------------------------------------
@@ -504,8 +581,12 @@ pub fn ssh_agent_list() -> Result<String> {
     if isolated() {
         return Ok("The SSH agent isn't used in this run.".to_string());
     }
+    agent_list_with("ssh-add")
+}
+
+fn agent_list_with(tool: &str) -> Result<String> {
     // `ssh-add -l` exits 1 with "no identities"; that is a state, not an error.
-    match run_tool("ssh-add", &["-l"]) {
+    match run_tool(tool, &["-l"]) {
         Ok(s) => Ok(s),
         Err(Error::Other(m)) if m.contains("no identities") => Ok("The agent has no identities.".to_string()),
         Err(e) => Err(e),
@@ -597,6 +678,67 @@ mod tests {
         for good in ["id_ed25519", "work.key", "..hidden"] {
             assert!(valid_key_name(good), "{good}");
         }
+    }
+
+    /// A stand-in for `ssh-add`: says what it was given, then what it's told to.
+    fn fake_ssh_add(dir: &Path, says: &str, code: u32) -> String {
+        #[cfg(windows)]
+        let (name, script) = ("fake-ssh-add.bat", format!("@echo args: %*\r\n@echo {says}\r\n@exit /b {code}\r\n"));
+        #[cfg(not(windows))]
+        let (name, script) = ("fake-ssh-add", format!("#!/bin/sh\necho \"args: $*\"\necho \"{says}\"\nexit {code}\n"));
+        let p = dir.join(name);
+        std::fs::write(&p, script).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn an_empty_agent_is_a_state_and_a_broken_one_an_error() {
+        let d = tempfile::tempdir().unwrap();
+        let listing = fake_ssh_add(d.path(), "256 SHA256:FAKE me (ED25519)", 0);
+        let out = agent_list_with(&listing).unwrap();
+        assert!(out.contains("args: -l") && out.contains("SHA256:FAKE"), "{out}");
+        let empty = fake_ssh_add(d.path(), "The agent has no identities.", 1);
+        assert_eq!(agent_list_with(&empty).unwrap(), "The agent has no identities.");
+        let broken = fake_ssh_add(d.path(), "Could not open a connection to your authentication agent.", 2);
+        assert!(agent_list_with(&broken).unwrap_err().to_string().contains("Could not open"));
+        assert!(agent_list_with(&d.path().join("no-such-tool").to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn adding_a_key_passes_its_path_as_one_argument() {
+        let d = tempfile::tempdir().unwrap();
+        let tool = fake_ssh_add(d.path(), "Identity added", 0);
+        let key = d.path().join("a key").to_string_lossy().into_owned();
+        let out = run_tool(&tool, &[&key]).unwrap();
+        assert!(out.contains(&key) && out.contains("Identity added"), "{out}");
+    }
+
+    #[test]
+    fn a_keygen_plan_names_the_type_comment_and_file() {
+        let (args, _) = keygen_plan("C:/scratch/k", "me@example.com", "", None).unwrap();
+        assert_eq!(args[..6], ["-t", "ed25519", "-C", "me@example.com", "-f", "C:/scratch/k"].map(String::from));
+        let (args, _) = keygen_plan("k", "-weird comment", "", None).unwrap();
+        assert_eq!(args[3], "-weird comment", "a value, whatever it looks like");
+    }
+
+    #[test]
+    fn a_git_credential_is_saved_where_git_will_ask_for_it() {
+        let target = |u: &str| git_credential_target(u, false).unwrap();
+        assert_eq!(target("https://github.com/org"), format!("{PREFIX_GIT}https://github.com"));
+        assert_eq!(target("https://github.com/org/repo.git/"), format!("{PREFIX_GIT}https://github.com"));
+        assert_eq!(target("https://me@GitHub.com"), format!("{PREFIX_GIT}https://github.com"));
+        assert_eq!(target("github.com/org"), format!("{PREFIX_GIT}https://github.com"), "a bare host means https");
+        assert_eq!(target("http://h.invalid:8080/x"), format!("{PREFIX_GIT}http://h.invalid:8080"));
+        assert_eq!(git_credential_target("https://h.invalid/org/repo.git", true).unwrap(), format!("{PREFIX_GIT}https://h.invalid/org/repo"));
+        assert!(git_credential_target("https://", false).is_err());
+        // And `helper` finds it from what git sends.
+        let saved = target("https://gitem-path-test.invalid/org");
+        store(&saved, "me", "fake-secret").unwrap();
+        let got = helper("get", "protocol=https\nhost=gitem-path-test.invalid\n\n").unwrap();
+        delete(&saved).unwrap();
+        assert_eq!(got, "username=me\npassword=fake-secret\n");
     }
 
     #[test]

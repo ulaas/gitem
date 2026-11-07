@@ -148,6 +148,52 @@ fn the_passphrase_helper_prints_its_value_to_ssh_keygen() {
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim_end(), "fake passphrase");
 }
 
+fn helper_process(dir: &std::path::Path, op: &str, input: &str) -> std::process::Output {
+    let mut c = Command::new(BIN).args(["--credential-helper", op]).env("GITEM_CONFIG_DIR", dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    c.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    c.wait_with_output().unwrap()
+}
+
+/// SN-35. Git starts one helper per request, so these can happen at once. A file store is what
+/// runs on Linux and macOS, and here with `GITEM_CONFIG_DIR`, which is how this test gets it.
+#[test]
+fn helpers_running_at_once_lose_no_credentials() {
+    let d = tempfile::tempdir().unwrap();
+    let hosts: Vec<String> = (0..16).map(|i| format!("gitem-many-{i}.invalid")).collect();
+    let running: Vec<_> = hosts
+        .iter()
+        .map(|host| {
+            let mut c = Command::new(BIN).args(["--credential-helper", "store"]).env("GITEM_CONFIG_DIR", d.path()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            c.stdin.take().unwrap().write_all(format!("protocol=https\nhost={host}\nusername=u\npassword=FAKE\n\n").as_bytes()).unwrap();
+            c
+        })
+        .collect();
+    for c in running {
+        let o = c.wait_with_output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    for host in &hosts {
+        let o = helper_process(d.path(), "get", &format!("protocol=https\nhost={host}\n\n"));
+        assert!(String::from_utf8_lossy(&o.stdout).contains("password=FAKE"), "{host} was lost");
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(d.path()).unwrap().flatten().map(|e| e.file_name()).filter(|n| n != "credentials.json").collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// SN-35. A store that can't be read used to count as empty, and the next save replaced it.
+#[test]
+fn a_damaged_credential_file_is_left_alone() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("credentials.json");
+    std::fs::write(&file, "{ not json, but maybe somebody's only copy").unwrap();
+    let o = helper_process(d.path(), "store", "protocol=https\nhost=gitem-damaged.invalid\nusername=u\npassword=FAKE\n\n");
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("damaged"), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ not json, but maybe somebody's only copy");
+    let o = helper_process(d.path(), "get", "protocol=https\nhost=gitem-damaged.invalid\n\n");
+    assert!(!o.status.success(), "and it says so, rather than that there's nothing there");
+}
+
 /// Real `ssh-keygen`, with the key in the scratch config folder. The full route: gitem
 /// starts it, it asks the real helper binary, and the key opens only with that passphrase.
 #[test]

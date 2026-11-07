@@ -1025,9 +1025,32 @@ pub fn remote_prune(name: &str) -> GitOp {
     GitOp::new(format!("Prune {name}")).step(&["remote", "prune", name]).net()
 }
 
-/// Fetch a pull/merge request head into a local branch.
+/// Fetch a pull/merge request head into a local branch, replacing what that branch held: its
+/// author may have force-pushed, and the old tip stays in the reflog. Git refuses this for a
+/// branch that's checked out. That's [`update_pr_branch`].
 pub fn fetch_pr(remote: &str, ref_spec: &str, local: &str) -> GitOp {
-    GitOp::new(format!("Fetch into {local}")).step(&["fetch", "--", remote, &format!("{ref_spec}:{local}")]).net()
+    GitOp::new(format!("Fetch into {local}")).step(&["fetch", "--", remote, &format!("+{ref_spec}:{local}")]).net()
+}
+
+/// Make `local` follow the pull request's own branch, so Pull and the ahead and behind counts
+/// work. Only for a branch in this repository, not a fork's.
+pub fn track_pr(remote: &str, head: &str, local: &str) -> GitOp {
+    GitOp::new(format!("Track {remote}/{head}"))
+        .step(&["fetch", "--", remote, &format!("+refs/heads/{head}:refs/remotes/{remote}/{head}")])
+        .step(&["branch", &format!("--set-upstream-to={remote}/{head}"), local])
+        .net()
+}
+
+/// Bring the pull request's new commits into the branch that's checked out. If its author
+/// force-pushed this fails with git's message, and nothing changes.
+pub fn update_pr_branch(remote: &str, ref_spec: &str) -> GitOp {
+    GitOp::new("Update from the pull request").step(&["fetch", "--", remote, ref_spec]).step(&["merge", "--ff-only", "FETCH_HEAD"]).net()
+}
+
+/// The same when the history was rewritten: the branch and working tree become what the
+/// pull request holds. Commits here stay in the reflog, uncommitted changes are lost.
+pub fn reset_pr_branch(remote: &str, ref_spec: &str) -> GitOp {
+    GitOp::new("Reset to the pull request").step(&["fetch", "--", remote, ref_spec]).step(&["reset", "--hard", "FETCH_HEAD"]).net()
 }
 
 pub fn clone_repo(url: &str, dest: &str, depth: Option<u32>, recursive: bool, branch: Option<&str>) -> GitOp {
@@ -1342,7 +1365,7 @@ mod tests {
         assert!(l.network);
         assert_eq!(args(&branch_delete_remote("origin/feature/x", &[])), "push --delete -- origin feature/x");
         assert_eq!(args(&branch_delete_remote("a/b/c", &["a".to_string(), "a/b".to_string()])), "push --delete -- a/b c");
-        assert_eq!(args(&fetch_pr("origin", "pull/7/head", "pr/7")), "fetch -- origin pull/7/head:pr/7");
+        assert_eq!(args(&fetch_pr("origin", "pull/7/head", "pr/7")), "fetch -- origin +pull/7/head:pr/7");
     }
 
     #[test]

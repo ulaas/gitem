@@ -217,8 +217,17 @@ fn collect_jsonl(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, i64)>) {
     }
 }
 
+/// With a scratch config folder, that's where everything is: a test or a screenshot run
+/// doesn't read the real transcripts, which hold what was said to the agents.
+fn scratch_home() -> Option<PathBuf> {
+    crate::settings::config_dir_override().map(|d| d.join("agent-home"))
+}
+
 /// `(agent name, transcript folder)` for each supported CLI.
 pub fn default_roots() -> Vec<(&'static str, PathBuf)> {
+    if let Some(home) = scratch_home() {
+        return vec![("Claude Code", home.join(".claude/projects")), ("Codex", home.join(".codex/sessions")), ("Copilot", home.join(".copilot/session-state"))];
+    }
     let home = PathBuf::from(std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default());
     let copilot = std::env::var_os("COPILOT_HOME").map_or_else(|| home.join(".copilot"), PathBuf::from);
     vec![("Claude Code", home.join(".claude/projects")), ("Codex", home.join(".codex/sessions")), ("Copilot", copilot.join("session-state"))]
@@ -275,6 +284,9 @@ pub fn scan(roots: &[(&'static str, PathBuf)], worktrees: &[String], now: i64) -
 
 /// Where OpenCode keeps its session database.
 pub fn opencode_db() -> PathBuf {
+    if let Some(home) = scratch_home() {
+        return home.join(".local/share/opencode/opencode.db");
+    }
     let home = PathBuf::from(std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default());
     std::env::var_os("XDG_DATA_HOME").map_or_else(|| home.join(".local/share"), PathBuf::from).join("opencode/opencode.db")
 }

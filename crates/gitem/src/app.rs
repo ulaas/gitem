@@ -1557,6 +1557,11 @@ impl GitemApp {
                 }
             }
             Action::RunGlobal { op, open_after } => self.global_queue.push_back((op, open_after)),
+            Action::ReloadRepository => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    r.data.refresh(ctx, &r.repo);
+                }
+            }
             Action::Refresh => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.data.refresh(ctx, &r.repo);

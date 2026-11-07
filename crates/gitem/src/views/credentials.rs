@@ -25,6 +25,7 @@ pub struct CredentialsView {
     show_names: bool,
     page: Page,
     entries: Vec<(String, String)>,
+    store_problem: Option<String>,
     revealed: Option<(String, String)>,
     loaded: bool,
     ssh_keys: Vec<cred::SshKey>,
@@ -55,7 +56,7 @@ fn add_token_form() -> FormDialog {
     FormDialog::new("Add API token", "Save")
         .info("Used for pull requests and issues. Jira and Linear use the hosts \"jira\" and \"linear\".")
         .text("host", "Host", "github.com")
-        .text("user", "Username (Bitbucket, Azure DevOps)", "")
+        .text("user", "Atlassian email for Bitbucket, username for Azure DevOps", "")
         .password("token", "Token")
         .on_submit(|v| {
             let h = v.opt("host").ok_or("A host is required.")?;
@@ -71,11 +72,13 @@ fn add_git_cred_form() -> FormDialog {
         .text("url", "URL", "https://github.com")
         .text("user", "Username", "")
         .password("pass", "Password or token")
+        .check("path", "Only for this path (needs git's credential.useHttpPath)", false)
         .on_submit(|v| {
             let u = v.opt("url").ok_or("A URL is required.")?;
-            let target = format!("{PREFIX_GIT}{}", u.trim_end_matches('/'));
+            let target = cred::git_credential_target(&u, v.on("path")).map_err(|e| e.to_string())?;
             cred::store(&target, &v.text("user"), &v.text("pass")).map_err(|e| e.to_string())?;
-            Ok(vec![Action::Toast("Credential saved".into())])
+            let saved = target.strip_prefix(PREFIX_GIT).unwrap_or(&target).to_string();
+            Ok(vec![Action::Toast(format!("Credential saved for {saved}"))])
         })
 }
 
@@ -154,8 +157,12 @@ impl CredentialsView {
         if !self.loaded {
             self.loaded = true;
             self.entries = cred::list_all();
+            self.store_problem = cred::store_problem();
         }
         ui.label(RichText::new(format!("Stored in: {}", cred::backend_name())).small().color(p.faint));
+        if let Some(problem) = &self.store_problem {
+            error_box(ui, problem, &p);
+        }
         ui.horizontal(|ui| {
             if ui.button("Add API token…").clicked() {
                 cx.form(add_token_form());

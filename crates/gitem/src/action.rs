@@ -35,6 +35,8 @@ pub enum Action {
     /// The same, unless one's showing already.
     InspectFirst(String),
     OpenUrl(String),
+    /// Read the repository again, but not what's on its host.
+    ReloadRepository,
     Copy(String),
     Toast(String),
     Error(String),

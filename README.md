@@ -179,6 +179,15 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 - In a partial clone, line counts in the graph, Visual History and Contributors no longer download files. Commits whose files aren't here show no counts. Opening a commit's diff still fetches what it needs.
 - A squash merge fills in its prepared message and says it's waiting for its commit. A prepared message keeps lines that start with `#`, and drops only git's own list of conflicts.
 - In the graph, No merges and First parent draw real connections rather than lanes that never end, and the arrow keys only scroll when the row is off screen. Hiding the current branch now hides it. A search git rejects says why.
+- A pull request's Check out replaces what `pr/N` held, so it still works after its author force-pushes, and follows the pull request's branch so Pull works. On that branch, Update brings in new commits and Reset to its tip handles a rewrite, asking first. A fork's branch is told from one of the same name here.
+- Launchpad reads up to 200 pull requests or issues per source, a page at a time, and says when it stopped there. It asks the host again for F5, a saved token, a merge, a comment or a changed remote, and not when an unrelated Text tab finishes.
+- A remote's port and plain http are kept for API calls and links. A token saved for a host isn't sent to another port or over plain http: those count as a different host, and need a token of their own. Public hosts such as github.com always go to their real API.
+- A host name containing `bitbucket` other than `bitbucket.org` counts as Bitbucket Server, and Azure DevOps's older address forms work. Bitbucket Connect links to API tokens and asks for the Atlassian email, as app passwords have stopped working.
+- A write to the host that gets redirected fails and says so, where it used to be turned into a read that looked like success. A reply that's cut off, too large, or not a list is an error, not an empty list. A sign-in page or a rate limit is explained, with how long to wait if the host says.
+- Certificates for hosting and AI requests are checked against the system's trust store, so a company's own authority works if Windows trusts it.
+- AI replies cut off at the length limit are errors, not half an answer, and a busy provider is tried twice more, waiting as long as it asks for up to 30 seconds.
+- "Add git credential" saves for the scheme and host, which is what git asks about, unless told to keep the path for `credential.useHttpPath`.
+- The file credential store used off Windows refuses to overwrite a file it can't read, and helpers running at once no longer lose each other's writes.
 - A tab asked for again gets what was asked for: a second search, compare, patch, pull request form, AI answer or line in a file takes over the open tab. An answer that can still be undone keeps its tab and the new one opens beside it.
 - Undo commit asks first. Once the commit is on the remote it says so, and on a first commit it says there's nothing to go back to.
 - Start work makes a branch with no upstream, whatever it starts from, so the toolbar offers Publish.
@@ -208,12 +217,15 @@ Write operations are data (`ops.rs`), so every mutation can be logged, confirmed
 - **Integration tests against real git**, in temporary repositories.
 - **Remote tests** that run real clone, fetch, pull, and push against a bare repository in a temp folder, covering rejected and forced pushes, conflicts, hooks, pruning, tags, and cancelling.
 - **HTTP authentication tests** that run real git against `git http-backend` behind a Basic-auth bridge on localhost, through gitem's credential helper.
-- **HTTP client tests:** the hosting, issue-tracker, and AI clients make real requests to a mock server on localhost.
+- **HTTP client tests:** the hosting, issue-tracker, and AI clients make real requests to a mock server on localhost, including paging, redirected writes, cut-off replies, and a certificate nobody vouches for.
+- **Integration UI tests** (`crates/gitem/tests/integrations.rs`) that click through Launchpad's actions against a mock host, which also serves a real bare repository over HTTP, so Check out runs real git. The Agents view reads a scratch folder, and `ssh-keygen` writes to one.
 - **Headless UI tests** that click real widgets, right-click for context menus, drag refs, and drive the helper windows, then verify the result with git or on disk.
 - **Helper tests** that have real git invoke the built binary.
 - **Property tests** (`crates/gitem-core/tests/properties.rs`) of partial patches through real `git apply`, the merge engine, and the parsers. Case counts are small by default: set `PROPTEST_CASES` for a longer hunt.
 - **Performance tests** that fail if parsing stops scaling linearly (`crates/gitem-core/tests/perf.rs`), if a frame gets slow, or if an idle window starts running git, with very large histories, diffs, files, ref lists and statuses. The harness doesn't paint, so these don't measure drawing.
 - **Lifecycle tests** (`crates/gitem/tests/lifecycle.rs`) of real startup, exit, the saved session, and old, new and broken settings files.
+
+A contract test against a real Gitea, which needs a container, is opt-in. How to run it is at the top of `crates/gitem-core/tests/gitea_contract.rs`.
 
 Tests ignored with a bug's ID, such as `#[ignore = "PF-5, Phase 5"]`, show a known bug and fail until it's fixed.
 

@@ -17,10 +17,20 @@ enum Page {
     Create,
 }
 
+/// What a load of pull requests found.
+struct LoadedPrs {
+    /// Who you are on this host.
+    me: String,
+    list: Vec<PullRequest>,
+    /// Why the host couldn't say who you are.
+    whoami_failed: Option<String>,
+    /// What the host said about what's missing from the list.
+    partial: Option<String>,
+}
+
 pub struct LaunchpadView {
     page: Page,
-    /// Who you are, the list, and why git's host couldn't say who you are.
-    prs: Task<(String, Vec<PullRequest>, Option<String>)>,
+    prs: Task<LoadedPrs>,
     /// What loaded, then what each source that failed said.
     issues: Task<(Vec<Issue>, Vec<String>)>,
     started: bool,
@@ -70,21 +80,25 @@ impl Default for LaunchpadView {
 
 /// Saved token for this host, or whatever git's credential helpers know about it.
 pub fn resolve_client(git: &GitExe, repo: &RemoteRepo) -> Result<ForgeClient, String> {
-    let target = format!("{}{}", cred::PREFIX_FORGE, repo.host);
+    let host = repo.token_host();
+    let target = format!("{}{host}", cred::PREFIX_FORGE);
     if let Ok(Some(c)) = cred::get(&target)
         && !c.secret.is_empty() {
             return Ok(ForgeClient::new(repo.clone(), c.secret, c.username));
         }
-    if let Some((user, pass)) = cred::git_credential_fill(git, &format!("https://{}", repo.host)) {
+    if let Some((user, pass)) = cred::git_credential_fill(git, &repo.root()) {
         return Ok(ForgeClient::new(repo.clone(), pass, user));
     }
-    Err(format!("No token for {}. Add one with Connect.", repo.host))
+    Err(format!("No token for {host}. Add one with Connect."))
 }
 
 pub fn token_form(repo: &RemoteRepo) -> FormDialog {
-    let (host, kind) = (repo.host.clone(), repo.kind);
+    let (host, kind) = (repo.token_host(), repo.kind);
     let mut f = FormDialog::new(format!("Connect to {}", kind.label()), "Save token").info(format!("Create a token at {} and paste it here. It's stored in the {}.", repo.token_page(), cred::backend_name()));
-    if matches!(kind, forge::ForgeKind::Bitbucket | forge::ForgeKind::AzureDevOps) {
+    if kind == forge::ForgeKind::Bitbucket {
+        // An API token goes with the Atlassian account's email, not the Bitbucket username.
+        f = f.info("Give it read and write access to repositories and pull requests, and read access to your account and issues.").text("user", "Atlassian email", "");
+    } else if kind == forge::ForgeKind::AzureDevOps {
         f = f.text("user", "Username", "");
     }
     f.password("token", "Token").on_submit(move |v| {
@@ -140,13 +154,15 @@ impl LaunchpadView {
         let repo = cx.forge().cloned();
         if let Some(r) = repo.clone() {
             let g = git.clone();
-            self.prs.spawn(ctx, move || -> Result<(String, Vec<PullRequest>, Option<String>), String> {
+            self.prs.spawn(ctx, move || -> Result<LoadedPrs, String> {
                 let c = resolve_client(&g, &r)?;
-                let (me, why) = match c.whoami() {
+                let (me, whoami_failed) = match c.whoami() {
+                    Ok(me) if me.is_empty() => (me, Some("The host gave no name.".to_string())),
                     Ok(me) => (me, None),
                     Err(e) => (String::new(), Some(e.to_string())),
                 };
-                Ok((me, c.list_prs().map_err(|e| e.to_string())?, why))
+                let (list, partial) = c.list_prs_noting_problems().map_err(|e| e.to_string())?;
+                Ok(LoadedPrs { me, list, whoami_failed, partial })
             });
         }
         self.issues.spawn(ctx, move || -> Result<(Vec<Issue>, Vec<String>), String> {
@@ -199,7 +215,7 @@ impl LaunchpadView {
         let cur_branch = cx.current_branch();
         if self.prs.poll() || self.pr_branch != cur_branch {
             self.pr_branch = cur_branch.clone();
-            let found = self.prs.get().and_then(|(_, l, _)| l.iter().find(|p| Some(&p.head) == cur_branch.as_ref())).map(|p| (p.head.clone(), p.number, p.url.clone()));
+            let found = self.prs.get().and_then(|l| l.list.iter().find(|p| cur_branch.as_deref().is_some_and(|b| p.is_on_branch(b)))).map(|p| (cur_branch.clone().unwrap_or_default(), p.number, p.url.clone()));
             cx.out.push(Action::BranchPr(found));
         }
         self.issues.poll();
@@ -255,7 +271,7 @@ impl LaunchpadView {
                 }
         }
         ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
-        let Some((me, prs, whoami_failed)) = self.prs.value.take() else {
+        let Some(loaded) = self.prs.value.take() else {
             if self.prs.busy() {
                 spinner_row(ui, "Loading pull requests…", &p);
             } else if cx.forge().is_none() {
@@ -263,10 +279,14 @@ impl LaunchpadView {
             }
             return;
         };
+        let (me, prs) = (&loaded.me, &loaded.list);
         let cur = cx.current_branch();
         let q = self.filter.to_lowercase();
-        if let Some(why) = &whoami_failed {
+        if let Some(why) = &loaded.whoami_failed {
             ui.colored_label(p.warn, "Couldn't find out who you are on this host, so your pull requests are listed under Other.").on_hover_text(why);
+        }
+        if let Some(why) = &loaded.partial {
+            ui.colored_label(p.warn, format!("The host left something out of this list: {why}"));
         }
         if prs.len() >= forge::LIST_LIMIT {
             ui.label(RichText::new(format!("Showing the first {} only.", forge::LIST_LIMIT)).small().color(p.dim));
@@ -285,34 +305,37 @@ impl LaunchpadView {
             if !pinned.is_empty() {
                 egui::CollapsingHeader::new(RichText::new(format!("Pinned ({})", pinned.len())).strong()).id_salt("pinned").default_open(true).show(ui, |ui| {
                     for pr in pinned {
-                        self.pr_card(ui, cx, pr, cur.as_deref(), &prs);
+                        self.pr_card(ui, cx, pr, cur.as_deref(), prs);
                     }
                 });
             }
             for g in LaunchpadGroup::ALL {
-                let group: Vec<&PullRequest> = prs.iter().filter(|x| launchpad_group(x, &me) == g).filter(awake).filter(matching).filter(|x| !cx.settings.pinned_prs.contains(&key_of(x.number))).collect();
+                let group: Vec<&PullRequest> = prs.iter().filter(|x| launchpad_group(x, me) == g).filter(awake).filter(matching).filter(|x| !cx.settings.pinned_prs.contains(&key_of(x.number))).collect();
                 if group.is_empty() {
                     continue;
                 }
                 egui::CollapsingHeader::new(RichText::new(format!("{} ({})", g.label(), group.len())).strong()).id_salt(g.label()).default_open(g != LaunchpadGroup::Other).show(ui, |ui| {
                     for pr in group {
-                        self.pr_card(ui, cx, pr, cur.as_deref(), &prs);
+                        self.pr_card(ui, cx, pr, cur.as_deref(), prs);
                     }
                 });
             }
             if !snoozed.is_empty() {
                 egui::CollapsingHeader::new(RichText::new(format!("Snoozed ({})", snoozed.len())).strong()).id_salt("snoozed").default_open(false).show(ui, |ui| {
                     for pr in snoozed {
-                        self.pr_card(ui, cx, pr, cur.as_deref(), &prs);
+                        self.pr_card(ui, cx, pr, cur.as_deref(), prs);
                     }
                 });
             }
         });
-        self.prs.value = Some((me, prs, whoami_failed));
+        self.prs.value = Some(loaded);
     }
 
     fn pr_card(&mut self, ui: &mut Ui, cx: &mut Cx, pr: &PullRequest, cur: Option<&str>, all: &[PullRequest]) {
         let p = cx.pal.clone();
+        let here = cur.is_some_and(|b| pr.is_on_branch(b));
+        // A fork's branch can share a name with one here, without being what a pull request sits on.
+        let parent = all.iter().find(|x| !x.from_fork && x.head == pr.base);
         egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -342,7 +365,10 @@ impl LaunchpadView {
                 if pr.draft {
                     chip(ui, "Draft", p.dim);
                 }
-                if let Some(parent) = all.iter().find(|x| x.head == pr.base) {
+                if pr.from_fork {
+                    chip(ui, "From a fork", p.dim);
+                }
+                if let Some(parent) = parent {
                     chip(ui, &format!("Stacked on #{}", parent.number), p.series[0]);
                 }
                 for l in &pr.labels {
@@ -352,23 +378,47 @@ impl LaunchpadView {
             ui.horizontal(|ui| {
                 let remote = cx.data.forge_remote.clone().unwrap_or_else(|| "origin".into());
                 let repo = cx.forge().cloned();
-                if cur == Some(pr.head.as_str()) {
+                let local = format!("pr/{}", pr.number);
+                let fetch_ref = repo.as_ref().and_then(|r| r.pr_ref(pr));
+                if here {
                     chip(ui, "Current branch", p.accent);
-                } else if let Some(r) = &repo {
-                    let local = format!("pr/{}", pr.number);
-                    if ui.small_button("Check out").on_hover_text(format!("Fetch into {local} and switch to it")).clicked() {
-                        cx.run(ops::fetch_pr(&remote, &r.pr_ref(pr.number), &local));
+                    // A branch Check out made. Its own branch here has Pull for this.
+                    if cur == Some(local.as_str())
+                        && let Some(fetch) = &fetch_ref
+                    {
+                        if ui.small_button("Update").on_hover_text("Bring in the pull request's new commits").clicked() {
+                            cx.run(ops::update_pr_branch(&remote, fetch));
+                        }
+                        if ui.small_button("Reset to its tip…").on_hover_text("For when its author has force-pushed and Update refuses").clicked() {
+                            cx.confirm("Reset to the pull request", &format!("Make {local} what the pull request holds now? Uncommitted changes are lost. Commits made here stay in the reflog."), "Reset", ops::reset_pr_branch(&remote, fetch));
+                        }
+                    }
+                } else if let Some(fetch) = &fetch_ref {
+                    let tracks = !pr.from_fork && forge::is_plain_branch_name(&pr.head);
+                    if ui.small_button("Check out").on_hover_text(format!("Fetch into {local}, replacing what it held, and switch to it")).clicked() {
+                        cx.run(ops::fetch_pr(&remote, fetch, &local));
+                        if tracks {
+                            cx.run(ops::track_pr(&remote, &pr.head, &local));
+                        }
                         cx.run(ops::checkout(&local));
                     }
                     if ui.small_button("Open in worktree").clicked() {
-                        cx.run(ops::fetch_pr(&remote, &r.pr_ref(pr.number), &local));
+                        cx.run(ops::fetch_pr(&remote, fetch, &local));
+                        if tracks {
+                            cx.run(ops::track_pr(&remote, &pr.head, &local));
+                        }
                         let refs = vec![local.clone()];
                         cx.form(forms::add_worktree(cx.repo, refs, Some(local.clone())));
                     }
+                } else if repo.is_some() {
+                    ui.label(RichText::new("No way to fetch this one from here").small().color(p.faint)).on_hover_text("It comes from a fork, and this host has no ref for it in this repository. Open it on the host.");
                 }
-                if ui.small_button("Compare").on_hover_text("Requires the branches to be fetched").clicked() {
-                    let base = format!("{remote}/{}", pr.base);
-                    let head = format!("{remote}/{}", pr.head);
+                // A fork's branch isn't on this remote, but what Check out fetched is here.
+                let base = format!("{remote}/{}", pr.base);
+                let fetched = cx.data.refs.get().is_some_and(|r| r.branches.iter().any(|b| b.name == local));
+                let head = if pr.from_fork { local.clone() } else { format!("{remote}/{}", pr.head) };
+                let compare = ui.add_enabled(!pr.from_fork || fetched, egui::Button::new("Compare").small()).on_hover_text("Requires the branches to be fetched").on_disabled_hover_text("This comes from a fork. Check it out first.");
+                if compare.clicked() {
                     cx.open(Tab::compare(&base, &head));
                 }
                 if ui.small_button("Open").clicked() {
@@ -396,7 +446,7 @@ impl LaunchpadView {
                         }
                     })));
                 }
-                if cur == Some(pr.head.as_str()) && repo.as_ref().is_some_and(|r| r.kind == forge::ForgeKind::GitHub) && ui.small_button("Suggest my changes").on_hover_text("Post your uncommitted edits as suggested changes on this pull request").clicked()
+                if here && repo.as_ref().is_some_and(|r| r.kind == forge::ForgeKind::GitHub) && ui.small_button("Suggest my changes").on_hover_text("Post your uncommitted edits as suggested changes on this pull request").clicked()
                     && let Some(r2) = repo.clone() {
                         let (g, rp, n) = (cx.repo.git.clone(), cx.repo.clone(), pr.number);
                         cx.out.push(Action::Background(Box::new(move || {
@@ -409,8 +459,8 @@ impl LaunchpadView {
                             Ok(format!("Posted {} on #{n}", plural(s.len(), "suggestion", "suggestions")))
                         })));
                     }
-                if let Some(parent) = all.iter().find(|x| x.head == pr.base)
-                    && cur == Some(pr.head.as_str()) && ui.small_button("Rebase stack").on_hover_text(format!("Rebase onto {} and keep dependent branches together", parent.head)).clicked() {
+                if let Some(parent) = parent
+                    && here && ui.small_button("Rebase stack").on_hover_text(format!("Rebase onto {} and keep dependent branches together", parent.head)).clicked() {
                         cx.form(forms::rebase_form(parent.head.clone()));
                     }
                 if let Some(r) = repo {

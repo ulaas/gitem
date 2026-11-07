@@ -42,14 +42,17 @@ impl AiProvider {
             Self::OpenRouter => "openrouter",
         }
     }
+    /// Hosted models get retired, so these want checking now and then. Last checked against
+    /// each provider's docs and OpenRouter's public list in November 2026. OpenAI's page gives
+    /// the `gpt-4o-mini` snapshot a shutdown date of 14 January 2027.
     pub fn default_model(self) -> &'static str {
         match self {
             Self::Anthropic => "claude-opus-5-5",
             Self::OpenAi => "gpt-4o-mini",
             Self::OpenAiCompatible => "llama3",
-            Self::Gemini => "gemini-2.0-flash",
+            Self::Gemini => "gemini-3.6-flash",
             Self::Mistral => "mistral-large-latest",
-            Self::OpenRouter => "anthropic/claude-opus-5-5",
+            Self::OpenRouter => "anthropic/claude-opus-5.5",
         }
     }
     pub fn needs_key(self) -> bool {
@@ -87,38 +90,98 @@ pub const MAX_PROMPT_CHARS: usize = 600_000;
 /// Follows no redirects: the client only strips `Authorization` when it changes host,
 /// so a redirect would carry an `x-api-key` header along to the new one.
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(300))).build().into()
+    ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(300))).tls_config(crate::forge::tls()).build().into()
+}
+
+/// Tries after the first, for a provider that's busy.
+const RETRIES: u32 = 2;
+/// A longer wait than this is better left to the person, who gets told how long it is.
+const LONGEST_WAIT: Duration = Duration::from_secs(30);
+
+/// How long to wait before trying again, if it's worth trying: overloaded or rate limited.
+fn retry_wait(status: u16, retry_after: Option<&str>, tries_so_far: u32) -> Option<Duration> {
+    if !matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529) || tries_so_far >= RETRIES {
+        return None;
+    }
+    match retry_after.and_then(|s| s.trim().parse::<u64>().ok()) {
+        Some(secs) => Some(Duration::from_secs(secs)).filter(|w| *w <= LONGEST_WAIT),
+        None => Some(Duration::from_millis(500 << tries_so_far)),
+    }
 }
 
 fn post(url: &str, headers: &[(&str, String)], body: &Value) -> Result<Value> {
-    let mut r = agent().post(url);
-    for (k, v) in headers {
-        r = r.header(*k, v);
+    let mut tries = 0;
+    loop {
+        let mut r = agent().post(url);
+        for (k, v) in headers {
+            r = r.header(*k, v);
+        }
+        let mut resp = r.header("content-type", "application/json").send(body.to_string()).map_err(|e| Error::Other(format!("request failed: {e}")))?;
+        let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(Error::Other(format!("HTTP {status}: the AI endpoint redirected this request. gitem doesn't follow redirects, so your key stays with the address you configured. Check the base URL in Settings.")));
+        }
+        let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(String::from);
+        let text = resp.body_mut().read_to_string().map_err(|e| Error::Other(format!("reading response: {e}")))?;
+        if let Some(wait) = retry_wait(status, retry_after.as_deref(), tries) {
+            std::thread::sleep(wait);
+            tries += 1;
+            continue;
+        }
+        let wait = retry_after.filter(|_| status >= 400).map(|s| format!(" The provider says to wait {} s.", s.trim())).unwrap_or_default();
+        let v: Value = serde_json::from_str(&text).map_err(|_| Error::Other(format!("HTTP {status}: {}{wait}", text.chars().take(400).collect::<String>())))?;
+        if status >= 400 {
+            let msg = v.pointer("/error/message").and_then(Value::as_str).unwrap_or(&text);
+            return Err(Error::Other(format!("HTTP {status}: {msg}{wait}")));
+        }
+        return Ok(v);
     }
-    let mut resp = r.header("content-type", "application/json").send(body.to_string()).map_err(|e| Error::Other(format!("request failed: {e}")))?;
-    let status = resp.status().as_u16();
-    if (300..400).contains(&status) {
-        return Err(Error::Other(format!("HTTP {status}: the AI endpoint redirected this request. gitem doesn't follow redirects, so your key stays with the address you configured. Check the base URL in Settings.")));
-    }
-    let text = resp.body_mut().read_to_string().map_err(|e| Error::Other(format!("reading response: {e}")))?;
-    let v: Value = serde_json::from_str(&text).map_err(|_| Error::Other(format!("HTTP {status}: {}", text.chars().take(400).collect::<String>())))?;
-    if status >= 400 {
-        let msg = v.pointer("/error/message").and_then(Value::as_str).unwrap_or(&text);
-        return Err(Error::Other(format!("HTTP {status}: {msg}")));
-    }
-    Ok(v)
 }
+
+/// Half an answer read as a whole one would make a commit message or review that just stops.
+const CUT_OFF: &str = "The reply was cut off at the model's length limit, so it wasn't used. Try again with less selected.";
+const DECLINED: &str = "The model declined this request.";
 
 /// Pull the text out of a Messages API response, checking why it stopped first.
 pub fn parse_anthropic(v: &Value) -> Result<String> {
     if v.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-        return Err(Error::Other("The model declined this request.".into()));
+        return Err(Error::Other(DECLINED.into()));
+    }
+    if matches!(v.get("stop_reason").and_then(Value::as_str), Some("max_tokens" | "model_context_window_exceeded")) {
+        return Err(Error::Other(CUT_OFF.into()));
     }
     let text: String = v
         .get("content")
         .and_then(Value::as_array)
         .map(|blocks| blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("text")).filter_map(|b| b.get("text").and_then(Value::as_str)).collect())
         .unwrap_or_default();
+    if text.is_empty() {
+        return Err(Error::Other("The model returned no text.".into()));
+    }
+    Ok(text)
+}
+
+/// The text of an OpenAI-style chat reply, checking why it stopped first.
+pub fn parse_openai_style(v: &Value) -> Result<String> {
+    match v.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
+        Some("length") => return Err(Error::Other(CUT_OFF.into())),
+        Some("content_filter") => return Err(Error::Other(DECLINED.into())),
+        _ => {}
+    }
+    v.pointer("/choices/0/message/content").and_then(Value::as_str).filter(|t| !t.is_empty()).map(String::from).ok_or_else(|| Error::Other("The model returned no text.".into()))
+}
+
+/// The text of a Gemini reply. It can come in several parts.
+pub fn parse_gemini(v: &Value) -> Result<String> {
+    if v.pointer("/promptFeedback/blockReason").is_some() {
+        return Err(Error::Other(DECLINED.into()));
+    }
+    match v.pointer("/candidates/0/finishReason").and_then(Value::as_str) {
+        Some("MAX_TOKENS") => return Err(Error::Other(CUT_OFF.into())),
+        Some("SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII") => return Err(Error::Other(DECLINED.into())),
+        _ => {}
+    }
+    let text: String = v.pointer("/candidates/0/content/parts").and_then(Value::as_array).map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(Value::as_str)).collect()).unwrap_or_default();
     if text.is_empty() {
         return Err(Error::Other("The model returned no text.".into()));
     }
@@ -186,15 +249,13 @@ pub fn complete(cfg: &AiConfig, key: Option<&str>, system: &str, user: &str) -> 
                 need_key()?;
             }
             let body = json!({"model": model, "messages": [{"role":"system","content":system},{"role":"user","content":user}]});
-            let v = post(&format!("{base}/chat/completions"), &h, &body)?;
-            v.pointer("/choices/0/message/content").and_then(Value::as_str).map(String::from).ok_or_else(|| Error::Other("The model returned no text.".into()))
+            parse_openai_style(&post(&format!("{base}/chat/completions"), &h, &body)?)
         }
         AiProvider::Gemini => {
             let base = if cfg.base_url.is_empty() { "https://generativelanguage.googleapis.com/v1beta" } else { cfg.base_url.trim_end_matches('/') };
             let h = vec![("x-goog-api-key", need_key()?.to_string())];
             let body = json!({"systemInstruction":{"parts":[{"text":system}]},"contents":[{"role":"user","parts":[{"text":user}]}]});
-            let v = post(&format!("{base}/models/{model}:generateContent"), &h, &body)?;
-            v.pointer("/candidates/0/content/parts/0/text").and_then(Value::as_str).map(String::from).ok_or_else(|| Error::Other("The model returned no text.".into()))
+            parse_gemini(&post(&format!("{base}/models/{model}:generateContent"), &h, &body)?)
         }
     }
 }
