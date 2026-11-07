@@ -30,7 +30,7 @@ pub enum UndoPlan {
 /// What was read before the op ran.
 #[derive(Debug, Clone)]
 pub enum Captured {
-    Head { label: String, how: &'static str, branch: String, sha: String, snapshot: Option<String> },
+    Head { label: String, how: &'static str, branch: String, sha: String, snapshot: Option<String>, branches: Vec<(String, String)> },
     Branches(Vec<(String, String, String)>),
     Stashes(Vec<(String, String)>),
     Files { label: String, paths: Vec<String>, tree: String },
@@ -52,10 +52,20 @@ pub struct UndoEntry {
 #[derive(Debug, Clone)]
 enum Check {
     None,
-    /// HEAD is on this branch, at this commit.
-    Head { branch: String, sha: String },
+    /// HEAD is on this branch, at this commit. Other branches the op moved go back too, each one
+    /// only if it's still where the op left it. `said` is the detail before they're mentioned.
+    Head { branch: String, sha: String, moved: Vec<MovedBranch>, said: String },
     /// These files are as the op left them.
     Files { paths: Vec<String>, tree: String },
+}
+
+/// A branch other than HEAD's that an op moved, as a rebase with `--update-refs` does.
+#[derive(Debug, Clone)]
+struct MovedBranch {
+    /// `refs/heads/x`.
+    name: String,
+    before: String,
+    after: String,
 }
 
 fn text(git: &GitExe, cwd: &Path, args: &[&str]) -> Option<String> {
@@ -69,6 +79,47 @@ fn head_branch(git: &GitExe, cwd: &Path) -> String {
 
 fn head_sha(git: &GitExe, cwd: &Path) -> Option<String> {
     text(git, cwd, &["rev-parse", "--verify", "--quiet", "HEAD"])
+}
+
+/// Every local branch and where it is. One quick read, even with thousands of them.
+fn all_branches(git: &GitExe, cwd: &Path) -> Vec<(String, String)> {
+    text(git, cwd, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"]).unwrap_or_default().lines().filter_map(|l| l.split_once(' ')).map(|(n, s)| (n.to_string(), s.to_string())).collect()
+}
+
+/// The branches other than `current` that moved, and were part of what HEAD held before. A branch
+/// from elsewhere in the history that moved meanwhile, by a terminal or another window, isn't this
+/// op's doing and isn't its undo's to put back.
+fn branches_it_moved(git: &GitExe, cwd: &Path, before: &[(String, String)], current: &str, old_head: &str) -> Vec<MovedBranch> {
+    let now = all_branches(git, cwd);
+    let mut moved = Vec::new();
+    for (name, old) in before.iter().filter(|(n, _)| n != current) {
+        let Some((_, after)) = now.iter().find(|(n, s)| n == name && s != old) else { continue };
+        if git.run_raw(Some(cwd), &["merge-base", "--is-ancestor", old, old_head]).is_ok_and(|o| o.ok()) {
+            moved.push(MovedBranch { name: name.clone(), before: old.clone(), after: after.clone() });
+        }
+    }
+    moved
+}
+
+/// `update-ref --stdin` is all or none, and each line only goes if the branch is still where it says.
+fn move_back(op: GitOp, moved: &[MovedBranch]) -> GitOp {
+    if moved.is_empty() {
+        return op;
+    }
+    let lines: String = moved.iter().map(|m| format!("update {} {} {}\n", m.name, m.before, m.after)).collect();
+    op.step(&["update-ref", "-m", "gitem: undo", "--stdin"]).stdin(lines)
+}
+
+/// `one, two go back too.`
+fn going_back(moved: &[MovedBranch]) -> String {
+    if moved.is_empty() {
+        return String::new();
+    }
+    format!(" {} {} back too.", short_names(moved), if moved.len() == 1 { "goes" } else { "go" })
+}
+
+fn short_names(moved: &[MovedBranch]) -> String {
+    moved.iter().map(|m| branch_words(&m.name)).collect::<Vec<_>>().join(", ")
 }
 
 fn size_of(path: &Path) -> u64 {
@@ -113,7 +164,7 @@ impl UndoPlan {
                 let sha = head_sha(git, cwd).ok_or("There's no commit to go back to.")?;
                 // Empty when nothing's changed, which is the usual case.
                 let copy = if *snapshot { text(git, cwd, &["stash", "create"]).filter(|s| !s.is_empty()) } else { None };
-                Ok(Captured::Head { label: label.clone(), how, branch: head_branch(git, cwd), sha, snapshot: copy })
+                Ok(Captured::Head { label: label.clone(), how, branch: head_branch(git, cwd), sha, snapshot: copy, branches: all_branches(git, cwd) })
             }
             UndoPlan::DeleteBranches(names) => {
                 let mut found = Vec::new();
@@ -153,7 +204,7 @@ impl Captured {
     /// The way back, now that the op has worked. None if it changed nothing.
     pub fn into_entry(self, git: &GitExe, cwd: &Path) -> Option<UndoEntry> {
         match self {
-            Captured::Head { label, how, branch, sha, snapshot } => {
+            Captured::Head { label, how, branch, sha, snapshot, branches } => {
                 let now = head_sha(git, cwd)?;
                 if now == sha && snapshot.is_none() {
                     return None;
@@ -170,7 +221,10 @@ impl Captured {
                 if let Some(what) = label.strip_prefix("Undo ") {
                     op = op.undoable(UndoPlan::MoveHead { label: format!("Redo {what}"), how, snapshot: false });
                 }
-                Some(UndoEntry { label, detail, op: op.lossless(), check: Check::Head { branch, sha: now } })
+                let moved = branches_it_moved(git, cwd, &branches, &branch, &sha);
+                let said = detail.clone();
+                detail.push_str(&going_back(&moved));
+                Some(UndoEntry { label, detail, op: move_back(op, &moved).lossless(), check: Check::Head { branch, sha: now, moved, said } })
             }
             Captured::Branches(found) if found.is_empty() => None,
             Captured::Branches(found) => {
@@ -224,7 +278,7 @@ impl UndoEntry {
     pub fn refusal(&self, git: &GitExe, cwd: &Path) -> Option<String> {
         match &self.check {
             Check::None => None,
-            Check::Head { branch, sha } => {
+            Check::Head { branch, sha, .. } => {
                 if head_branch(git, cwd) != *branch {
                     return Some(format!("You've moved off {} since then, so nothing was done. The reflog still has it.", branch_words(branch)));
                 }
@@ -236,5 +290,32 @@ impl UndoEntry {
                 Err(e) => Some(format!("Couldn't check those files, so nothing was done: {e}")),
             },
         }
+    }
+
+    /// This entry as things stand now. A branch that has since moved stays where it is, and so does
+    /// one now checked out in another worktree, whose files wouldn't match it any more. It says so,
+    /// both in the question and when it's done. Reads the repository, so not for the UI thread.
+    pub fn as_it_stands(mut self, git: &GitExe, cwd: &Path) -> UndoEntry {
+        let Check::Head { moved, said, .. } = &self.check else { return self };
+        if moved.is_empty() {
+            return self;
+        }
+        let now = all_branches(git, cwd);
+        let worktrees = text(git, cwd, &["worktree", "list", "--porcelain"]).unwrap_or_default();
+        let checked_out: Vec<&str> = worktrees.lines().filter_map(|l| l.strip_prefix("branch ")).collect();
+        let (go, stay): (Vec<MovedBranch>, Vec<MovedBranch>) = moved.iter().cloned().partition(|m| now.iter().any(|(n, s)| *n == m.name && *s == m.after) && !checked_out.contains(&m.name.as_str()));
+        if stay.is_empty() {
+            return self;
+        }
+        let note = if stay.len() == 1 {
+            format!("{} has moved or been checked out elsewhere since, so it stays where it is.", short_names(&stay))
+        } else {
+            format!("{} have moved or been checked out elsewhere since, so they stay where they are.", short_names(&stay))
+        };
+        self.detail = format!("{said}{} {note}", going_back(&go));
+        self.op.steps.retain(|s| s.args.first().is_none_or(|a| a != "update-ref"));
+        self.op = move_back(self.op, &go);
+        self.op.fallback_note = Some(note);
+        self
     }
 }

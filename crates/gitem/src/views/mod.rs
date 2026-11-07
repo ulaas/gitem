@@ -129,7 +129,7 @@ impl Tab {
             Tab::Graph(_) => "graph".into(),
             Tab::Changes(_) => "changes".into(),
             Tab::Launchpad(_) => "launchpad".into(),
-            Tab::Search(_) => "search".into(),
+            Tab::Search(v) => v.spec(),
             Tab::Visual(_) => "visual".into(),
             Tab::Worktrees(_) => "worktrees".into(),
             Tab::Contributors(_) => "contributors".into(),
@@ -176,7 +176,15 @@ impl Tab {
             "review" => Tab::Review(Box::default()),
             "prune" => Tab::Prune(Box::default()),
             "grep" => Tab::Grep(Box::default()),
-            other => Tab::file(other.strip_prefix("file:")?, None, None),
+            other => {
+                if let Some(q) = other.strip_prefix("search:") {
+                    return Some(Tab::Search(Box::new(search::SearchView::restored_search(q))));
+                }
+                if let Some(sides) = other.strip_prefix("compare:") {
+                    return Some(Tab::Search(Box::new(search::SearchView::restored_compare(sides))));
+                }
+                Tab::file(other.strip_prefix("file:")?, None, None)
+            }
         })
     }
 

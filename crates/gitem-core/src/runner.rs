@@ -192,6 +192,9 @@ pub struct Neutral {
 /// `rebase --update-refs`, the newest features used. The README states this too.
 pub const MIN_GIT: (u32, u32) = (2, 38);
 
+/// `merge-tree --merge-base`, which Check for conflicts uses, came after the rest of gitem's needs.
+pub const MIN_GIT_REPLAY_CHECK: (u32, u32) = (2, 40);
+
 /// Major and minor from `git version 2.56.0.windows.4`.
 pub fn parse_git_version(text: &str) -> Option<(u32, u32)> {
     let mut parts = text.trim().strip_prefix("git version ")?.split('.');

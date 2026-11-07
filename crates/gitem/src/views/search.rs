@@ -34,6 +34,8 @@ pub struct SearchView {
     three_dot: bool,
     compare: Task<CompareResult>,
     auto_run: bool,
+    /// Brought back from the last session, with nothing run yet.
+    restored: bool,
     compare_tab: usize,
     compare_limit: usize,
     changelog: Task<String>,
@@ -50,7 +52,7 @@ fn counted(n: usize, limit: usize) -> String {
 
 impl Default for SearchView {
     fn default() -> Self {
-        Self { mode: Mode::Search, query: String::new(), results: Task::default(), selected: None, limit: SEARCH_PAGE, compare_limit: COMPARE_PAGE, a: String::new(), b: String::new(), three_dot: true, compare: Task::default(), auto_run: false, compare_tab: 0, changelog: Task::default(), natural: Task::default() }
+        Self { mode: Mode::Search, query: String::new(), results: Task::default(), selected: None, limit: SEARCH_PAGE, compare_limit: COMPARE_PAGE, a: String::new(), b: String::new(), three_dot: true, compare: Task::default(), auto_run: false, restored: false, compare_tab: 0, changelog: Task::default(), natural: Task::default() }
     }
 }
 
@@ -66,6 +68,27 @@ impl SearchView {
         Self { mode: Mode::Compare, a: a.to_string(), b: b.to_string(), auto_run: !a.is_empty() && !b.is_empty(), ..Default::default() }
     }
 
+    /// What's kept of this tab for next time: its query or its two sides, not the results.
+    pub fn spec(&self) -> String {
+        match self.mode {
+            Mode::Search if self.query.is_empty() => "search".to_string(),
+            Mode::Search => format!("search:{}", self.query),
+            // A line break, since a ref name can't hold one and a half-typed one could hold anything else.
+            Mode::Compare => format!("compare:{}\n{}", self.a, self.b),
+        }
+    }
+
+    /// From a saved session. It's only filled in, and left for you to run: `change:` or a comparison
+    /// of far-apart refs can take minutes, and launching shouldn't start that.
+    pub fn restored_search(q: &str) -> Self {
+        Self { query: q.to_string(), restored: !q.is_empty(), ..Default::default() }
+    }
+
+    pub fn restored_compare(sides: &str) -> Self {
+        let (a, b) = sides.split_once('\n').unwrap_or((sides, ""));
+        Self { mode: Mode::Compare, a: a.to_string(), b: b.to_string(), restored: !a.is_empty() && !b.is_empty(), ..Default::default() }
+    }
+
     /// A new search or comparison takes over. Just opening the tab leaves it as it is.
     pub fn retarget(&mut self, new: Self) {
         if new.auto_run {
@@ -75,6 +98,7 @@ impl SearchView {
             self.b = new.b;
             self.selected = None;
             self.auto_run = true;
+            self.restored = false;
         }
     }
 
@@ -96,6 +120,7 @@ impl SearchView {
     /// A new search starts from the first page again.
     fn run_search(&mut self, ctx: &egui::Context, cx: &Cx) {
         self.limit = SEARCH_PAGE;
+        self.restored = false;
         self.fetch_search(ctx, cx);
     }
 
@@ -111,6 +136,7 @@ impl SearchView {
 
     fn run_compare(&mut self, ctx: &egui::Context, cx: &Cx) {
         self.compare_limit = COMPARE_PAGE;
+        self.restored = false;
         self.fetch_compare(ctx, cx);
     }
 
@@ -189,6 +215,10 @@ impl SearchView {
         }
         let Some(list) = self.results.value.take() else {
             ui.add_space(12.0);
+            if self.restored && !self.results.busy() {
+                ui.label(RichText::new("Kept from last time and not run yet, as it could take a while. Press Search to run it.").color(p.dim));
+                ui.add_space(12.0);
+            }
             ui.label(RichText::new(HELP).monospace().color(p.dim));
             return;
         };
@@ -232,6 +262,10 @@ impl SearchView {
             error_box(ui, e, &p);
         }
         let Some(res) = self.compare.value.take() else {
+            if self.restored {
+                empty_state(ui, "Kept from last time", "Not run yet, as it could take a while. Press Compare to run it.", &p);
+                return;
+            }
             empty_state(ui, "Pick two refs", "See commits on each side and every changed file.", &p);
             return;
         };

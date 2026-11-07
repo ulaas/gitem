@@ -53,7 +53,7 @@ impl Fx {
     }
     fn take_back(&self, entry: &UndoEntry) -> Option<UndoEntry> {
         assert_eq!(entry.refusal(&self.git, &self.root), None);
-        self.run(entry.op.clone())
+        self.run(entry.clone().as_it_stands(&self.git, &self.root).op)
     }
     fn at(&self) -> &Path {
         &self.root
@@ -246,4 +246,121 @@ fn a_discarded_hunk_comes_back_while_the_rest_of_the_file_stays() {
     assert!(f.read("a.txt").starts_with("1\n") && f.read("a.txt").ends_with("twelve\n"));
     f.take_back(&entry);
     assert!(f.read("a.txt").starts_with("one\n") && f.read("a.txt").ends_with("twelve\n"));
+}
+
+/// main, then one and two stacked on it, with main ahead by a commit and HEAD on two.
+fn stacked() -> Fx {
+    let f = Fx::new();
+    f.git(&["switch", "-q", "-c", "one"]);
+    f.write("one.txt", "1\n");
+    f.commit("on one");
+    f.git(&["switch", "-q", "-c", "two"]);
+    f.write("two.txt", "2\n");
+    f.commit("on two");
+    f.git(&["switch", "-q", "main"]);
+    f.write("m.txt", "m\n");
+    f.commit("on main");
+    f.git(&["switch", "-q", "two"]);
+    f
+}
+
+fn rebase_stack() -> GitOp {
+    ops::rebase(&ops::RebaseOpts { onto: "main".to_string(), update_refs: true, ..Default::default() })
+}
+
+#[test]
+fn undoing_a_rebase_with_update_refs_puts_the_other_branches_back_and_redo_moves_them_again() {
+    let f = stacked();
+    let (one, two) = (f.git(&["rev-parse", "one"]), f.git(&["rev-parse", "two"]));
+    let entry = f.run(rebase_stack()).expect("an undo");
+    let (new_one, new_two) = (f.git(&["rev-parse", "one"]), f.git(&["rev-parse", "two"]));
+    assert_ne!(new_one, one, "the rebase moved it");
+    assert!(entry.detail.contains("one goes back too"), "{}", entry.detail);
+
+    let redo = f.take_back(&entry).expect("a redo");
+    assert_eq!(f.git(&["rev-parse", "two"]), two);
+    assert_eq!(f.git(&["rev-parse", "one"]), one);
+    assert_eq!(f.git(&["symbolic-ref", "--short", "HEAD"]), "two");
+    assert_eq!(f.git(&["status", "--porcelain"]), "");
+
+    assert!(redo.detail.contains("one goes back too"), "{}", redo.detail);
+    f.take_back(&redo);
+    assert_eq!(f.git(&["rev-parse", "two"]), new_two);
+    assert_eq!(f.git(&["rev-parse", "one"]), new_one);
+}
+
+#[test]
+fn rebase_update_refs_set_in_config_counts_too() {
+    let f = stacked();
+    f.git(&["config", "rebase.updateRefs", "true"]);
+    let one = f.git(&["rev-parse", "one"]);
+    let entry = f.run(ops::rebase(&ops::RebaseOpts { onto: "main".to_string(), ..Default::default() })).expect("an undo");
+    assert_ne!(f.git(&["rev-parse", "one"]), one);
+    f.take_back(&entry);
+    assert_eq!(f.git(&["rev-parse", "one"]), one);
+}
+
+#[test]
+fn a_branch_moved_since_the_rebase_stays_and_the_undo_says_so() {
+    let f = stacked();
+    f.git(&["branch", "three", "one"]);
+    let three = f.git(&["rev-parse", "three"]);
+    let two = f.git(&["rev-parse", "two"]);
+    let entry = f.run(rebase_stack()).expect("an undo");
+    assert_ne!(f.git(&["rev-parse", "three"]), three, "both point at the same commit, so both moved");
+
+    // Work done on one since, in a terminal. An undo mustn't throw it away.
+    let later = f.git(&["commit-tree", "-m", "since", "-p", "one", "one^{tree}"]);
+    f.git(&["update-ref", "refs/heads/one", &later]);
+
+    let now = entry.clone().as_it_stands(&f.git, f.at());
+    assert!(now.detail.contains("one has moved") && now.detail.contains("it stays"), "{}", now.detail);
+    assert!(now.detail.contains("three goes back too"), "{}", now.detail);
+    let outputs = now.op.run(&f.git, Some(f.at()), None, &mut |_| {}).unwrap();
+    assert!(now.op.outcome_note(&outputs).is_some_and(|n| n.contains("one has moved")), "said when it's done, as well as when asking");
+    assert_eq!(f.git(&["rev-parse", "two"]), two, "HEAD's branch went back");
+    assert_eq!(f.git(&["rev-parse", "one"]), later, "kept");
+    assert_eq!(f.git(&["rev-parse", "three"]), three, "still where the rebase left it, so it went back");
+}
+
+#[test]
+fn a_branch_checked_out_elsewhere_since_the_rebase_stays() {
+    let f = stacked();
+    let one = f.git(&["rev-parse", "one"]);
+    let entry = f.run(rebase_stack()).expect("an undo");
+    let moved = f.git(&["rev-parse", "one"]);
+    assert_ne!(moved, one);
+    let wt = f._dir.path().join("wt").to_string_lossy().replace('\\', "/");
+    f.git(&["worktree", "add", "-q", &wt, "one"]);
+    f.take_back(&entry);
+    assert_eq!(f.git(&["rev-parse", "one"]), moved, "that checkout's files would no longer match it");
+    assert_eq!(f.git(&["symbolic-ref", "--short", "HEAD"]), "two");
+}
+
+#[test]
+fn a_branch_outside_what_was_rebased_is_not_the_undos_to_move() {
+    let f = stacked();
+    f.git(&["branch", "aside", "main"]);
+    let op = rebase_stack();
+    let captured = op.undo.as_ref().unwrap().capture(&f.git, f.at()).unwrap();
+    op.run(&f.git, Some(f.at()), None, &mut |_| {}).unwrap();
+    // Moved meanwhile by something else, and no part of the branch being rebased.
+    f.git(&["update-ref", "refs/heads/aside", "main~1"]);
+    let entry = captured.into_entry(&f.git, f.at()).expect("an undo");
+    assert!(!entry.detail.contains("aside"), "{}", entry.detail);
+    let aside = f.git(&["rev-parse", "aside"]);
+    f.take_back(&entry);
+    assert_eq!(f.git(&["rev-parse", "aside"]), aside);
+}
+
+#[test]
+fn a_rebase_undo_that_stops_on_uncommitted_changes_moves_no_other_branch() {
+    let f = stacked();
+    let entry = f.run(rebase_stack()).expect("an undo");
+    let moved = f.git(&["rev-parse", "one"]);
+    // m.txt came from main, so going back would have to delete this edit. `reset --keep` stops.
+    f.write("m.txt", "edited\n");
+    assert!(entry.op.run(&f.git, Some(f.at()), None, &mut |_| {}).is_err());
+    assert_eq!(f.git(&["rev-parse", "one"]), moved);
+    assert_eq!(f.read("m.txt"), "edited\n");
 }

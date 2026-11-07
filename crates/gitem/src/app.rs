@@ -2307,6 +2307,8 @@ impl GitemApp {
 
     fn status_bar(&mut self, ui: &mut Ui, out: &mut Vec<Action>) {
         let p = self.pal.clone();
+        let across = (self.repos.len() > 1).then(|| across_open(&self.repos));
+        let mut go_to = None;
         let Some(tab) = self.repos.get_mut(self.active) else {
             if let Some(g) = &self.global_running {
                 ui.horizontal(|ui| {
@@ -2419,8 +2421,23 @@ impl GitemApp {
                 if let Some((_, n, url)) = tab.data.branch_pr.as_ref().filter(|(b, _, _)| Some(b) == current.as_ref()) {
                     crate::widgets::web_link(ui, RichText::new(format!("PR #{n}")).small(), url);
                 }
+                if let Some((summary, rows)) = &across {
+                    ui.menu_button(RichText::new(summary).small(), |ui| {
+                        for (i, row) in rows.iter().enumerate() {
+                            if ui.button(row).clicked() {
+                                go_to = Some(i);
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Open repositories, as last read. Choosing one goes to it.");
+                }
             });
         });
+        if let Some(i) = go_to {
+            self.active = i;
+        }
     }
 
     /// Names the dialogs up now that the backdrop goes behind, so a change can be noticed.
@@ -3354,6 +3371,92 @@ fn only_what_finishes_out_of_sight_and_matters_asks_for_attention() {
     assert!(wants_attention(short, true, false));
 }
 
+/// What's going on in one open repository, or None until it's been read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoGlance {
+    pub changed: usize,
+    pub conflicts: usize,
+    pub ahead: u32,
+    pub behind: u32,
+    /// `Rebasing` and the like.
+    pub doing: &'static str,
+}
+
+/// `3 open: 1 with conflicts, 2 changed, 1 to pull, 1 to push`.
+pub fn glance_summary(all: &[Option<RepoGlance>]) -> String {
+    let read: Vec<&RepoGlance> = all.iter().flatten().collect();
+    let count = |f: fn(&RepoGlance) -> bool| read.iter().filter(|g| f(g)).count();
+    let parts: Vec<String> = [
+        (count(|g| g.conflicts > 0), "with conflicts"),
+        (count(|g| !g.doing.is_empty() && g.conflicts == 0), "mid-operation"),
+        (count(|g| g.changed > 0), "changed"),
+        (count(|g| g.behind > 0), "to pull"),
+        (count(|g| g.ahead > 0), "to push"),
+    ]
+    .iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, w)| format!("{n} {w}"))
+    .collect();
+    if !parts.is_empty() {
+        format!("{} open: {}", all.len(), parts.join(", "))
+    } else if read.len() == all.len() {
+        format!("{} open, all clean", all.len())
+    } else {
+        format!("{} open", all.len())
+    }
+}
+
+/// `gitem: main, 3 changed, 1 to push`.
+pub fn glance_row(name: &str, branch: &str, g: Option<&RepoGlance>) -> String {
+    let Some(g) = g else { return format!("{name}: not read yet") };
+    let mut bits = vec![if branch.is_empty() { "detached".to_string() } else { branch.to_string() }];
+    if !g.doing.is_empty() {
+        bits.push(g.doing.to_lowercase());
+    }
+    if g.conflicts > 0 {
+        bits.push(plural(g.conflicts, "conflict", "conflicts"));
+    }
+    if g.changed > 0 {
+        bits.push(format!("{} changed", grouped(g.changed)));
+    }
+    if g.behind > 0 {
+        bits.push(format!("{} to pull", g.behind));
+    }
+    if g.ahead > 0 {
+        bits.push(format!("{} to push", g.ahead));
+    }
+    format!("{name}: {}", bits.join(", "))
+}
+
+/// The status bar's line about every open repository, and a row for each. Only from what each one
+/// last read, and `counts` keeps its answer until the next read, so a frame costs next to nothing:
+/// no git, no disk, no network.
+fn across_open(repos: &[RepoTab]) -> (String, Vec<String>) {
+    let glances: Vec<Option<RepoGlance>> = repos
+        .iter()
+        .map(|r| {
+            r.data.status.get().map(|s| {
+                let n = r.data.counts();
+                RepoGlance { changed: s.entries.len().saturating_sub(n.conflicts), conflicts: n.conflicts, ahead: s.ahead, behind: s.behind, doing: s.op.label() }
+            })
+        })
+        .collect();
+    let rows = repos.iter().zip(&glances).map(|(r, g)| glance_row(&r.repo.name(), r.data.status.get().and_then(|s| s.branch.as_deref()).unwrap_or(""), g.as_ref())).collect();
+    (glance_summary(&glances), rows)
+}
+
+#[test]
+fn the_line_across_repositories_says_what_needs_you_and_nothing_else() {
+    let g = |changed, conflicts, ahead, behind, doing| Some(RepoGlance { changed, conflicts, ahead, behind, doing });
+    let clean = g(0, 0, 0, 0, "");
+    assert_eq!(glance_summary(&[clean.clone(), clean.clone()]), "2 open, all clean");
+    assert_eq!(glance_summary(&[clean.clone(), None]), "2 open", "it can't say all clean until it's read them all");
+    assert_eq!(glance_summary(&[g(2, 1, 0, 0, "Merging"), g(3, 0, 1, 0, ""), g(0, 0, 1, 2, "Rebasing")]), "3 open: 1 with conflicts, 1 mid-operation, 2 changed, 1 to pull, 2 to push");
+    assert_eq!(glance_row("a", "main", g(1200, 0, 1, 0, "").as_ref()), "a: main, 1,200 changed, 1 to push");
+    assert_eq!(glance_row("a", "", g(0, 2, 0, 0, "Merging").as_ref()), "a: detached, merging, 2 conflicts");
+    assert_eq!(glance_row("a", "main", None), "a: not read yet");
+}
+
 /// Reads whether it can still be done, off the UI thread, then does it.
 fn undo_action(repo: &Repo, entry: gitem_core::undo::UndoEntry, confirming: bool) -> Action {
     let repo = repo.clone();
@@ -3361,6 +3464,7 @@ fn undo_action(repo: &Repo, entry: gitem_core::undo::UndoEntry, confirming: bool
         if let Some(why) = entry.refusal(&repo.git, &repo.root) {
             return Err(why);
         }
+        let entry = entry.as_it_stands(&repo.git, &repo.root);
         Ok(if confirming {
             crate::action::Later::Confirm { title: entry.label.clone(), body: entry.detail.clone(), label: entry.label, op: entry.op }
         } else {

@@ -775,3 +775,183 @@ fn repository_tabs_can_be_moved_and_the_one_showing_stays() {
     assert_eq!(h.state().repos[1].repo.root, first);
     assert_eq!(h.state().active, 1 - showing, "the same repository is showing");
 }
+
+fn commands_run(h: &Harness<GitemApp>, what: &str) -> usize {
+    h.state().repos[0].repo.git.log.lock().unwrap().iter().filter(|c| c.command.contains(what)).count()
+}
+
+fn stacked_rebase_fixture(f: &Fx) {
+    f.git(&["switch", "-q", "-c", "one"]);
+    f.write("one.txt", "1\n");
+    f.commit("on one");
+    f.git(&["switch", "-q", "-c", "two"]);
+    f.write("two.txt", "2\n");
+    f.commit("on two");
+    f.git(&["switch", "-q", "main"]);
+    f.write("m.txt", "m\n");
+    f.commit("on main");
+    f.git(&["switch", "-q", "two"]);
+}
+
+#[test]
+fn undoing_a_stack_rebase_from_the_toolbar_says_so_and_puts_the_branches_back() {
+    let f = Fx::new();
+    stacked_rebase_fixture(&f);
+    let (one, two) = (f.git(&["rev-parse", "one"]), f.head());
+    let mut h = f.harness(|_| {});
+    h.state_mut().repos[0].queue_for_test(gitem_core::ops::rebase(&gitem_core::ops::RebaseOpts { onto: "main".to_string(), update_refs: true, ..Default::default() }));
+    settle(&mut h);
+    assert_ne!(f.git(&["rev-parse", "one"]), one);
+    click(&mut h, "Undo rebase");
+    wait_for_text(&mut h, "one goes back too");
+    let t = Instant::now();
+    while h.query_all_by_label("Undo rebase").count() < 2 {
+        h.step();
+        assert!(t.elapsed() < PATIENCE);
+    }
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(250) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.query_all_by_label("Undo rebase").last().unwrap().click();
+    h.step();
+    settle(&mut h);
+    assert_eq!(f.head(), two);
+    assert_eq!(f.git(&["rev-parse", "one"]), one);
+}
+
+#[test]
+fn a_restored_search_keeps_its_query_and_waits_to_be_run() {
+    let f = Fx::new();
+    let root = f.root.to_string_lossy().replace('\\', "/");
+    let root = gitem_core::Repo::open(f.git.clone(), std::path::Path::new(&root)).unwrap().root.to_string_lossy().replace('\\', "/");
+    let mut h = f.harness(|s| {
+        s.session_tabs.insert(root, vec!["graph".to_string(), "search:first".to_string()]);
+    });
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| t.spec().as_deref() == Some("search:first")), "the session's tab came back");
+    let before = commands_run(&h, "--grep");
+    // Going to the tab, as a click on it would: asking for Search again leaves it as it is.
+    h.state_mut().repos[0].open_tab(Tab::Search(Box::default()));
+    h.step();
+    settle(&mut h);
+    wait_for_text(&mut h, "not run yet");
+    assert_eq!(commands_run(&h, "--grep"), before, "nothing ran on its own");
+    assert!(h.query_by_label_contains("1 commit").is_none());
+    assert!(h.query_all_by_role(Role::TextInput).any(|n| n.value().as_deref() == Some("first")), "the query is in the box");
+    // The tab has the same name.
+    h.query_all_by_label("Search").last().unwrap().click();
+    h.step();
+    wait_for_text(&mut h, "1 commit");
+    assert!(h.query_by_label_contains("not run yet").is_none());
+    assert!(commands_run(&h, "--grep") > before);
+}
+
+#[test]
+fn a_restored_compare_keeps_its_sides_and_waits_to_be_run() {
+    let f = Fx::new();
+    f.git(&["switch", "-q", "-c", "topic"]);
+    f.write("t.txt", "t\n");
+    f.commit("on topic");
+    f.git(&["switch", "-q", "main"]);
+    let spec = Tab::compare("main", "topic").spec().unwrap();
+    assert_eq!(spec, "compare:main\ntopic");
+    let mut h = f.harness(|_| {});
+    let tab = Tab::from_spec(&spec).unwrap();
+    assert_eq!(tab.spec().as_deref(), Some(spec.as_str()), "and it stays kept if left alone");
+    h.state_mut().repos[0].open_tab(tab);
+    h.step();
+    settle(&mut h);
+    wait_for_text(&mut h, "Kept from last time");
+    assert!(h.query_by_label_contains("t.txt").is_none(), "nothing has run");
+    click(&mut h, "Compare");
+    wait_for_text(&mut h, "t.txt");
+}
+
+#[test]
+fn session_specs_for_search_round_trip() {
+    for spec in ["search", "search:fix login @:ann", "compare:a\nb"] {
+        assert_eq!(Tab::from_spec(spec).unwrap().spec().as_deref(), Some(spec));
+    }
+    assert_eq!(Tab::search("x").spec().as_deref(), Some("search:x"));
+}
+
+fn git_claiming(dir: &std::path::Path, version: &str) -> PathBuf {
+    #[cfg(windows)]
+    let (name, text) = ("git.cmd", format!("@echo {version}\r\n"));
+    #[cfg(not(windows))]
+    let (name, text) = ("git", format!("#!/bin/sh\necho '{version}'\n"));
+    let p = dir.join(name);
+    std::fs::write(&p, text).unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p
+}
+
+#[test]
+fn check_for_conflicts_says_plainly_when_git_is_too_old() {
+    let f = Fx::new();
+    f.git(&["switch", "-q", "-c", "topic"]);
+    f.write("a.txt", "topic\n");
+    f.commit("touches a");
+    f.git(&["switch", "-q", "main"]);
+    f.write("a.txt", "main\n");
+    f.commit("on main");
+    f.git(&["switch", "-q", "topic"]);
+    let d = tempfile::tempdir().unwrap();
+    let mut repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+
+    repo.git.path = git_claiming(d.path(), "git version 2.39.5");
+    let e = repo.predict_replay("main", &[]).unwrap_err().to_string();
+    assert!(e.contains("needs git 2.40") && e.contains("this is git 2.39"), "{e}");
+
+    let edge = tempfile::tempdir().unwrap();
+    repo.git.path = git_claiming(edge.path(), "git version 2.40.0");
+    assert_eq!(repo.predict_replay("main", &[]).unwrap(), None, "2.40 is enough");
+
+    // In the app, once the plan has loaded with the real git.
+    let mut h = f.harness(|_| {});
+    open(&mut h, Tab::rebase(Some("main".to_string())));
+    h.state_mut().repos[0].repo.git.path = git_claiming(d.path(), "git version 2.39.5");
+    click(&mut h, "Check for conflicts");
+    wait_for_text(&mut h, "Couldn't check for conflicts: this needs git 2.40 or newer, and this is git 2.39.");
+}
+
+#[test]
+fn the_status_bar_sums_up_open_repositories_without_running_anything() {
+    let f = Fx::new();
+    let other = f.beside("other");
+    std::fs::create_dir(&other).unwrap();
+    let in_other = |a: &[&str]| f.git.run(Some(&other), a).unwrap().text();
+    in_other(&["init", "-q", "-b", "trunk"]);
+    for (k, v) in [("user.name", "T"), ("user.email", "t@example.com"), ("core.autocrlf", "false")] {
+        in_other(&["config", k, v]);
+    }
+    std::fs::write(other.join("b.txt"), "b\n").unwrap();
+    in_other(&["add", "-A"]);
+    in_other(&["commit", "-q", "-m", "first"]);
+    f.write("a.txt", "changed\n");
+    let mut h = f.harness(|_| {});
+    assert!(h.query_by_label_contains(" open").is_none(), "with one repository there's nothing to sum up");
+    let ctx = h.ctx.clone();
+    h.state_mut().open_repo(&ctx, &other, false);
+    settle(&mut h);
+    wait_for_label(&mut h, "2 open: 1 changed");
+
+    // Frames with nothing going on, once all is read: not one more command in either repository.
+    let counts = |h: &Harness<GitemApp>| h.state().repos.iter().map(|r| r.repo.git.log.lock().unwrap().len()).collect::<Vec<_>>();
+    let before = counts(&h);
+    for _ in 0..50 {
+        h.step();
+    }
+    assert_eq!(counts(&h), before, "frames ran git");
+
+    assert_eq!(h.state().active, 1);
+    click(&mut h, "2 open: 1 changed");
+    wait_for_text(&mut h, "other: trunk");
+    click(&mut h, "repo: main, 1 changed");
+    assert_eq!(h.state().active, 0, "and choosing one goes to it");
+}

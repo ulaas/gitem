@@ -947,8 +947,13 @@ impl Repo {
 
     /// What replaying `commits`, oldest first, onto `onto` would run into. Stops at the first
     /// conflict, since what follows depends on how that gets resolved. Nothing is touched: the
-    /// results are objects nothing refers to, which git cleans up itself. Needs git 2.40.
+    /// results are objects nothing refers to, which git cleans up itself. Needs git 2.40, and says so.
     pub fn predict_replay(&self, onto: &str, commits: &[String]) -> Result<Option<(String, Vec<String>)>> {
+        let need = crate::runner::MIN_GIT_REPLAY_CHECK;
+        // An unreadable version goes ahead: git's own answer is then the best there is.
+        if let Some((major, minor)) = crate::runner::parse_git_version(&self.git.version()).filter(|v| *v < need) {
+            return Err(Error::Git(format!("this needs git {}.{} or newer, and this is git {major}.{minor}. The rebase itself will still run.", need.0, need.1)));
+        }
         let mut ours = self.resolve_git(rev_arg(onto)?)?;
         // commit-tree wants someone's name, and any will do for an object nobody will see.
         let env: Vec<(String, String)> = ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"].iter().map(|k| (k.to_string(), "gitem".to_string())).chain(["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"].iter().map(|k| (k.to_string(), "gitem@localhost".to_string()))).collect();
