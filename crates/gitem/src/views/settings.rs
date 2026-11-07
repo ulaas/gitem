@@ -565,7 +565,7 @@ impl SettingsView {
             g.switch(&mut s.pull_autostash, "Stash changes around a pull", "The toolbar's Pull puts uncommitted changes aside and brings them back after.");
             g.switch(&mut s.recurse_submodules, "Bring submodules along", "Pull and check out also update submodules, as --recurse-submodules does.");
             g.switch(&mut s.attention_when_done, "Flash the taskbar when something's done", "When something that took a while finishes, or anything fails, while you're in another window.");
-            g.switch(&mut s.notify_when_done, "Show a system notification too", "On Windows, at the same moments: what it was and whether it worked, with none of git's output. Nothing is watched or asked of any host for this.");
+            g.switch(&mut s.notify_when_done, "Show a system notification too", "At the same moments: what it was and whether it worked, with none of git's output. Linux needs notify-send for this, and macOS may ask to allow it. Nothing is watched or asked of any host for this.");
         });
         group(ui, "Commits", p, |g| {
             g.switch(&mut s.commit_sign, "Sign commits", "On by default in the commit box.");

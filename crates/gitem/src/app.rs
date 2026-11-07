@@ -3457,7 +3457,10 @@ impl eframe::App for GitemApp {
             crate::widgets::set_dialog_parent(frame);
         }
         #[cfg(not(windows))]
-        let _ = frame;
+        {
+            let _ = frame;
+            crate::notify::window_is_up();
+        }
         self.frame(ui);
     }
 
