@@ -6,16 +6,21 @@ use gitem_core::ops;
 use crate::action::Cx;
 use crate::widgets::*;
 
+/// How many entries are drawn at first, and how many more each time someone asks. Each one
+/// can be a page of git's output, and they have different heights.
+const SHOWN_STEP: usize = 200;
+
 pub struct ConsoleView {
     input: String,
     show_reads: bool,
     filter: String,
     stick: bool,
+    shown: usize,
 }
 
 impl Default for ConsoleView {
     fn default() -> Self {
-        Self { input: String::new(), show_reads: false, filter: String::new(), stick: true }
+        Self { input: String::new(), show_reads: false, filter: String::new(), stick: true, shown: SHOWN_STEP }
     }
 }
 
@@ -55,11 +60,19 @@ impl ConsoleView {
             });
             ui.add_space(2.0);
         });
-        let entries: Vec<_> = cx.repo.git.log.lock().map(|l| l.iter().cloned().collect()).unwrap_or_default();
         let q = self.filter.to_lowercase();
         let root = cx.repo.root.display().to_string();
+        // Up to 2,000 entries of 8 KB each, so no copy of them all per frame. Workers wait for
+        // this lock no longer than a frame, and only to add a line.
+        let log = cx.repo.git.log.clone();
+        let Ok(entries) = log.lock() else { return };
+        let matching: Vec<&gitem_core::runner::LogEntry> = entries.iter().filter(|e| (self.show_reads || e.is_write) && (q.is_empty() || e.command.to_lowercase().contains(&q))).collect();
+        let older = matching.len().saturating_sub(self.shown);
         egui::ScrollArea::vertical().id_salt("console").stick_to_bottom(self.stick).auto_shrink([false, false]).show(ui, |ui| {
-            for e in entries.iter().filter(|e| (self.show_reads || e.is_write) && (q.is_empty() || e.command.to_lowercase().contains(&q))) {
+            if older > 0 && ui.small_button(format!("Show {} older", older.min(SHOWN_STEP))).clicked() {
+                self.shown += SHOWN_STEP;
+            }
+            for e in &matching[older..] {
                 if !e.cwd.is_empty() && e.cwd != root {
                     ui.label(RichText::new(&e.cwd).small().color(p.faint));
                 }
