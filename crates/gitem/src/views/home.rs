@@ -289,20 +289,24 @@ impl HomeView {
             }
             if self.scan_pick.poll()
                 && let Some(Some(dir)) = self.scan_pick.value.take() {
-                    let found = gitem_core::repo::find_repos(&dir, 3);
+                    // Off the UI thread, as a big folder takes a while.
                     let name = w.name.clone();
-                    cx.toast(format!("Found {} repositories", found.len()));
-                    cx.out.push(Action::Settings(Box::new(move |s| {
-                        if let Some(x) = s.workspaces.iter_mut().find(|x| x.name == name) {
-                            for f in found {
-                                let f = f.to_string_lossy().replace('\\', "/");
-                                if !x.repos.contains(&f) {
-                                    x.repos.push(f);
+                    cx.out.push(Action::Later(Box::new(move || {
+                        let found = gitem_core::repo::find_repos(&dir, 3);
+                        Ok(crate::action::Later::Many(vec![
+                            crate::action::Later::Toast(format!("Found {} repositories", found.len())),
+                            crate::action::Later::Settings(Box::new(move |s| {
+                                if let Some(x) = s.workspaces.iter_mut().find(|x| x.name == name) {
+                                    for f in found {
+                                        let f = f.to_string_lossy().replace('\\', "/");
+                                        if !x.repos.contains(&f) {
+                                            x.repos.push(f);
+                                        }
+                                    }
                                 }
-                            }
-                        }
+                            })),
+                        ]))
                     })));
-                    self.summaries_for = None;
                 }
             if ui.small_button("Delete workspace…").clicked() {
                 let name = w.name.clone();

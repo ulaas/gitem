@@ -1430,8 +1430,16 @@ fn check_source_revs(src: &DiffSource) -> Result<()> {
 
 /// `git init` target check and repo discovery for the workspace scanner.
 pub fn find_repos(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+    find_repos_until(root, max_depth, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// The same, stopping with what it has once `stop` is set: a big folder takes a while.
+pub fn find_repos_until(root: &Path, max_depth: usize, stop: &std::sync::atomic::AtomicBool) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    fn walk(p: &Path, depth: usize, max: usize, out: &mut Vec<PathBuf>) {
+    fn walk(p: &Path, depth: usize, max: usize, stop: &std::sync::atomic::AtomicBool, out: &mut Vec<PathBuf>) {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         if p.join(".git").exists() {
             out.push(p.to_path_buf());
             return;
@@ -1445,11 +1453,12 @@ pub fn find_repos(root: &Path, max_depth: usize) -> Vec<PathBuf> {
             let name = e.file_name();
             let n = name.to_string_lossy();
             if path.is_dir() && !n.starts_with('.') && n != "node_modules" && n != "target" {
-                walk(&path, depth + 1, max, out);
+                walk(&path, depth + 1, max, stop, out);
             }
         }
     }
-    walk(root, 0, max_depth, &mut out);
+    walk(root, 0, max_depth, stop, &mut out);
+    out.sort();
     out
 }
 

@@ -7369,3 +7369,279 @@ fn a_view_with_nothing_to_act_on_keeps_its_buttons_quiet() {
     pump_for_label(&mut h, "Create pull request");
     assert!(h.query_all_by_label("Refresh").any(|n| n.accesskit_node().is_disabled()));
 }
+
+// ---- Scan for repositories, dropping a folder (UX-38), switching with changes in the way and the
+// branch tree (UX-27), arrow keys (UX-8). Dropped files and keys are kittest's synthetic input.
+
+fn welcome_harness<'a>(f: &Fx) -> Harness<'a, GitemApp> {
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, gitem_core::settings::Settings { details_on_open: false, ..Default::default() });
+    app.git = Ok(f.git.clone());
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5);
+    builder.build_ui_state(|ui, app: &mut GitemApp| app.frame(ui), app)
+}
+
+/// A scratch folder with repositories in it, and a repository's folder inside a repository,
+/// which a scan shouldn't go looking in.
+fn scan_tree(f: &Fx) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let top = dir.path().canonicalize().unwrap();
+    for name in ["one", "deep/er/two", "skip/node_modules/three"] {
+        let d = top.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        f.git.run(Some(&d), &["init", "-q"]).unwrap();
+    }
+    std::fs::create_dir_all(top.join("one/inner")).unwrap();
+    f.git.run(Some(&top.join("one/inner")), &["init", "-q"]).unwrap();
+    std::fs::create_dir_all(top.join("not-a-repo")).unwrap();
+    dir
+}
+
+#[test]
+fn scanning_a_folder_offers_its_repositories_and_opens_the_ones_ticked() {
+    let f = Fx::new();
+    let dir = scan_tree(&f);
+    let top = dir.path().canonicalize().unwrap();
+    let mut h = welcome_harness(&f);
+    click(&mut h, "Scan for repositories…");
+    pump_for_label(&mut h, "Scan");
+    let ctx = h.ctx.clone();
+    // The form's Browse is a real picker, so this goes in by the action its Scan makes.
+    click(&mut h, "Cancel");
+    h.state_mut().apply_action(&ctx, Action::ScanRepos(top.clone()));
+    pump_for_label(&mut h, "Open 2 repositories");
+    assert!(h.query_by_label("one").is_some() && h.query_by_label("deep/er/two").is_some());
+    assert!(h.query_by_label_contains("three").is_none(), "not in node_modules");
+    assert!(h.query_by_label_contains("inner").is_none(), "not inside a repository");
+    click(&mut h, "one");
+    pump_for_label(&mut h, "Open 1 repository");
+    click(&mut h, "Open 1 repository");
+    pump(&mut h, |a| a.repos.len() == 1, "the repository to open");
+    assert!(h.state().repos[0].repo.root.ends_with("two"), "{:?}", h.state().repos[0].repo.root);
+}
+
+#[test]
+fn a_folder_with_no_repositories_says_so_and_closes() {
+    let f = Fx::new();
+    let dir = scan_tree(&f);
+    let top = dir.path().canonicalize().unwrap().join("not-a-repo");
+    let mut h = welcome_harness(&f);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::ScanRepos(top.clone()));
+    pump_for_label(&mut h, "No repositories in this folder.");
+    click(&mut h, "Close");
+    assert!(h.query_by_label("No repositories in this folder.").is_none());
+    assert!(h.state().repos.is_empty());
+}
+
+fn drop_on_window(h: &mut Harness<GitemApp>, path: &Path) {
+    #[derive(Debug)]
+    struct Dropped(PathBuf);
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("not read".into())
+        }
+    }
+    h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped(path.to_path_buf())));
+    h.step();
+    h.step();
+}
+
+#[test]
+fn dropping_a_folder_or_a_file_on_the_window_opens_its_repository() {
+    let f = Fx::new();
+    f.write("sub/file.txt", "x\n");
+    f.commit("first");
+    let mut h = welcome_harness(&f);
+    drop_on_window(&mut h, &f.root);
+    pump(&mut h, |a| a.repos.len() == 1, "a dropped folder to open");
+    assert_eq!(h.state().repos[0].repo.root.canonicalize().unwrap(), f.root);
+    let second = Fx::new();
+    second.write("sub/file.txt", "x\n");
+    second.commit("first");
+    drop_on_window(&mut h, &second.root.join("sub/file.txt"));
+    pump(&mut h, |a| a.repos.len() == 2, "a dropped file's repository to open");
+    assert_eq!(h.state().repos[1].repo.root.canonicalize().unwrap(), second.root);
+}
+
+/// Two branches whose versions of `a.txt` differ, and an edit to it.
+fn changes_in_the_way(f: &Fx) {
+    f.write("a.txt", "one\n");
+    f.commit("first");
+    f.git(&["branch", "other"]);
+    f.write("a.txt", "two\n");
+    f.commit("second");
+    f.write("a.txt", "my edit\n");
+}
+
+fn switch_to_other(h: &mut Harness<GitemApp>) {
+    settle(h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::checkout("other")));
+}
+
+#[test]
+fn a_switch_with_changes_in_the_way_offers_a_stash() {
+    let f = Fx::new();
+    changes_in_the_way(&f);
+    let mut h = harness(&f);
+    switch_to_other(&mut h);
+    pump_for_label(&mut h, "Changes are in the way of other");
+    assert_eq!(f.git(&["branch", "--show-current"]).trim(), "main", "nothing's happened yet");
+    assert!(h.state().errors_showing().is_empty(), "{:?}", h.state().errors_showing());
+    click(&mut h, "Switch");
+    wait_for(&mut h, "the switch", || f.git(&["branch", "--show-current"]).trim() == "other");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(std::fs::read_to_string(f.root.join("a.txt")).unwrap(), "one\n");
+    assert!(f.git(&["stash", "list"]).contains("Before switching to other"));
+}
+
+#[test]
+fn a_switch_with_changes_in_the_way_can_bring_them_along_or_be_cancelled() {
+    let f = Fx::new();
+    changes_in_the_way(&f);
+    let mut h = harness(&f);
+    switch_to_other(&mut h);
+    pump_for_label(&mut h, "Changes are in the way of other");
+    click(&mut h, "Cancel");
+    wait_until_quiet(&mut h);
+    assert_eq!(f.git(&["branch", "--show-current"]).trim(), "main");
+    assert_eq!(std::fs::read_to_string(f.root.join("a.txt")).unwrap(), "my edit\n");
+    // The same again straight away would count as a double click.
+    std::thread::sleep(Duration::from_millis(700));
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::checkout("other")));
+    pump_for_label(&mut h, "Changes are in the way of other");
+    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.step();
+    h.step();
+    click(&mut h, "Bring the changes along, merging them. This can leave conflicts");
+    click(&mut h, "Switch");
+    wait_for(&mut h, "the switch", || f.git(&["branch", "--show-current"]).trim() == "other");
+    wait_until_quiet(&mut h);
+    assert!(std::fs::read_to_string(f.root.join("a.txt")).unwrap().contains("my edit"), "not lost");
+    // Those two versions conflict, and then git also keeps a copy in the stash.
+    assert!(f.git(&["status"]).contains("both modified"));
+}
+
+#[test]
+fn branch_folders_open_and_close_in_the_sidebar() {
+    let f = Fx::new();
+    f.write("a.txt", "one\n");
+    f.commit("first");
+    for b in ["team/alpha/one", "team/alpha/two", "team/beta", "solo/lone"] {
+        f.git(&["branch", b]);
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "Close folder team");
+    assert!(h.query_by_label("one").is_some() && h.query_by_label("two").is_some() && h.query_by_label("beta").is_some());
+    assert!(h.query_by_label("solo/lone").is_some(), "one branch makes no folder");
+    click(&mut h, "Close folder team/alpha");
+    pump_for_label(&mut h, "Open folder team/alpha");
+    assert!(h.query_by_label("one").is_none());
+    assert!(h.query_by_label("beta").is_some(), "only that folder");
+    click(&mut h, "Close folder team");
+    pump_for_label(&mut h, "Open folder team");
+    assert!(h.query_by_label("beta").is_none());
+    click(&mut h, "Open folder team");
+    pump_for_label(&mut h, "beta");
+    assert!(h.query_by_label("one").is_none(), "a folder inside stays as it was");
+}
+
+/// The rows further down aren't drawn until they're near the view, so focus has to bring them.
+#[test]
+fn arrow_keys_go_down_a_sidebar_list_longer_than_the_window() {
+    use egui_kittest::kittest::NodeT;
+    let f = Fx::new();
+    f.write("a.txt", "one
+");
+    f.commit("first");
+    for i in 0..60 {
+        f.git(&["branch", &format!("b{i:02}")]);
+    }
+    let mut h = sized_harness(&f, vec2(1100.0, 500.0), no_details());
+    settle(&mut h);
+    pump_for_label(&mut h, "b00");
+    let focused = |h: &Harness<GitemApp>| h.query_all_by_label_contains("").find(|n| n.accesskit_node().is_focused()).map(|n| n.accesskit_node().label().unwrap_or_default());
+    h.get_by_label("b00").focus();
+    h.step();
+    h.step();
+    assert_eq!(focused(&h).as_deref(), Some("b00"));
+    for i in 0..40 {
+        h.key_press(egui::Key::ArrowDown);
+        h.step();
+        h.step();
+        assert_eq!(focused(&h).unwrap_or_default(), format!("b{:02}", i + 1));
+    }
+    let now = focused(&h).unwrap_or_default();
+    assert_eq!(now, "b40");
+    let r = h.get_by_label("b40").rect();
+    assert!(r.bottom() <= 500.0, "off the window at {r:?}");
+}
+
+#[test]
+fn right_and_left_open_and_close_a_focused_row() {
+    let f = Fx::new();
+    f.write("a.txt", "one\n");
+    f.commit("first");
+    for b in ["aaa", "team/one", "team/two"] {
+        f.git(&["branch", b]);
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "Close folder team");
+    h.get_by_label("Close folder team").focus();
+    h.step();
+    h.step();
+    h.key_press(egui::Key::ArrowLeft);
+    pump_for_label(&mut h, "Open folder team");
+    assert!(h.query_by_label("one").is_none());
+    h.key_press(egui::Key::ArrowRight);
+    pump_for_label(&mut h, "one");
+    h.get_by_label("aaa").focus();
+    h.step();
+    h.step();
+    h.key_press(egui::Key::ArrowRight);
+    pump_for_label(&mut h, "Collapse aaa");
+    h.key_press(egui::Key::ArrowLeft);
+    pump_for_label(&mut h, "Expand aaa");
+}
+
+#[test]
+fn arrow_keys_move_through_the_rows_of_the_sidebar() {
+    use egui_kittest::kittest::NodeT;
+    let f = Fx::new();
+    f.write("a.txt", "one\n");
+    f.commit("first");
+    for b in ["aaa", "bbb", "ccc"] {
+        f.git(&["branch", b]);
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "aaa");
+    let mut order: Vec<(f32, String)> = ["aaa", "bbb", "ccc", "main"].iter().map(|n| (h.get_by_label(n).rect().top(), n.to_string())).collect();
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let order: Vec<String> = order.into_iter().map(|(_, n)| n).collect();
+    let focused = |h: &Harness<GitemApp>| h.query_all_by_label_contains("").find(|n| n.accesskit_node().is_focused()).map(|n| n.accesskit_node().label().unwrap_or_default());
+    h.get_by_label(&order[0]).focus();
+    h.step();
+    h.step();
+    assert_eq!(focused(&h).as_deref(), Some(order[0].as_str()));
+    h.key_press(egui::Key::ArrowDown);
+    h.step();
+    h.step();
+    assert_eq!(focused(&h).as_deref(), Some(order[1].as_str()), "down");
+    h.key_press(egui::Key::ArrowDown);
+    h.step();
+    h.step();
+    assert_eq!(focused(&h).as_deref(), Some(order[2].as_str()), "down again");
+    h.key_press(egui::Key::ArrowUp);
+    h.step();
+    h.step();
+    assert_eq!(focused(&h).as_deref(), Some(order[1].as_str()), "up");
+}

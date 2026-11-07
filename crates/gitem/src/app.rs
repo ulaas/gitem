@@ -352,10 +352,8 @@ impl RepoTab {
                         if let Some(p) = open_after {
                             out.push(Action::OpenRepo(p));
                         }
-                        if !note.is_empty() {
-                            out.push(Action::Toast(format!("{title}: {note}")));
-                        } else if self.queue.is_empty() {
-                            out.push(Action::Toast(format!("{title}: done")));
+                        if !note.is_empty() || self.queue.is_empty() {
+                            out.push(Action::Toast(ops::done_message(&title, &note)));
                         }
                     }
                     Err(e) => {
@@ -377,6 +375,8 @@ impl RepoTab {
                             if dropped > 0 {
                                 out.push(Action::Error(format!("{title} stopped at a conflict.{not_run}")));
                             }
+                        } else if let (Some(target), Some(files), true) = (title.strip_prefix("Switch to "), ops::switch_blocked_by_changes(&e), dropped == 0) {
+                            out.push(Action::Form(forms::switch_with_changes(target.to_string(), files)));
                         } else {
                             out.push(Action::Error(format!("{title} failed:\n{e}{not_run}")));
                         }
@@ -710,6 +710,18 @@ fn dialog_backdrop(ctx: &egui::Context, controls_width: f32) {
     }
 }
 
+/// How many folders down Scan for repositories looks.
+const SCAN_DEPTH: usize = 4;
+
+struct RepoScan {
+    root: PathBuf,
+    task: crate::task::Task<Vec<PathBuf>>,
+    cancel: Arc<AtomicBool>,
+    found: Vec<PathBuf>,
+    picked: Vec<bool>,
+    done: bool,
+}
+
 /// What a yes in the close dialog goes on to close.
 enum CloseTarget {
     Tab { root: PathBuf, key: String },
@@ -771,6 +783,8 @@ pub struct GitemApp {
     applied: Option<(gitem_core::settings::ThemeChoice, u32, String)>,
     open_path: String,
     settings_dirty: bool,
+    /// Looking for repositories in a folder, and what was found.
+    repo_scan: Option<RepoScan>,
     /// The CA file setting last handed to the HTTP clients.
     ca_file_applied: String,
     pub shot: Option<Shot>,
@@ -895,6 +909,7 @@ impl GitemApp {
             applied: None,
             open_path: String::new(),
             settings_dirty: false,
+            repo_scan: None,
             ca_file_applied: String::new(),
             shot: None,
             shot_tabs: Vec::new(),
@@ -1486,6 +1501,13 @@ impl GitemApp {
                     self.close_guard = Some(CloseGuard { target: CloseTarget::Tab { root: r.repo.root.clone(), key }, items: vec![lost] });
                 }
             }
+            Action::ScanRepos(root) => {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let mut task = crate::task::Task::default();
+                let (dir, stop) = (root.clone(), cancel.clone());
+                task.spawn(ctx, move || -> Result<Vec<PathBuf>, String> { Ok(gitem_core::repo::find_repos_until(&dir, SCAN_DEPTH, &stop)) });
+                self.repo_scan = Some(RepoScan { root, task, cancel, picked: Vec::new(), found: Vec::new(), done: false });
+            }
             Action::Many(all) => {
                 for a in all {
                     self.apply_action(ctx, a);
@@ -1949,6 +1971,10 @@ impl GitemApp {
             out.push(Action::Form(forms::init_form()));
             ui.close();
         }
+        if ui.button("Scan for repositories…").clicked() {
+            out.push(Action::Form(forms::scan_form()));
+            ui.close();
+        }
         if !self.settings.recent_repos.is_empty() {
             ui.separator();
             ui.label(RichText::new("Recent").small().color(self.pal.faint));
@@ -1991,7 +2017,7 @@ impl GitemApp {
                 return;
             }
             ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 300.0).max(0.0) / 2.0);
+                ui.add_space((ui.available_width() - 470.0).max(0.0) / 2.0);
                 if ui.add(egui::Button::new(RichText::new("Clone…").color(p.on_accent)).fill(p.accent)).clicked() {
                     out.push(Action::Form(forms::clone_form()));
                 }
@@ -2000,6 +2026,9 @@ impl GitemApp {
                 }
                 if ui.button("Initialize…").clicked() {
                     out.push(Action::Form(forms::init_form()));
+                }
+                if ui.button("Scan for repositories…").on_hover_text("Find the repositories in a folder, and open the ones you want").clicked() {
+                    out.push(Action::Form(forms::scan_form()));
                 }
             });
             ui.add_space(6.0);
@@ -2210,6 +2239,7 @@ impl GitemApp {
         add(self.link_prompt.is_some(), "link");
         add(self.trust_question_open(), "trust");
         add(self.help.is_some(), "help");
+        add(self.repo_scan.is_some(), "scan");
         names
     }
 
@@ -2562,6 +2592,56 @@ impl GitemApp {
     }
 
     /// Every key, from one table, narrowed by what's typed.
+    fn repo_scan_dialog(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
+        let settled = self.dialogs_settled;
+        let p = self.pal.clone();
+        let Some(scan) = &mut self.repo_scan else { return };
+        if scan.task.poll() {
+            scan.found = scan.task.value.take().unwrap_or_default();
+            // Those already open don't need asking about.
+            let open: Vec<&Path> = self.repos.iter().map(|r| r.repo.root.as_path()).collect();
+            scan.picked = scan.found.iter().map(|f| !open.contains(&f.as_path())).collect();
+            scan.done = true;
+        }
+        let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let mut open = false;
+        dialog_window("Scan for repositories", settled).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.label(RichText::new(scan.root.to_string_lossy()).color(p.dim));
+            ui.add_space(4.0);
+            if !scan.done {
+                spinner_row(ui, "Looking…", &p);
+            } else if let Some(e) = &scan.task.error {
+                error_box(ui, e, &p);
+            } else if scan.found.is_empty() {
+                ui.label("No repositories in this folder.");
+            } else {
+                egui::ScrollArea::vertical().max_height(ctx.content_rect().height() - 280.0).show(ui, |ui| {
+                    for (path, on) in scan.found.iter().zip(scan.picked.iter_mut()) {
+                        let name = path.strip_prefix(&scan.root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+                        ui.checkbox(on, if name.is_empty() { ".".to_string() } else { name });
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let n = scan.picked.iter().filter(|x| **x).count();
+                if scan.done && !scan.found.is_empty() {
+                    open = ui.add_enabled(n > 0, egui::Button::new(format!("Open {}", plural(n, "repository", "repositories")))).on_disabled_hover_text("Tick the ones to open.").clicked();
+                }
+                close |= ui.button(if scan.done { "Close" } else { "Stop" }).clicked();
+            });
+        });
+        if open {
+            out.extend(scan.found.iter().zip(&scan.picked).filter(|(_, on)| **on).map(|(path, _)| Action::OpenRepo(path.clone())));
+            close = true;
+        }
+        if close {
+            scan.cancel.store(true, Ordering::Relaxed);
+            self.repo_scan = None;
+        }
+    }
+
     fn help_dialog(&mut self, ctx: &egui::Context) {
         let Some(query) = &mut self.help else { return };
         let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
@@ -2613,7 +2693,7 @@ impl GitemApp {
                 self.global_running = None;
                 match res {
                     Ok(_) => {
-                        out.push(Action::Toast(format!("{title}: done")));
+                        out.push(Action::Toast(ops::done_message(&title, "")));
                         if let Some(p) = open {
                             // Only a clone. `git init` can run in a folder that's already a repository.
                             if let (true, Ok(git)) = (is_clone, &self.git) {
@@ -2765,6 +2845,12 @@ impl GitemApp {
             }
         }
         self.shortcuts(&ctx, &mut out);
+        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            let pal = self.pal.clone();
+            egui::Area::new("drop-hint".into()).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).order(egui::Order::Foreground).interactable(false).show(&ctx, |ui| {
+                egui::Frame::new().fill(pal.panel2).stroke(egui::Stroke::new(1.0, pal.accent)).inner_margin(egui::Margin::symmetric(16, 10)).corner_radius(6.0).show(ui, |ui| ui.label("Drop to open its repository"));
+            });
+        }
         // A folder dropped anywhere on the window. A file means the repository it's in.
         for dropped in ctx.input(|i| i.raw.dropped_files.clone()) {
             let path = dropped.path().to_path_buf();
@@ -2929,6 +3015,7 @@ impl GitemApp {
         self.link_dialog(&ctx);
         self.about(&ctx, &mut out);
         self.help_dialog(&ctx);
+        self.repo_scan_dialog(&ctx, &mut out);
         chrome::window_edges(&ctx, &pal);
         for a in out {
             self.apply_action(&ctx, a);

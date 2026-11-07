@@ -178,12 +178,36 @@ pub fn paint_avatar(ui: &Ui, center: egui::Pos2, radius: f32, name: &str, email:
 pub fn row(ui: &mut Ui, h: f32, selected: bool, p: &Palette) -> (Rect, Response) {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+    row_look(ui, rect, resp, selected, p)
+}
+
+/// A row with an id of its own, for a list that only draws what's on screen. An automatic id
+/// counts what's been drawn before it, so scrolling would change it and focus would be lost.
+/// `key` has to be unique among everything on screen.
+pub fn keyed_row(ui: &mut Ui, h: f32, selected: bool, p: &Palette, key: impl std::hash::Hash + std::fmt::Debug) -> (Rect, Response) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let resp = ui.interact(rect, egui::Id::new(key), Sense::click());
+    row_look(ui, rect, resp, selected, p)
+}
+
+fn row_look(ui: &mut Ui, rect: Rect, resp: Response, selected: bool, p: &Palette) -> (Rect, Response) {
     if selected {
         ui.painter().rect_filled(rect, 0.0, p.selection);
     } else if resp.hovered() {
         ui.painter().rect_filled(rect, 0.0, p.hover);
     }
     focus_ring(ui, &resp, p);
+    // Keys move focus among what's drawn, and long lists only draw what's on screen, so rows
+    // beyond this one have to be there by the next key. A held key leaves about two frames.
+    // Not `gained_focus`, which an arrow key's move doesn't set.
+    if resp.has_focus() {
+        let seen = egui::Id::new("row-with-focus");
+        if ui.data(|d| d.get_temp::<egui::Id>(seen)) != Some(resp.id) {
+            ui.data_mut(|d| d.insert_temp(seen, resp.id));
+            ui.scroll_to_rect_animation(rect.expand2(vec2(0.0, rect.height() * 3.5)), None, egui::style::ScrollAnimation::none());
+        }
+    }
     (rect, resp)
 }
 

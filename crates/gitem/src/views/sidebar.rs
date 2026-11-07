@@ -39,16 +39,57 @@ pub struct Sidebar {
 
 /// What's listed, by position in the refs. Worked out when the refs, the filter or what's
 /// open changes, not per frame: this is what thousands of refs cost.
-/// Folders in branch names that hold enough branches to be worth folding.
-fn branch_folders(branches: &[Branch]) -> Vec<(String, usize)> {
-    const AT_LEAST: usize = 3;
-    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for b in branches.iter().filter(|b| !b.is_remote) {
-        if let Some((top, _)) = b.name.split_once('/') {
-            *counts.entry(top).or_default() += 1;
+/// Right on a focused row means open it and Left close it, so they don't also go looking for
+/// something beside it to focus. Up and Down are left to egui, which moves focus.
+fn side_key(ui: &Ui, row: &egui::Response) -> Option<bool> {
+    if !row.has_focus() {
+        return None;
+    }
+    ui.memory_mut(|m| m.set_focus_lock_filter(row.id, egui::EventFilter { horizontal_arrows: true, ..Default::default() }));
+    ui.input(|i| if i.key_pressed(egui::Key::ArrowRight) { Some(true) } else if i.key_pressed(egui::Key::ArrowLeft) { Some(false) } else { None })
+}
+
+/// One row of the local branches, which `/` in their names makes a tree of.
+#[derive(Debug, Clone, PartialEq)]
+enum BranchLine {
+    Folder { path: String, label: String, depth: usize, count: usize, open: bool },
+    /// A position in the refs' branches, and the part of the name left to show.
+    Branch { at: usize, label: String, depth: usize },
+}
+
+/// Lays out branches as a tree, keeping their order. It takes two to make a folder, so a lone
+/// `fix/typo` stays on one row. With `all_open`, as while filtering, closed folders don't count.
+fn branch_tree(branches: &[(usize, &str)], closed: &HashSet<String>, all_open: bool) -> Vec<BranchLine> {
+    fn walk(items: &[(usize, &str)], prefix: &str, depth: usize, closed: &HashSet<String>, all_open: bool, out: &mut Vec<BranchLine>) {
+        let top = |name: &'_ str| name.split_once('/').map(|(t, _)| t.to_string());
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for (_, name) in items {
+            if let Some(t) = top(name) {
+                *counts.entry(t).or_default() += 1;
+            }
+        }
+        let mut done: HashSet<String> = HashSet::new();
+        for (at, name) in items {
+            match top(name).filter(|t| counts[t] >= 2) {
+                None => out.push(BranchLine::Branch { at: *at, label: (*name).to_string(), depth }),
+                Some(t) => {
+                    if !done.insert(t.clone()) {
+                        continue;
+                    }
+                    let inside: Vec<(usize, &str)> = items.iter().filter_map(|(i, n)| Some((*i, n.strip_prefix(t.as_str())?.strip_prefix('/')?))).collect();
+                    let path = format!("{prefix}{t}");
+                    let open = all_open || !closed.contains(&path);
+                    out.push(BranchLine::Folder { path: path.clone(), label: t.clone(), depth, count: inside.len(), open });
+                    if open {
+                        walk(&inside, &format!("{path}/"), depth + 1, closed, all_open, out);
+                    }
+                }
+            }
         }
     }
-    counts.into_iter().filter(|(_, n)| *n >= AT_LEAST).map(|(k, n)| (k.to_string(), n)).collect()
+    let mut out = Vec::new();
+    walk(branches, "", 0, closed, all_open, &mut out);
+    out
 }
 
 struct Lists {
@@ -56,9 +97,10 @@ struct Lists {
     /// every change to it bumps `refs_gen`: adding a remote doesn't.
     refs: std::sync::Arc<Refs>,
     key: (String, u64),
-    /// Local branches that match, and which of those positions are open.
-    branches: Vec<usize>,
-    open_branches: Vec<usize>,
+    /// How many local branches match, what shows of them, and which of those rows are open.
+    branch_count: usize,
+    lines: Vec<BranchLine>,
+    open_lines: Vec<usize>,
     /// For each remote, the same.
     remotes: Vec<(Vec<usize>, Vec<usize>)>,
     tags: Vec<usize>,
@@ -163,8 +205,10 @@ impl Sidebar {
         let needle = self.filter.to_lowercase();
         let hit = |s: &str| needle.is_empty() || s.to_lowercase().contains(&needle);
         let opened = |of: &[usize]| -> Vec<usize> { of.iter().enumerate().filter(|(_, i)| self.is_open(&refs.branches[**i])).map(|(at, _)| at).collect() };
-        let branches: Vec<usize> = refs.branches.iter().enumerate().filter(|(_, b)| !b.is_remote && hit(&b.name) && !b.name.split_once('/').is_some_and(|(top, _)| self.closed_folders.contains(top))).map(|(i, _)| i).collect();
-        let open_branches = opened(&branches);
+        let local: Vec<(usize, &str)> = refs.branches.iter().enumerate().filter(|(_, b)| !b.is_remote && hit(&b.name)).map(|(i, b)| (i, b.name.as_str())).collect();
+        let branch_count = local.len();
+        let lines = branch_tree(&local, &self.closed_folders, !needle.is_empty());
+        let open_lines = lines.iter().enumerate().filter(|(_, l)| matches!(l, BranchLine::Branch { at, .. } if self.is_open(&refs.branches[*at]))).map(|(i, _)| i).collect();
         let remotes = refs.remotes.iter().map(|r| {
             let prefix = format!("{}/", r.name);
             let list: Vec<usize> = refs.branches.iter().enumerate().filter(|(_, b)| b.is_remote && b.name.starts_with(&prefix) && hit(&b.name)).map(|(i, _)| i).collect();
@@ -172,7 +216,7 @@ impl Sidebar {
             (list, open)
         }).collect();
         let tags = refs.tags.iter().enumerate().filter(|(_, t)| hit(&t.name)).map(|(i, _)| i).collect();
-        self.lists = Some(Lists { refs, key, branches, open_branches, remotes, tags });
+        self.lists = Some(Lists { refs, key, branch_count, lines, open_lines, remotes, tags });
     }
 
     /// The listed branches. Closed ones are all one height, so only those on screen are drawn.
@@ -233,25 +277,19 @@ impl Sidebar {
         let p = cx.pal.clone();
         let Some(lists) = self.lists.take() else { return };
         let refs = lists.refs.clone();
-        let action = section(ui, "sb-branches", crate::chrome::icon::GIT_BRANCH, p.series[0], "Branches", &lists.branches.len().to_string(), true, &[(crate::chrome::icon::PLUS, "New branch")], &p, |ui| {
-            // Hundreds of `team/...` branches mustn't push everything else out of reach.
-            let folders = branch_folders(&refs.branches);
-            if !folders.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(3.0, 2.0);
-                    for (name, n) in folders {
-                        let open = !self.closed_folders.contains(&name);
-                        let caret = if open { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
-                        if ui.small_button(format!("{caret} {name}/ {n}")).on_hover_text(if open { "Hide the branches in this folder" } else { "Show the branches in this folder" }).clicked() {
-                            if !self.closed_folders.remove(&name) {
-                                self.closed_folders.insert(name);
-                            }
-                            self.expanded_gen += 1;
-                        }
+        let action = section(ui, "sb-branches", crate::chrome::icon::GIT_BRANCH, p.series[0], "Branches", &lists.branch_count.to_string(), true, &[(crate::chrome::icon::PLUS, "New branch")], &p, |ui| {
+            let mut from = 0;
+            for &at in lists.open_lines.iter().chain(std::iter::once(&lists.lines.len())) {
+                visible_rows(ui, ROW, at - from, |ui, range| {
+                    for i in range {
+                        self.branch_line(ui, cx, &refs, &lists.lines[from + i]);
                     }
                 });
+                if at < lists.lines.len() {
+                    self.branch_line(ui, cx, &refs, &lists.lines[at]);
+                }
+                from = at + 1;
             }
-            self.branch_list(ui, cx, &refs, &lists.branches, &lists.open_branches, "");
         });
         self.lists = Some(lists);
         if action.is_some() {
@@ -259,21 +297,54 @@ impl Sidebar {
         }
     }
 
+    fn branch_line(&mut self, ui: &mut Ui, cx: &mut Cx, refs: &Refs, line: &BranchLine) {
+        let depth = match line {
+            BranchLine::Folder { depth, .. } | BranchLine::Branch { depth, .. } => *depth,
+        };
+        let mut at = ui.available_rect_before_wrap();
+        at.min.x += depth as f32 * 12.0;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| match line {
+            BranchLine::Branch { at, label, .. } => self.branch_row(ui, cx, &refs.branches[*at], label),
+            BranchLine::Folder { path, label, count, open, .. } => {
+                let p = cx.pal.clone();
+                let (rect, resp) = keyed_row(ui, ROW, false, &p, ("sidebar folder", path));
+                let name = format!("{} folder {path}", if *open { "Close" } else { "Open" });
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+                let glyph = if *open { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
+                let c = rect.center().y;
+                ui.painter().text(pos2(rect.left() + 8.0, c), egui::Align2::CENTER_CENTER, glyph, prop(11.0), if resp.hovered() { p.text } else { p.faint });
+                ui.painter().text(pos2(rect.left() + 21.0, c), egui::Align2::CENTER_CENTER, crate::chrome::icon::FOLDER, prop(12.0), p.faint);
+                let shown = ui.painter().text(pos2(rect.left() + 30.0, c), egui::Align2::LEFT_CENTER, label, prop(12.5), p.dim);
+                ui.painter().text(pos2(shown.right() + 6.0, c), egui::Align2::LEFT_CENTER, count.to_string(), prop(11.0), p.faint);
+                let side = side_key(ui, &resp);
+                if resp.on_hover_text(if *open { "Hide the branches in this folder" } else { "Show the branches in this folder" }).clicked() || side == Some(!*open) {
+                    if !self.closed_folders.remove(path) {
+                        self.closed_folders.insert(path.clone());
+                    }
+                    self.expanded_gen += 1;
+                }
+            }
+        });
+    }
+
     fn branch_row(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch, label: &str) {
         let p = cx.pal.clone();
-        let (rect, resp) = row(ui, ROW, b.is_current, &p);
+        let (rect, resp) = keyed_row(ui, ROW, b.is_current, &p, ("sidebar branch", b.is_remote, &b.name));
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
         let text_color = if b.is_current { p.text } else { p.dim };
         // Any branch opens to its commits. Ones with something incoming start open.
         let open = self.is_open(b);
         {
             let hit = egui::Rect::from_min_size(rect.min, vec2(24.0, ROW));
-            let caret = ui.interact(hit, resp.id.with("expand"), Sense::click());
+            // For the mouse. Right and Left do this from the keyboard, and it mustn't be a stop
+            // of its own, or Down would land on the next row's caret and not its row.
+            let caret = ui.interact(hit, resp.id.with("expand"), Sense::CLICK);
             let name = format!("{} {}", if open { "Collapse" } else { "Expand" }, b.name);
             caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
             let glyph = if open { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
             ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::CENTER_CENTER, glyph, prop(11.0), if caret.hovered() { p.text } else { p.faint });
-            if caret.clicked() {
+            let side = side_key(ui, &resp);
+            if caret.clicked() || side == Some(!open) {
                 self.expanded.insert(b.name.clone(), !open);
                 self.expanded_gen += 1;
             }
@@ -442,7 +513,7 @@ impl Sidebar {
             visible_rows(ui, ROW, list.len(), |ui, range| {
                 for i in &list[range] {
                     let t = &refs.tags[*i];
-                    let (rect, resp) = row(ui, ROW, false, &p);
+                    let (rect, resp) = keyed_row(ui, ROW, false, &p, ("sidebar tag", &t.name));
                     paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &format!("◆ {}", t.name), prop(12.5), p.dim);
                     let resp = if t.subject.is_empty() { resp } else { resp.on_hover_text(&t.subject) };
                     if resp.clicked() {
@@ -650,4 +721,39 @@ fn section(ui: &mut Ui, salt: &str, glyph: &str, tint: egui::Color32, title: &st
         egui::Frame::new().inner_margin(egui::Margin { left: 6, right: 0, top: 0, bottom: 2 }).show(ui, body);
     });
     clicked
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    fn labels(lines: &[BranchLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| match l {
+                BranchLine::Folder { label, depth, count, open, .. } => format!("{}{}{label}/ {count}", "  ".repeat(*depth), if *open { "" } else { "+" }),
+                BranchLine::Branch { label, depth, .. } => format!("{}{label}", "  ".repeat(*depth)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn slashes_make_folders_of_two_or_more_in_the_order_they_come() {
+        let names = [(0, "main"), (1, "team/alpha/one"), (2, "fix/typo"), (3, "team/alpha/two"), (4, "team/beta/three"), (5, "topic")];
+        let lines = branch_tree(&names, &HashSet::new(), false);
+        assert_eq!(labels(&lines), ["main", "team/ 3", "  alpha/ 2", "    one", "    two", "  beta/three", "fix/typo", "topic"]);
+        let closed: HashSet<String> = ["team/alpha".to_string()].into();
+        assert_eq!(labels(&branch_tree(&names, &closed, false)), ["main", "team/ 3", "  +alpha/ 2", "  beta/three", "fix/typo", "topic"]);
+        assert_eq!(labels(&branch_tree(&names, &closed, true))[3], "    one", "a filter looks inside");
+        let top: HashSet<String> = ["team".to_string()].into();
+        assert_eq!(labels(&branch_tree(&names, &top, false)), ["main", "+team/ 3", "fix/typo", "topic"]);
+    }
+
+    /// A branch can't be both `a` and `a/b`, but a name can end up looking odd, and must still show.
+    #[test]
+    fn nothing_is_lost_from_the_list() {
+        let names = [(0, "a/"), (1, "a//b"), (2, "/c"), (3, "/d")];
+        let shown = labels(&branch_tree(&names, &HashSet::new(), false)).join(" ");
+        assert!(shown.contains('b') && shown.contains('c') && shown.contains('d'), "{shown}");
+    }
 }

@@ -610,6 +610,27 @@ pub fn push_form(branch: Option<String>, remotes: Vec<String>, has_upstream: boo
         })
 }
 
+/// `git switch` refused because of uncommitted changes.
+pub fn switch_with_changes(target: String, files: Vec<String>) -> FormDialog {
+    const SHOWN: usize = 6;
+    let mut list: Vec<String> = files.iter().take(SHOWN).map(|f| format!("  {f}")).collect();
+    if files.len() > SHOWN {
+        list.push(format!("  and {} more", files.len() - SHOWN));
+    }
+    FormDialog::new(format!("Changes are in the way of {target}"), "Switch")
+        .info(format!("{target} has different versions of files you've changed. Nothing has been switched or lost yet.\n{}", list.join("\n")))
+        .choice("how", "What to do", &["Stash the changes, then switch. They wait in Stashes", "Bring the changes along, merging them. This can leave conflicts"], 0)
+        .on_submit(move |v| run(if v.index("how") == 0 { ops::stash_and_checkout(&target) } else { ops::checkout_merge(&target) }))
+}
+
+/// Where to look for repositories, one level of the search per folder.
+pub fn scan_form() -> FormDialog {
+    FormDialog::new("Scan for repositories", "Scan").path("root", "Folder", "", true).info("Looks four folders deep, and not inside a repository, `node_modules` or `target`.").on_submit(|v| {
+        let root = v.opt("root").ok_or("Choose a folder.")?;
+        Ok(vec![Action::ScanRepos(root.into())])
+    })
+}
+
 pub fn clone_form() -> FormDialog {
     FormDialog::new("Clone repository", "Clone")
         .text("url", "URL", "")

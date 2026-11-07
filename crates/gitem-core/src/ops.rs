@@ -244,8 +244,84 @@ impl GitOp {
         self.fallback_note.clone().filter(|_| outputs.len() == self.steps.len()).or_else(|| {
             // `[main 7e6d960] subject` is what a commit prints.
             let is_commit = self.steps.last().and_then(|s| s.args.first()).is_some_and(|a| a == "commit");
-            outputs.last().filter(|_| is_commit).and_then(|o| commit_note(&o.text()))
+            outputs.last().filter(|_| is_commit).and_then(|o| commit_note(&o.text())).or_else(|| {
+                let (last, o) = (self.steps.last()?, outputs.last()?);
+                let (out, err) = (o.text(), &o.stderr);
+                match last.args.first()?.as_str() {
+                    "push" => push_note(err),
+                    "pull" => pull_note(&out),
+                    // Only a fetch asked for by name. One inside something bigger isn't news.
+                    "fetch" if last.args.get(1).is_some_and(|a| a == "--progress") => Some(fetch_note(err)),
+                    "merge" => merge_note(&out),
+                    "stash" if last.args.get(1).is_some_and(|a| a == "push") => stash_note(&out),
+                    _ => None,
+                }
+            })
         })
+    }
+}
+
+/// `main -> main`, or that there was nothing to send.
+fn push_note(printed: &str) -> Option<String> {
+    if printed.contains("Everything up-to-date") {
+        return Some("already up to date".to_string());
+    }
+    let sent = printed.lines().find_map(|l| {
+        let (left, to) = l.trim_end().split_once(" -> ")?;
+        Some(format!("{} to {to}", left.split_whitespace().last()?))
+    })?;
+    Some(sent)
+}
+
+fn pull_note(printed: &str) -> Option<String> {
+    if printed.contains("Already up to date") {
+        return Some("already up to date".to_string());
+    }
+    printed.lines().rev().find(|l| l.contains(" changed")).map(|l| l.trim().to_string())
+}
+
+/// Git writes one line for each ref a fetch moved or made.
+fn fetch_note(printed: &str) -> String {
+    match printed.lines().filter(|l| l.contains(" -> ") && l.starts_with(' ')).count() {
+        0 => "nothing new".to_string(),
+        1 => "1 ref updated".to_string(),
+        n => format!("{n} refs updated"),
+    }
+}
+
+fn merge_note(printed: &str) -> Option<String> {
+    if printed.contains("Already up to date") {
+        return Some("already up to date".to_string());
+    }
+    printed.contains("Fast-forward").then(|| "fast-forward".to_string())
+}
+
+fn stash_note(printed: &str) -> Option<String> {
+    if printed.contains("No local changes to save") {
+        return Some("nothing to stash".to_string());
+    }
+    let branch = printed.split(" on ").nth(1)?.split(':').next()?;
+    Some(format!("from {branch}"))
+}
+
+/// What a toast says when an op has finished: what was done, in the past tense, from its title.
+pub fn done_message(title: &str, note: &str) -> String {
+    const WHOLE: &[(&str, &str)] = &[("Stash changes", "Stashed changes"), ("Force push", "Force pushed"), ("Interactive rebase", "Rebased"), ("Garbage collect", "Collected garbage"), ("Clean working tree", "Cleaned the working tree"), ("Update from the pull request", "Updated from the pull request"), ("Reset to the pull request", "Reset to the pull request"), ("Prepare to recompose", "Ready to recompose"), ("Clear all stashes", "Cleared all stashes")];
+    const FIRST: &[(&str, &str)] = &[
+        ("Abort", "Aborted"), ("Add", "Added"), ("Amend", "Amended"), ("Apply", "Applied"), ("Archive", "Archived"), ("Check", "Checked"), ("Checkout", "Checked out"), ("Cherry-pick", "Cherry-picked"), ("Clear", "Cleared"), ("Clone", "Cloned"), ("Commit", "Committed"), ("Continue", "Continued"), ("Copy", "Copied"), ("Create", "Created"), ("Delete", "Deleted"), ("Deinit", "Deinitialized"), ("Disable", "Disabled"), ("Discard", "Discarded"), ("Drop", "Dropped"), ("End", "Ended"), ("Fetch", "Fetched"), ("Fixup", "Made a fixup for"), ("Initialize", "Initialized"), ("Install", "Installed"), ("Keep", "Kept"), ("LFS", "Git LFS:"), ("Lock", "Locked"), ("Mark", "Marked"), ("Merge", "Merged"), ("Move", "Moved"), ("Open", "Opened"), ("Pop", "Popped"), ("Prune", "Pruned"), ("Publish", "Published"), ("Pull", "Pulled"), ("Push", "Pushed"), ("Rebase", "Rebased"), ("Refresh", "Refreshed"), ("Remove", "Removed"), ("Rename", "Renamed"), ("Repair", "Repaired"), ("Reset", "Reset"), ("Restore", "Restored"), ("Revert", "Reverted"), ("Reword", "Reworded"), ("Run", "Ran"), ("Set", "Set"), ("Skip", "Skipped"), ("Squash", "Squashed"), ("Stage", "Staged"), ("Start", "Started"), ("Switch", "Switched"), ("Sync", "Synced"), ("Take", "Took"), ("Track", "Tracking"), ("Turn", "Turned"), ("Undo", "Undid"), ("Unlock", "Unlocked"), ("Unset", "Unset"), ("Unstage", "Unstaged"), ("Update", "Updated"), ("Verify", "Verified"),
+    ];
+    let done = WHOLE.iter().find(|(t, _)| *t == title).map(|(_, d)| d.to_string()).or_else(|| {
+        let (first, rest) = title.split_once(' ').unwrap_or((title, ""));
+        let past = FIRST.iter().find(|(t, _)| *t == first)?.1;
+        Some(if rest.is_empty() { past.to_string() } else { format!("{past} {rest}") })
+    });
+    match (done, note) {
+        (Some(d), "") => d,
+        // `Committed 7e6d960 on main` reads on from the word before it.
+        (Some(d), n) if n.ends_with(|c: char| c.is_alphanumeric()) && n.contains(" on ") => format!("{d} {n}"),
+        (Some(d), n) => format!("{d}: {n}"),
+        (None, "") => format!("{title}: done"),
+        (None, n) => format!("{title}: {n}"),
     }
 }
 
@@ -476,6 +552,23 @@ pub fn checkout(target: &str) -> GitOp {
         return GitOp::new(format!("Switch to {short}")).step(&["switch", "--end-of-options", short]);
     }
     GitOp::new(format!("Switch to {target}")).names(&[target]).step(&["switch", target])
+}
+
+/// Switch, taking uncommitted changes along even where the other branch touches the same files.
+/// Git merges them, which can leave conflicts to resolve.
+pub fn checkout_merge(target: &str) -> GitOp {
+    GitOp::new(format!("Switch to {target}")).names(&[target]).step(&["switch", "--merge", target])
+}
+
+/// Put uncommitted changes in a stash and switch. They wait there until someone applies them.
+pub fn stash_and_checkout(target: &str) -> GitOp {
+    GitOp::new(format!("Stash changes and switch to {target}")).lossless().names(&[target]).step(&["stash", "push", "--include-untracked", "-m", &format!("Before switching to {target}")]).step(&["switch", target])
+}
+
+/// The files in the way, when a switch failed because uncommitted changes would be overwritten.
+pub fn switch_blocked_by_changes(error: &str) -> Option<Vec<String>> {
+    let (_, rest) = error.split_once("would be overwritten by checkout:")?;
+    Some(rest.lines().filter(|l| l.starts_with('\t')).map(|l| l.trim().to_string()).collect())
 }
 
 pub fn checkout_detached(rev: &str) -> GitOp {
@@ -1392,6 +1485,14 @@ mod tests {
         assert_eq!(args(&branch_delete_remote("origin/feature/x", &[])), "push --delete -- origin feature/x");
         assert_eq!(args(&branch_delete_remote("a/b/c", &["a".to_string(), "a/b".to_string()])), "push --delete -- a/b c");
         assert_eq!(args(&fetch_pr("origin", "pull/7/head", "pr/7")), "fetch -- origin +pull/7/head:pr/7");
+        assert_eq!(done_message("Commit", "7e6d960 on main"), "Committed 7e6d960 on main");
+        assert_eq!(done_message("Stage 3 files", ""), "Staged 3 files");
+        assert_eq!(done_message("Switch to main", ""), "Switched to main");
+        assert_eq!(done_message("Stash changes", "from main"), "Stashed changes: from main");
+        assert_eq!(done_message("Push", "main to main"), "Pushed: main to main");
+        assert_eq!(done_message("Pull", "already up to date"), "Pulled: already up to date");
+        assert_eq!(done_message("Something new", ""), "Something new: done");
+        assert_eq!(done_message("git status", ""), "git status: done");
         assert_eq!(args(&push_to_upstream(Some("main"), Some("origin/main"), &["origin"])), "push --progress");
         assert_eq!(args(&push_to_upstream(Some("pr/7"), Some("origin/topic"), &["origin"])), "push --progress -- origin refs/heads/pr/7:refs/heads/topic");
         assert_eq!(args(&push_to_upstream(Some("x"), Some("a/b/x"), &["a", "a/b"])), "push --progress");

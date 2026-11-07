@@ -382,6 +382,33 @@ fn a_pull_requests_branch_says_which_commits_a_fetch_would_replace() {
     assert_eq!(replaced(&n), ["mine again"]);
 }
 
+/// What real git prints, as the toast's end says it.
+#[test]
+fn finished_network_ops_say_what_happened() {
+    use gitem_core::GitExe;
+    let n = Net::new();
+    let git = GitExe::discover(None).unwrap();
+    let say = |repo: &gitem_core::Repo, op: ops::GitOp| {
+        let out = op.run(&git, Some(&repo.root), None, &mut |_| {}).unwrap();
+        op.outcome_note(&out).unwrap_or_default()
+    };
+    let push = || ops::push(&PushOpts { remote: Some("origin".into()), refspec: Some("main".into()), ..Default::default() });
+    let fetch = || ops::fetch(&FetchOpts::default());
+    n.a.commit("f.txt", "1\n", "one");
+    assert_eq!(say(&n.a.repo, push()), "main to main");
+    assert_eq!(say(&n.a.repo, push()), "already up to date");
+    assert_eq!(say(&n.b.repo, fetch()), "1 ref updated");
+    assert_eq!(say(&n.b.repo, fetch()), "nothing new");
+    assert!(say(&n.b.repo, ops::pull(ops::PullMode::FfOnly, false)).contains("1 file changed"));
+    assert_eq!(say(&n.b.repo, ops::pull(ops::PullMode::FfOnly, false)), "already up to date");
+    assert_eq!(say(&n.b.repo, ops::merge("HEAD", ops::MergeMode::Default)), "already up to date");
+    assert_eq!(n.a.commit("g.txt", "1\n", "two").len(), 40);
+    n.a.write("g.txt", "2\n");
+    let branch = n.a.repo.status().unwrap().branch.unwrap();
+    assert_eq!(say(&n.a.repo, ops::stash_push(&Default::default())), format!("from {branch}"));
+    assert_eq!(say(&n.a.repo, ops::stash_push(&Default::default())), "nothing to stash");
+}
+
 #[test]
 fn remotes_can_be_managed() {
     let n = Net::new();
