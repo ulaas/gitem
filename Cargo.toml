@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/gitem-core", "crates/gitem"]
+members = ["crates/gitem-core", "crates/gitem-text", "crates/gitem"]
 
 [workspace.package]
 version = "0.5.2"

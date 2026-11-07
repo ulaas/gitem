@@ -127,6 +127,96 @@ pub fn line_before_changes(hunks: &[(u32, u32, u32, u32)], line: u32) -> Option<
     u32::try_from(line as i64 + shift).ok()
 }
 
+/// A run of lines that differ between two texts, 0-based. A pure insertion has `old_len` 0
+/// and sits before old line `old_start`; a pure deletion has `new_len` 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineChange {
+    pub old_start: usize,
+    pub old_len: usize,
+    pub new_start: usize,
+    pub new_len: usize,
+}
+
+/// Lines with their endings, so that a line whose only change is CRLF to LF counts.
+fn lines_of(text: &str) -> Vec<&str> {
+    text.split_inclusive('\n').collect()
+}
+
+/// Which lines changed from `old` to `new`, for the editor's gutter. Computed in the app,
+/// not by git, so it can follow every keystroke.
+pub fn line_changes(old: &str, new: &str) -> Vec<LineChange> {
+    let (a, b) = (lines_of(old), lines_of(new));
+    let mut out: Vec<LineChange> = Vec::new();
+    for op in capture_diff_slices(Algorithm::Myers, &a, &b) {
+        let (os, ol, ns, nl) = match op {
+            DiffOp::Equal { .. } => continue,
+            DiffOp::Delete { old_index, old_len, new_index } => (old_index, old_len, new_index, 0),
+            DiffOp::Insert { old_index, new_index, new_len } => (old_index, 0, new_index, new_len),
+            DiffOp::Replace { old_index, old_len, new_index, new_len } => (old_index, old_len, new_index, new_len),
+        };
+        // Neighbouring ops, as a delete then an insert, are one change.
+        match out.last_mut() {
+            Some(last) if last.old_start + last.old_len == os && last.new_start + last.new_len == ns => {
+                last.old_len += ol;
+                last.new_len += nl;
+            }
+            _ => out.push(LineChange { old_start: os, old_len: ol, new_start: ns, new_len: nl }),
+        }
+    }
+    out
+}
+
+/// A patch that makes one change from `line_changes(old, new)` to `old`, for `git apply`.
+/// Its context comes from `old`, so it applies there whatever else differs nearby.
+pub fn hunk_patch(path: &str, old: &str, new: &str, c: &LineChange) -> String {
+    const CONTEXT: usize = 3;
+    let (a, b) = (lines_of(old), lines_of(new));
+    let before = c.old_start.min(CONTEXT);
+    let after = a.len().saturating_sub(c.old_start + c.old_len).min(CONTEXT);
+    let first = c.old_start - before;
+    let old_count = before + c.old_len + after;
+    let new_count = before + c.new_len + after;
+    // A count of 0 names the line before, as git writes it.
+    let start = |count: usize| if count == 0 { first } else { first + 1 };
+    let mut p = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -{},{old_count} +{},{new_count} @@\n", start(old_count), start(new_count));
+    let mut put = |mark: char, line: &str| {
+        p.push(mark);
+        p.push_str(line);
+        if !line.ends_with('\n') {
+            p.push_str("\n\\ No newline at end of file\n");
+        }
+    };
+    for l in &a[first..c.old_start] {
+        put(' ', l);
+    }
+    for l in &a[c.old_start..c.old_start + c.old_len] {
+        put('-', l);
+    }
+    for l in &b[c.new_start..c.new_start + c.new_len] {
+        put('+', l);
+    }
+    for l in &a[c.old_start + c.old_len..c.old_start + c.old_len + after] {
+        put(' ', l);
+    }
+    p
+}
+
+#[cfg(test)]
+#[test]
+fn line_changes_and_the_patch_for_one() {
+    let old = "a\nb\nc\nd\ne\nf\ng\nh\n";
+    let new = "a\nB\nc\nd\ne\nf\ng\nh\nnew\n";
+    let ch = line_changes(old, new);
+    assert_eq!(ch, [LineChange { old_start: 1, old_len: 1, new_start: 1, new_len: 1 }, LineChange { old_start: 8, old_len: 0, new_start: 8, new_len: 1 }]);
+    assert_eq!(hunk_patch("x.txt", old, new, &ch[0]), "diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n d\n e\n");
+    assert_eq!(hunk_patch("x.txt", old, new, &ch[1]), "diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -6,3 +6,4 @@\n f\n g\n h\n+new\n");
+    // A line ending is a change, and a last line without one says so.
+    assert_eq!(line_changes("a\r\nb", "a\nb").len(), 1);
+    let p = hunk_patch("y", "x", "z", &line_changes("x", "z")[0]);
+    assert!(p.ends_with("-x\n\\ No newline at end of file\n+z\n\\ No newline at end of file\n"), "{p}");
+    assert_eq!(hunk_patch("e", "", "one\n", &line_changes("", "one\n")[0]).lines().nth(3), Some("@@ -0,0 +1,1 @@"));
+}
+
 #[cfg(test)]
 #[test]
 fn a_line_is_followed_back_through_uncommitted_edits() {

@@ -94,6 +94,13 @@ impl GitOp {
     fn moves_head(self, what: &str) -> Self {
         self.undoable(crate::undo::UndoPlan::MoveHead { label: format!("Undo {what}"), how: "--keep", snapshot: false })
     }
+    /// Whether running this may change files in the working tree, so that text being edited
+    /// in gitem and not yet saved would be out of date or lost. Staging, committing, fetching
+    /// and the like don't touch files and are free to run.
+    pub fn rewrites_worktree(&self) -> bool {
+        self.custom.is_some() || self.steps.iter().any(|s| step_rewrites_worktree(&s.args))
+    }
+
     pub fn step<S: AsRef<str>>(mut self, args: &[S]) -> Self {
         self.steps.push(Step { args: args.iter().map(|s| s.as_ref().to_string()).collect(), ..Default::default() });
         self
@@ -479,6 +486,38 @@ pub fn delete_untracked(paths: &[String]) -> GitOp {
 }
 
 /// Apply a patch produced by `diff::build_patch` to the index or worktree.
+/// What a single git command line may do to files in the working tree. Leading `-c` and
+/// `-C` options are skipped to find the command. Errs towards yes: asking about unsaved
+/// edits once too often is better than losing them.
+fn step_rewrites_worktree(args: &[String]) -> bool {
+    let mut rest = args.iter().map(String::as_str).peekable();
+    while let Some(a) = rest.peek() {
+        if matches!(*a, "-c" | "-C") {
+            rest.next();
+            rest.next();
+        } else if a.starts_with('-') {
+            rest.next();
+        } else {
+            break;
+        }
+    }
+    let Some(cmd) = rest.next() else { return false };
+    let more: Vec<&str> = rest.collect();
+    let has = |f: &str| more.contains(&f);
+    match cmd {
+        "checkout" | "switch" | "merge" | "pull" | "rebase" | "cherry-pick" | "revert" | "am" | "clean" | "mv" | "checkout-index" | "sparse-checkout" | "bisect" | "lfs" => true,
+        "restore" => !has("--staged") || has("--worktree") || has("-W"),
+        "reset" => has("--hard") || has("--keep") || has("--merge"),
+        // Bare `stash` is a push. `stash branch` checks out, so it counts.
+        "stash" => !matches!(more.first(), Some(&("list" | "show" | "drop" | "clear" | "store" | "create"))),
+        "apply" => !has("--cached"),
+        "rm" => !has("--cached"),
+        "read-tree" => has("-u"),
+        "submodule" => more.first() == Some(&"update"),
+        _ => false,
+    }
+}
+
 pub fn apply_patch(title: &str, patch: String, cached: bool, reverse: bool) -> GitOp {
     let mut a = v(&["apply", "--recount", "--whitespace=nowarn"]);
     if cached {
@@ -1676,6 +1715,19 @@ mod tests {
 
     fn args(op: &GitOp) -> String {
         op.steps.iter().map(|s| s.args.join(" ")).collect::<Vec<_>>().join(" && ")
+    }
+
+    #[test]
+    fn what_rewrites_the_working_tree() {
+        let paths = vec!["a".to_string()];
+        let yes = [checkout("main"), pull(PullMode::Default, false), stash_push(&StashOpts::default()), discard_paths(&paths), apply_patch("t", String::new(), false, false), restore_file_from("HEAD", "a"), GitOp::new("t").step(&["-c", "core.x=y", "reset", "--hard"])];
+        for op in &yes {
+            assert!(op.rewrites_worktree(), "{}", args(op));
+        }
+        let no = [stage_paths(&paths), unstage_paths(&paths, true), fetch(&FetchOpts::default()), apply_patch("t", String::new(), true, false), GitOp::new("t").step(&["reset", "--soft", "HEAD~"]), GitOp::new("t").step(&["stash", "list"]), GitOp::new("t").step(&["restore", "--staged", "a"]), GitOp::new("t").step(&["commit", "-m", "x"])];
+        for op in &no {
+            assert!(!op.rewrites_worktree(), "{}", args(op));
+        }
     }
 
     #[test]

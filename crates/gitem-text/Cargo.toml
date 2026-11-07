@@ -1,0 +1,15 @@
+[package]
+name = "gitem-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The text model behind gitem's editor: a rope buffer, selections, edits and undo. No UI, no git."
+
+[dependencies]
+ropey = "1.6"
+unicode-segmentation = "1"
+regex = "1"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
