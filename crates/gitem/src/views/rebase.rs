@@ -276,7 +276,7 @@ impl RebaseView {
             });
         });
 
-        self.keyboard(ui);
+        self.keyboard(ui, &cx.settings.key_bindings);
         egui::ScrollArea::vertical().id_salt("rebase-list").auto_shrink([false, false]).show(ui, |ui| {
             if self.items.is_empty() && !self.loaded.busy() {
                 empty_state(ui, "Nothing to rebase", "Pick a base with commits between it and HEAD.", &p);
@@ -285,29 +285,31 @@ impl RebaseView {
         });
     }
 
-    fn keyboard(&mut self, ui: &Ui) {
+    fn keyboard(&mut self, ui: &Ui, bound: &std::collections::HashMap<String, String>) {
         if ui.ctx().memory(|m| m.focused().is_some()) || self.items.is_empty() {
             return;
         }
         let sel = self.selected.min(self.items.len() - 1);
         use egui::Key::*;
-        let set = [(P, RebaseAction::Pick), (R, RebaseAction::Reword), (E, RebaseAction::Edit), (S, RebaseAction::Squash), (F, RebaseAction::Fixup), (D, RebaseAction::Drop)];
-        for (k, a) in set {
-            if ui.input(|i| i.key_pressed(k) && !i.modifiers.ctrl) && RebaseAction::CHOICES.contains(&self.items[sel].action) {
+        let set = [("rebase_pick", RebaseAction::Pick), ("rebase_reword", RebaseAction::Reword), ("rebase_edit", RebaseAction::Edit), ("rebase_squash", RebaseAction::Squash), ("rebase_fixup", RebaseAction::Fixup), ("rebase_drop", RebaseAction::Drop)];
+        for (name, a) in set {
+            if ui.input(|i| crate::keys::context_pressed(i, bound, name)) && RebaseAction::CHOICES.contains(&self.items[sel].action) {
                 self.items[sel].action = a;
             }
         }
-        let alt = ui.input(|i| i.modifiers.alt);
-        if ui.input(|i| i.key_pressed(ArrowUp)) {
-            if alt && sel > 0 {
-                self.items.swap(sel, sel - 1);
-            }
+        let move_up = ui.input(|i| crate::keys::context_pressed(i, bound, "rebase_up"));
+        let move_down = ui.input(|i| crate::keys::context_pressed(i, bound, "rebase_down"));
+        if move_up && sel > 0 {
+            self.items.swap(sel, sel - 1);
+        }
+        if move_down && sel + 1 < self.items.len() {
+            self.items.swap(sel, sel + 1);
+        }
+        // Plain arrows, or the keys that moved the step, which goes along with it.
+        if move_up || ui.input(|i| i.modifiers.is_none() && i.key_pressed(ArrowUp)) {
             self.selected = sel.saturating_sub(1);
         }
-        if ui.input(|i| i.key_pressed(ArrowDown)) {
-            if alt && sel + 1 < self.items.len() {
-                self.items.swap(sel, sel + 1);
-            }
+        if move_down || ui.input(|i| i.modifiers.is_none() && i.key_pressed(ArrowDown)) {
             self.selected = (sel + 1).min(self.items.len() - 1);
         }
     }

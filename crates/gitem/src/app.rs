@@ -169,6 +169,8 @@ pub struct RepoTab {
     undo_entry: Option<gitem_core::undo::UndoEntry>,
     /// Something long finished, or anything failed, with the window in the background.
     attention_due: bool,
+    /// The same, for a notification: what it was, and whether it failed.
+    notice_due: Option<(String, bool)>,
     branch_pr_task: crate::task::Task<Option<(String, u64, String)>>,
     /// What that was last asked for: the branch, and the host's lists as of when.
     branch_pr_for: Option<(Option<String>, u64)>,
@@ -271,6 +273,7 @@ impl RepoTab {
             undoable: None,
             undo_entry: None,
             attention_due: false,
+            notice_due: None,
             branch_pr_task: Default::default(),
             branch_pr_for: None,
             squeeze: Squeeze::default(),
@@ -386,6 +389,7 @@ impl RepoTab {
                 let (own_config, batch) = (r.own_config, r.batch);
                 if wants_attention(r.started.elapsed(), res.is_err(), ctx.input(|i| i.focused)) {
                     self.attention_due = true;
+                    self.notice_due = Some((r.title.clone(), res.is_err()));
                 }
                 let then = r.then.take();
                 self.running = None;
@@ -924,6 +928,8 @@ pub struct GitemApp {
     /// Whether git is running anywhere, before removing a lock. Tests replace it, because
     /// tests running side by side always have git running somewhere.
     pub git_running: fn() -> bool,
+    /// How a notification reaches the system. Tests replace it, as the real one shows on the desktop.
+    pub notifier: crate::notify::Notifier,
     /// Which dialogs are up, and when that last changed.
     dialogs_seen: (String, f64),
     dialogs_settled: bool,
@@ -1055,6 +1061,7 @@ impl GitemApp {
             lock_prompt: None,
             link_prompt: None,
             git_running: gitem_core::runner::git_processes_running,
+            notifier: crate::notify::show,
             dialogs_seen: (String::new(), 0.0),
             dialogs_settled: true,
             errors_seen: (String::new(), 0.0),
@@ -2959,6 +2966,10 @@ impl GitemApp {
             }
             if let Some(res) = done {
                 let (title, open, is_clone) = (g.title.clone(), g.open_after.clone(), g.is_clone);
+                if self.settings.notify_when_done && self.shot.is_none() && wants_attention(g.started.elapsed(), res.is_err(), ctx.input(|i| i.focused)) {
+                    let (head, body) = crate::notify::text(&title, "gitem", res.is_err());
+                    (self.notifier)(&head, &body);
+                }
                 self.global_running = None;
                 match res {
                     Ok(_) => {
@@ -3083,6 +3094,13 @@ impl GitemApp {
         let mut flash = false;
         for r in &mut self.repos {
             flash |= std::mem::take(&mut r.attention_due);
+            if let Some((title, failed)) = r.notice_due.take()
+                && self.settings.notify_when_done
+                && self.shot.is_none()
+            {
+                let (head, body) = crate::notify::text(&title, &r.repo.name(), failed);
+                (self.notifier)(&head, &body);
+            }
             r.look_up_branch_pr(&ctx, &self.settings);
         }
         if flash && self.settings.attention_when_done {
@@ -3399,6 +3417,7 @@ impl eframe::App for GitemApp {
         #[cfg(windows)]
         if !std::mem::replace(&mut self.styled_window, true) {
             chrome::native_window_style(frame);
+            crate::notify::set_window(frame);
             crate::widgets::set_dialog_parent(frame);
         }
         #[cfg(not(windows))]
@@ -3407,6 +3426,7 @@ impl eframe::App for GitemApp {
     }
 
     fn on_exit(&mut self) {
+        crate::notify::clear();
         self.save_settings();
     }
 }

@@ -169,6 +169,9 @@ pub struct Settings {
     /// Draw attention in the taskbar when something long finishes while gitem isn't in front.
     #[serde(default = "yes")]
     pub attention_when_done: bool,
+    /// A notification from the system as well. Off unless turned on.
+    #[serde(default)]
+    pub notify_when_done: bool,
     /// Ask once a day whether there's a newer release. Off unless turned on.
     #[serde(default)]
     pub check_updates: bool,
@@ -303,6 +306,7 @@ impl Default for Settings {
             key_bindings: Default::default(),
             recurse_submodules: false,
             attention_when_done: true,
+            notify_when_done: false,
             terminal: String::new(),
             external_diff_tool: String::new(),
             external_merge_tool: String::new(),

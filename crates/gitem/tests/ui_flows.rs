@@ -4437,6 +4437,43 @@ fn a_rebase_row_is_reordered_by_its_handle_and_selected_by_a_click() {
     assert_eq!(dropped, Some(gitem_core::rebase::RebaseAction::Drop));
 }
 
+/// FG-13: its letters and the keys that move a step can be changed, and plain arrows still only select.
+#[test]
+fn a_rebound_key_sets_a_rebase_step_and_moves_it() {
+    let f = Fx::new();
+    f.write("base", "b
+");
+    f.commit("base");
+    let base = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    for (n, m) in [("x", "one"), ("y", "two")] {
+        f.write(n, "1
+");
+        f.commit(m);
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().settings.key_bindings.insert("rebase_drop".to_string(), "X".to_string());
+    h.state_mut().settings.key_bindings.insert("rebase_down".to_string(), "Alt+J".to_string());
+    h.state_mut().repos[0].open_tab(Tab::Rebase(Box::new(gitem::views::rebase::RebaseView::new(Some(base)))));
+    pump_for_label(&mut h, "Rebase 2 commits");
+    pump_for_label(&mut h, "one");
+    let view = |h: &Harness<GitemApp>| h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Rebase(r) = t { Some(r.items.iter().map(|i| (i.text.clone(), i.action)).collect::<Vec<_>>()) } else { None }).unwrap();
+    use gitem_core::rebase::RebaseAction::{Drop, Pick};
+    click(&mut h, "one");
+    h.key_press(egui::Key::D);
+    h.step();
+    assert_eq!(view(&h)[0].1, Pick, "D isn't what it was");
+    h.key_press(egui::Key::X);
+    h.step();
+    assert_eq!(view(&h)[0].1, Drop);
+    h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowDown);
+    h.step();
+    assert_eq!(view(&h)[0].0, "one", "the old keys don't move it");
+    h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::J);
+    h.step();
+    assert_eq!(view(&h)[0].0, "two");
+}
+
 fn many_untracked(f: &Fx, n: usize) {
     std::fs::create_dir(f.root.join("many")).unwrap();
     for i in 0..n {
@@ -6704,6 +6741,51 @@ fn a_double_click_stages_the_file_and_its_diff_goes_with_it() {
     assert!(h.query_by_label("Unstage file").is_some(), "the diff went to the staged list with it");
     h.key_press(egui::Key::Space);
     wait_for(&mut h, "a.txt to be unstaged", || f.git(&["status", "--short"]).contains(" M a.txt"));
+    no_errors(&h);
+}
+
+/// FG-13: what's rebound does the job, and what it was bound to doesn't any more.
+#[test]
+fn a_rebound_key_moves_through_the_graph_and_the_old_one_stops() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().settings.key_bindings.insert("graph_next".to_string(), "N".to_string());
+    pump_for_label(&mut h, "second");
+    h.key_press(egui::Key::J);
+    h.step();
+    h.step();
+    assert!(selected_in_graph(&h).is_empty(), "J isn't what it was");
+    h.key_press(egui::Key::N);
+    h.step();
+    h.step();
+    assert_eq!(selected_in_graph(&h), [sha_of(&f, "second")]);
+    // A clash isn't taken: J again, with K asked for.
+    h.state_mut().settings.key_bindings.insert("graph_next".to_string(), "K".to_string());
+    h.key_press(egui::Key::J);
+    h.step();
+    h.step();
+    assert_eq!(selected_in_graph(&h), [sha_of(&f, "first")]);
+}
+
+#[test]
+fn a_rebound_key_stages_in_changes_and_space_stops() {
+    let f = Fx::new();
+    two_changed_files(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().settings.key_bindings.insert("changes_stage".to_string(), "X".to_string());
+    changes_up(&mut h, "a.txt");
+    h.key_press(egui::Key::ArrowDown);
+    h.step();
+    h.step();
+    h.key_press(egui::Key::Space);
+    h.step();
+    wait_until_quiet(&mut h);
+    assert!(!f.git(&["status", "--short"]).lines().any(|l| l.starts_with('M')), "Space isn't what it was");
+    h.key_press(egui::Key::X);
+    wait_for(&mut h, "something to be staged", || f.git(&["status", "--short"]).lines().any(|l| l.starts_with('M')));
     no_errors(&h);
 }
 

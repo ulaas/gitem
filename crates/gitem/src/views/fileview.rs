@@ -317,7 +317,7 @@ impl FileView {
             self.loaded_gen = cx.data.status_gen;
             self.load(&ui.ctx().clone(), cx);
         }
-        if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::B)) {
+        if ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "file_blame")) {
             self.annot = if self.annot == Annot::Blame { Annot::None } else { Annot::Blame };
         }
         self.toolbar(ui, cx);
@@ -425,7 +425,7 @@ impl FileView {
                 }
             ui.menu_button("Compare \u{E136}", |ui| self.compare_menu(ui, cx));
             ui.menu_button("More \u{E136}", |ui| menus::file_menu(ui, cx, &self.path, self.rev.as_deref()));
-            if ui.small_button("Find").on_hover_text("Ctrl+F").clicked() || ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
+            if ui.small_button("Find").on_hover_text(crate::keys::context_label(&cx.settings.key_bindings, "find")).clicked() || ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "find")) {
                 self.find_open = !self.find_open;
             }
             if self.data.busy() || self.nav.busy() {

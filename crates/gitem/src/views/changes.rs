@@ -399,7 +399,7 @@ impl ChangesView {
             return false;
         }
         use egui::{Key, Modifiers};
-        let (down, up, space, enter, menu) = ui.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::Space), i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::SHIFT, Key::F10)));
+        let (down, up, space, enter, menu) = ui.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp), crate::keys::context_take(i, &cx.settings.key_bindings, "changes_stage"), i.consume_key(Modifiers::NONE, Key::Enter), crate::keys::context_take(i, &cx.settings.key_bindings, "row_menu")));
         if (down || up)
             && let Some(next) = self.next_file(st, down)
         {

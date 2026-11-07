@@ -452,10 +452,10 @@ impl DiffView {
                 reload |= ui.add(egui::DragValue::new(&mut self.opts.context).range(0..=200)).changed();
             }
             ui.separator();
-            if small_icon_button(ui, "\u{E13C}", "Previous change", "Alt+Up").clicked() || ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp)) {
+            if small_icon_button(ui, "\u{E13C}", "Previous change", &crate::keys::context_label(&cx.settings.key_bindings, "diff_prev")).clicked() || ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "diff_prev")) {
                 self.jump(-1);
             }
-            if small_icon_button(ui, "\u{E136}", "Next change", "Alt+Down").clicked() || ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown)) {
+            if small_icon_button(ui, "\u{E136}", "Next change", &crate::keys::context_label(&cx.settings.key_bindings, "diff_next")).clicked() || ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "diff_next")) {
                 self.jump(1);
             }
             if let Some(path) = &self.path {
@@ -499,7 +499,7 @@ impl DiffView {
     }
 
     fn find_bar(&mut self, ui: &mut Ui, cx: &Cx) {
-        if cx.in_front && !cx.dialog_open && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+        if cx.in_front && !cx.dialog_open && ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "find")) {
             self.find_open = !self.find_open;
         }
         if !self.find_open {
@@ -514,13 +514,16 @@ impl DiffView {
                 step = 1;
                 r.request_focus();
             }
-            if ui.input(|i| i.key_pressed(egui::Key::F3)) {
-                step = if ui.input(|i| i.modifiers.shift) { -1 } else { 1 };
+            if ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "find_next")) {
+                step = 1;
             }
-            if small_icon_button(ui, "\u{E13C}", "Previous match", "Shift+F3").clicked() {
+            if ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "find_prev")) {
                 step = -1;
             }
-            if small_icon_button(ui, "\u{E136}", "Next match", "F3").clicked() {
+            if small_icon_button(ui, "\u{E13C}", "Previous match", &crate::keys::context_label(&cx.settings.key_bindings, "find_prev")).clicked() {
+                step = -1;
+            }
+            if small_icon_button(ui, "\u{E136}", "Next match", &crate::keys::context_label(&cx.settings.key_bindings, "find_next")).clicked() {
                 step = 1;
             }
             let says = if self.find.is_empty() { String::new() } else if self.find_hits.is_empty() { "No matches".to_string() } else { format!("{} of {}", self.find_pos + 1, self.find_hits.len()) };

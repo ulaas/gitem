@@ -7,6 +7,7 @@ pub mod app;
 pub mod chrome;
 pub mod crash;
 pub mod logo;
+pub mod notify;
 pub mod data;
 pub mod forms;
 pub mod i18n;

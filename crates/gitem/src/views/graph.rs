@@ -625,7 +625,8 @@ impl GraphView {
 
     fn keys(&mut self, ui: &Ui, cx: &mut Cx) {
         let typing = ui.ctx().memory(|m| m.focused().is_some());
-        let (find, slash, next, prev) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::F), i.key_pressed(egui::Key::Slash), i.key_pressed(egui::Key::F3) && !i.modifiers.shift, i.key_pressed(egui::Key::F3) && i.modifiers.shift));
+        let bound = &cx.settings.key_bindings;
+        let (find, slash, next, prev) = ui.input(|i| (crate::keys::context_pressed(i, bound, "find"), crate::keys::context_pressed(i, bound, "graph_find_ref"), crate::keys::context_pressed(i, bound, "find_next"), crate::keys::context_pressed(i, bound, "find_prev")));
         if find {
             self.focus_search = true;
         }
@@ -1024,11 +1025,12 @@ impl GraphView {
     }
 
     fn keyboard(&mut self, ui: &Ui, g: &Graph, cx: &mut Cx, visible: &[usize]) {
-        self.menu_key = !cx.dialog_open && cx.in_front && ui.ctx().memory(|m| m.focused().is_none()) && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F10));
+        self.menu_key = !cx.dialog_open && cx.in_front && ui.ctx().memory(|m| m.focused().is_none()) && ui.input_mut(|i| crate::keys::context_take(i, &cx.settings.key_bindings, "row_menu"));
         if !cx.in_front || ui.ctx().memory(|m| m.focused().is_some()) || visible.is_empty() {
             return;
         }
-        let (down, up) = ui.input(|i| (i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::J), i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::K)));
+        let bound = &cx.settings.key_bindings;
+        let (down, up) = ui.input(|i| (i.key_pressed(egui::Key::ArrowDown) || crate::keys::context_pressed(i, bound, "graph_next"), i.key_pressed(egui::Key::ArrowUp) || crate::keys::context_pressed(i, bound, "graph_prev")));
         if !down && !up {
             return;
         }

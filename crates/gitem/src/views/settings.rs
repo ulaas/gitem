@@ -565,6 +565,7 @@ impl SettingsView {
             g.switch(&mut s.pull_autostash, "Stash changes around a pull", "The toolbar's Pull puts uncommitted changes aside and brings them back after.");
             g.switch(&mut s.recurse_submodules, "Bring submodules along", "Pull and check out also update submodules, as --recurse-submodules does.");
             g.switch(&mut s.attention_when_done, "Flash the taskbar when something's done", "When something that took a while finishes, or anything fails, while you're in another window.");
+            g.switch(&mut s.notify_when_done, "Show a system notification too", "On Windows, at the same moments: what it was and whether it worked, with none of git's output. Nothing is watched or asked of any host for this.");
         });
         group(ui, "Commits", p, |g| {
             g.switch(&mut s.commit_sign, "Sign commits", "On by default in the commit box.");
@@ -587,9 +588,24 @@ impl SettingsView {
                 });
             }
         });
+        group(ui, "Keyboard, in a view", p, |g| {
+            for c in crate::keys::CONTEXT {
+                g.row(c.what, c.default, |ui| {
+                    let mut text = s.key_bindings.get(c.name).cloned().unwrap_or_default();
+                    if field(ui, &mut text, c.default, 160.0).changed() {
+                        if text.trim().is_empty() {
+                            s.key_bindings.remove(c.name);
+                        } else {
+                            s.key_bindings.insert(c.name.to_string(), text);
+                        }
+                    }
+                });
+            }
+        });
         for problem in crate::keys::binding_problems(&s.key_bindings) {
             ui.colored_label(p.warn, problem);
         }
+        note(ui, crate::keys::FIXED_KEYS, p);
         group(ui, "Launching", p, |g| {
             g.switch(&mut s.single_window, "Use one window", "Opening a folder from a terminal or Explorer goes to the window already open, once it's been restarted with this on.");
         });

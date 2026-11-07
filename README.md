@@ -153,7 +153,8 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 | `↑ ↓` | Move through the files in Changes, or the commits in the graph |
 | `J` `K` | Next and previous commit in the graph |
 | `Space` | Stage or unstage the current file in Changes |
-| `Alt+↑, Alt+↓` | Previous and next change in a diff; move a commit in the rebase editor |
+| `Alt+↑, Alt+↓` | Previous and next change in a diff |
+| `Alt+Up, Alt+Down` | Move a commit in the rebase editor |
 | `P` `R` `E` `S` `F` `D` | Set the rebase action |
 | `Ctrl+F` | Find in a file or a diff; search in the graph |
 | `/` | Find a ref in the graph |

@@ -744,6 +744,63 @@ fn a_changed_key_does_the_command_and_the_old_one_no_longer_does() {
     assert!(has_settings(&h));
 }
 
+// ---- FG-18: nothing here reaches the desktop, as the app's notifier is replaced.
+
+static NOTICES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn note_it(title: &str, body: &str) {
+    NOTICES.lock().unwrap().push((title.to_string(), body.to_string()));
+}
+
+/// How many notices this took, by a title only this test uses.
+fn notices_about(title: &str) -> Vec<(String, String)> {
+    NOTICES.lock().unwrap().iter().filter(|(t, _)| t.starts_with(title)).cloned().collect()
+}
+
+fn run_failing(f: &Fx, title: &str, focused: bool, on: bool) -> Harness<'static, GitemApp> {
+    let mut h = f.harness(|s| s.notify_when_done = on);
+    h.state_mut().notifier = note_it;
+    h.input_mut().focused = focused;
+    h.step();
+    let op = gitem_core::ops::GitOp::new(title).step(&["branch", "-d", "no-such-branch"]);
+    h.state_mut().repos[0].queue_for_test(op);
+    settle(&mut h);
+    h
+}
+
+#[test]
+fn a_failure_out_of_sight_notifies_once_when_turned_on_with_no_git_output() {
+    let f = Fx::new();
+    let _h = run_failing(&f, "Notice one", false, true);
+    let got = notices_about("Notice one");
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "Notice one failed");
+    assert!(!got[0].1.contains("no-such-branch"), "git's output stays out: {:?}", got[0].1);
+}
+
+#[test]
+fn nothing_notifies_unless_turned_on_or_when_youre_looking_at_it() {
+    assert!(!Settings::default().notify_when_done, "off unless turned on");
+    let f = Fx::new();
+    let _h = run_failing(&f, "Notice off", false, false);
+    assert_eq!(notices_about("Notice off"), Vec::new(), "turned off");
+    let _h = run_failing(&f, "Notice seen", true, true);
+    assert_eq!(notices_about("Notice seen"), Vec::new(), "the window's in front");
+}
+
+#[test]
+fn a_moments_work_that_worked_doesnt_notify() {
+    let f = Fx::new();
+    let mut h = f.harness(|s| s.notify_when_done = true);
+    h.state_mut().notifier = note_it;
+    h.input_mut().focused = false;
+    h.step();
+    h.state_mut().repos[0].queue_for_test(gitem_core::ops::GitOp::new("Notice quick").step(&["branch", "made-here"]));
+    settle(&mut h);
+    assert_ne!(f.git(&["branch", "--list", "made-here"]), "");
+    assert_eq!(notices_about("Notice quick"), Vec::new());
+}
+
 #[test]
 fn undo_has_a_key() {
     use egui::{Key, Modifiers};
