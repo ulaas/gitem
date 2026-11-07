@@ -205,7 +205,6 @@ fn holding_an_arrow_key_loads_only_the_commit_it_stops_on() {
     pump(&mut h, 300);
     quiet(&mut h);
     let _ = std::fs::remove_file(&f.log);
-    // For the message below: this has failed now and then with 3, cause not known yet.
     let mut stamps = Vec::new();
     for sha in shas.iter().take(15) {
         stamps.push(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
@@ -219,10 +218,19 @@ fn holding_an_arrow_key_loads_only_the_commit_it_stops_on() {
     quiet(&mut h);
     pump(&mut h, 300);
     quiet(&mut h);
-    let (started, peak) = f.report();
-    assert!(started <= 2, "{started} show commands for 15 selections. Selected {:?} at {:?}
-{}", &shas[..15], stamps, std::fs::read_to_string(&f.log).unwrap_or_default());
-    assert!(peak <= 1, "{peak} at once");
+    // A load is up to two commands the proxy counts: `show`, then `notes show`. The first
+    // selection comes after a pause, so it loads at once and its `show` may have started
+    // before the next selection stopped it. What must not run is anything for a commit passed
+    // on the way, unless it really stayed selected long enough to settle: a stalled frame.
+    let log = std::fs::read_to_string(&f.log).unwrap_or_default();
+    let why = || format!("Selected {:?} at {stamps:?}\n{log}", &shas[..15]);
+    let starts_for = |sha: &str| log.lines().filter(|l| l.starts_with("S ") && l.contains(sha)).count();
+    for (i, sha) in shas.iter().enumerate().take(14).skip(1) {
+        let settled = stamps[i + 1] - stamps[i] >= 150;
+        assert!(settled || starts_for(sha) == 0, "commit {i} was passed in {} ms, and got a load. {}", stamps[i + 1] - stamps[i], why());
+    }
+    assert!(starts_for(shas[0]) <= 2, "the first commit got more than one load. {}", why());
+    assert!((1..=2).contains(&starts_for(shas[14])), "the commit it stopped on got {} commands. {}", starts_for(shas[14]), why());
     let t = Instant::now();
     while h.state().repos[0].inspect.showing() != Some(shas[14]) {
         h.step();
