@@ -25,7 +25,7 @@ fn turn() -> MutexGuard<'static, ()> {
 }
 
 fn renderer(mode: Option<&'static str>, limit: Duration) -> Renderer {
-    Renderer { exe: BIN.into(), limit, test_mode: mode, started: Some(Started::default()) }
+    Renderer { exe: BIN.into(), limit, patience: LONG, test_mode: mode, started: Some(Started::default()) }
 }
 
 fn eventually(what: &str, f: impl Fn() -> bool) {
@@ -209,7 +209,7 @@ fn many_at_once_keep_to_the_limit_and_stuck_ones_dont_stop_later_ones() {
     let waiting: Vec<_> = (0..8)
         .map(|_| {
             std::thread::spawn(|| {
-                let r = renderer(Some("hang-deaf"), Duration::from_millis(300));
+                let r = Renderer { patience: Duration::from_millis(600), ..renderer(Some("hang-deaf"), Duration::from_millis(300)) };
                 let got = r.render(RED, None).err().unwrap();
                 (got, r.started.unwrap().lock().unwrap().clone())
             })

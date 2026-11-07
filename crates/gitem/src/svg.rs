@@ -45,6 +45,9 @@ const MAX_TEXT_CHARS: u64 = 200_000;
 const MAX_USE_DEPTH: usize = 256;
 /// How long a view waits for a picture. Then the child is killed.
 const TIME_LIMIT: Duration = Duration::from_secs(10);
+/// How long one waits for a turn. Those ahead of it are killed at the limit, so a turn has come by
+/// then unless a good many are waiting.
+const TURN_PATIENCE: Duration = Duration::from_secs(20);
 /// How long the child lets itself run, in case the parent is stopped and not gone.
 const CHILD_OWN_LIMIT: Duration = Duration::from_secs(15);
 /// Children running at once. More wait for a turn.
@@ -443,6 +446,8 @@ fn act_for_test(mode: &str) -> i32 {
 pub struct Renderer {
     pub exe: PathBuf,
     pub limit: Duration,
+    /// How long to wait for a turn.
+    pub patience: Duration,
     /// What a debug build's child should do instead of drawing. Release builds ignore it.
     pub test_mode: Option<&'static str>,
     /// Where a test hears the id of each child started.
@@ -461,7 +466,7 @@ pub fn use_renderer(exe: impl Into<PathBuf>) {
 impl Default for Renderer {
     fn default() -> Self {
         let exe = EXE.lock().unwrap_or_else(|e| e.into_inner()).clone().or_else(|| std::env::current_exe().ok()).unwrap_or_default();
-        Self { exe, limit: TIME_LIMIT, test_mode: None, started: None }
+        Self { exe, limit: TIME_LIMIT, patience: TURN_PATIENCE, test_mode: None, started: None }
     }
 }
 
@@ -486,8 +491,7 @@ impl Renderer {
         }
         static TURNS: LazyLock<Arc<Slots>> = LazyLock::new(|| Arc::new(Slots::new(MAX_CHILDREN)));
         let cancelled = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
-        // The ones ahead of this are killed at the limit, so a turn comes by then if there's one.
-        let _turn = TURNS.take(self.limit.saturating_mul(2), &cancelled)?;
+        let _turn = TURNS.take(self.patience, &cancelled)?;
         let mut child = Running::start(self).map_err(|e| format!("gitem couldn't start its renderer: {e}"))?;
         let until = Instant::now() + self.limit;
         let answered = child.exchange(bytes);
