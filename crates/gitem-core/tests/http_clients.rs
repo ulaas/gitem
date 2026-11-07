@@ -1061,3 +1061,59 @@ fn azure_pull_request_details_and_a_vote() {
     assert_eq!(writes[3].1["threadContext"]["filePath"], "/a.txt");
     assert_eq!(writes[4].1["completionOptions"]["mergeStrategy"], "squash");
 }
+
+#[test]
+fn the_pull_requests_youre_involved_in_come_from_all_over_the_host() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("POST", "/graphql") if r.body.contains("involves:@me") => (200, json!({"data":{"search":{"nodes":[{"number":1,"title":"One","url":"http://h/o/a/1","headRefName":"t","baseRefName":"main","repository":{"nameWithOwner":"o/a"},"author":{"login":"me"}},null,{"number":2,"title":"Two","url":"http://h/o/b/2","headRefName":"u","baseRefName":"main","repository":{"nameWithOwner":"o/b"}}]}}}).to_string()),
+        _ => (404, json!({"message":"no route"}).to_string()),
+    });
+    let c = client(ForgeKind::GitHub, "o/r", &m.base, "");
+    let got = c.involved_prs().unwrap();
+    assert_eq!(got.iter().map(|x| (x.repo.as_str(), x.pr.number)).collect::<Vec<_>>(), vec![("o/a", 1), ("o/b", 2)]);
+
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/repos/issues/search") if r.path.contains("created=true") => (200, json!([{"number":3,"title":"Mine","html_url":"http://h/o/a/3","repository":{"full_name":"o/a"}}]).to_string()),
+        ("GET", "/repos/issues/search") if r.path.contains("assigned=true") => (200, json!([{"number":3,"title":"Mine","html_url":"http://h/o/a/3","repository":{"full_name":"o/a"}},{"number":4,"title":"Given","html_url":"http://h/o/b/4","repository":{"full_name":"o/b"}}]).to_string()),
+        ("GET", "/repos/issues/search") => (200, "[]".to_string()),
+        _ => (404, json!({"message":"no route"}).to_string()),
+    });
+    let c = client(ForgeKind::Gitea, "o/r", &m.base, "");
+    let got = c.involved_prs().unwrap();
+    assert_eq!(got.iter().map(|x| x.pr.number).collect::<Vec<_>>(), vec![3, 4], "one found twice shows once");
+
+    let m = mock(|r| match r.path.split('?').next().unwrap() {
+        "/merge_requests" => (200, json!([{"iid":5,"title":"T","web_url":"http://h/o/a/-/merge_requests/5","references":{"full":"o/a!5"},"source_branch":"s","target_branch":"main"}]).to_string()),
+        _ => (404, json!({"message":"no route"}).to_string()),
+    });
+    let got = client(ForgeKind::GitLab, "o/r", &m.base, "").involved_prs().unwrap();
+    assert_eq!(got[0].repo, "o/a");
+
+    let m = mock(|r| match r.path.split('?').next().unwrap() {
+        "/org/_apis/connectionData" => (200, json!({"authenticatedUser":{"id":"me"}}).to_string()),
+        "/org/_apis/git/pullrequests" => (200, json!({"value":[{"pullRequestId":6,"title":"A","repository":{"name":"a","project":{"name":"p"}}}]}).to_string()),
+        _ => (404, json!({"message":"no route"}).to_string()),
+    });
+    let got = client(ForgeKind::AzureDevOps, "org/x/y", &m.base, "u").involved_prs().unwrap();
+    assert_eq!(got[0].repo, "p/a");
+    assert!(got[0].pr.url.ends_with("/org/p/_git/a/pullrequest/6"), "{}", got[0].pr.url);
+}
+
+#[test]
+fn a_commit_says_which_pull_requests_it_came_in_by() {
+    let m = mock(|r| match r.path.as_str() {
+        "/repos/o/r/commits/abc/pulls" => (200, json!([{"number":7,"title":"T","html_url":"http://h/7","state":"closed"}]).to_string()),
+        "/repos/o/r/commits/abc/pull" => (200, json!({"number":8,"title":"U","html_url":"http://h/8","state":"open"}).to_string()),
+        "/repos/o/r/commits/none/pull" => (404, json!({"message":"not found"}).to_string()),
+        "/projects/o%2Fr/repository/commits/abc/merge_requests" => (200, json!([{"iid":9,"title":"V","web_url":"http://h/9","state":"merged"}]).to_string()),
+        "/repositories/o/r/commit/abc/pullrequests" => (200, json!({"values":[{"id":10,"title":"W","links":{"html":{"href":"http://h/10"}},"state":"OPEN"}]}).to_string()),
+        _ => (404, json!({"message":"no route"}).to_string()),
+    });
+    assert_eq!(client(ForgeKind::GitHub, "o/r", &m.base, "").prs_for_commit("abc").unwrap()[0].number, 7);
+    assert_eq!(client(ForgeKind::Gitea, "o/r", &m.base, "").prs_for_commit("abc").unwrap()[0].number, 8);
+    assert!(client(ForgeKind::Gitea, "o/r", &m.base, "").prs_for_commit("none").unwrap().is_empty(), "none isn't an error");
+    assert_eq!(client(ForgeKind::GitLab, "o/r", &m.base, "").prs_for_commit("abc").unwrap()[0].number, 9);
+    let b = client(ForgeKind::Bitbucket, "o/r", &m.base, "").prs_for_commit("abc").unwrap();
+    assert_eq!((b[0].number, b[0].url.as_str()), (10, "http://h/10"));
+    assert!(client(ForgeKind::AzureDevOps, "o/p/r", &m.base, "").prs_for_commit("abc").is_err());
+}

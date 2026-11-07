@@ -169,6 +169,9 @@ pub struct RepoTab {
     undo_entry: Option<gitem_core::undo::UndoEntry>,
     /// Something long finished, or anything failed, with the window in the background.
     attention_due: bool,
+    branch_pr_task: crate::task::Task<Option<(String, u64, String)>>,
+    /// What that was last asked for: the branch, and the host's lists as of when.
+    branch_pr_for: Option<(Option<String>, u64)>,
     /// What there isn't room for beside the view at this window size.
     squeeze: Squeeze,
     /// Which of those is being shown over the view.
@@ -264,6 +267,8 @@ impl RepoTab {
             undoable: None,
             undo_entry: None,
             attention_due: false,
+            branch_pr_task: Default::default(),
+            branch_pr_for: None,
             squeeze: Squeeze::default(),
             peek: None,
             more_tab: None,
@@ -444,6 +449,32 @@ impl RepoTab {
     /// What closing an open tab would lose. For tests.
     pub fn open_tab_unsaved(&self, key: &str) -> Option<String> {
         self.dock.iter_all_tabs().find(|(_, t)| t.key() == key).and_then(|(_, t)| t.unsaved())
+    }
+
+    /// The current branch's pull request for the status bar, with Launchpad open or not, once
+    /// per branch until something says the host's lists have changed. Only when turned on: each
+    /// look is a request to the host.
+    fn look_up_branch_pr(&mut self, ctx: &egui::Context, settings: &Settings) {
+        if self.branch_pr_task.poll()
+            && let Some(found) = self.branch_pr_task.value.take()
+        {
+            self.data.branch_pr = found;
+        }
+        if !settings.status_bar_pr {
+            return;
+        }
+        let branch = self.data.status.get().and_then(|s| s.branch.clone());
+        let key = (branch.clone(), self.data.forge_gen);
+        if self.branch_pr_for.as_ref() == Some(&key) {
+            return;
+        }
+        let (Some(branch), Some(remote)) = (branch, self.data.forge().cloned()) else { return };
+        self.branch_pr_for = Some(key);
+        let git = self.repo.git.clone();
+        self.branch_pr_task.spawn(ctx, move || -> Result<Option<(String, u64, String)>, String> {
+            let list = crate::views::launchpad::resolve_client(&git, &remote)?.list_prs().map_err(|e| e.to_string())?;
+            Ok(list.into_iter().find(|p| p.is_on_branch(&branch)).map(|p| (branch, p.number, p.url)))
+        });
     }
 
     /// Brings the next scheduled fetch forward to now, for tests: the shortest wait is a minute.
@@ -849,6 +880,8 @@ pub struct GitemApp {
     repo_scan: Option<RepoScan>,
     /// The CA file setting last handed to the HTTP clients.
     ca_file_applied: String,
+    /// Later launches hand their paths over through this, when that's turned on.
+    instance: Option<gitem_core::instance::Instance>,
     /// A look for a newer release, by schedule or from About.
     update_task: crate::task::Task<Option<gitem_core::update::Release>>,
     /// From About, so its answer is shown even when that's "no".
@@ -983,6 +1016,7 @@ impl GitemApp {
             settings_dirty: false,
             repo_scan: None,
             ca_file_applied: String::new(),
+            instance: None,
             update_task: Default::default(),
             update_asked: false,
             update_scheduled: false,
@@ -1026,6 +1060,20 @@ impl GitemApp {
         if let Some(f) = &mut self.form {
             f.set_for_test(key, value);
         }
+    }
+
+    /// Swaps two neighbouring repository tabs. The one showing stays the one showing.
+    pub fn move_repo_tab(&mut self, from: usize, to: usize) {
+        if from.max(to) >= self.repos.len() {
+            return;
+        }
+        self.repos.swap(from, to);
+        if self.active == from {
+            self.active = to;
+        } else if self.active == to {
+            self.active = from;
+        }
+        self.settings_dirty = true;
     }
 
     /// Opens About, as its button would. For tests.
@@ -1810,6 +1858,7 @@ impl GitemApp {
             }
             ui.add_space(8.0);
             let mut close = None;
+            let mut reorder = None;
             let names: Vec<String> = self.repos.iter().map(|r| r.repo.name()).collect();
             let dirty: Vec<bool> = self.repos.iter().map(|r| r.data.status.get().is_some_and(|s| !s.entries.is_empty())).collect();
             let natural: Vec<f32> = names.iter().zip(&dirty).map(|(n, d)| chrome::repo_tab_width(ui, n, *d)).collect();
@@ -1826,6 +1875,14 @@ impl GitemApp {
                     *active = i;
                 }
                 resp.context_menu(|ui| {
+                    if i > 0 && ui.button("Move left").clicked() {
+                        reorder = Some((i, i - 1));
+                        ui.close();
+                    }
+                    if i + 1 < names.len() && ui.button("Move right").clicked() {
+                        reorder = Some((i, i + 1));
+                        ui.close();
+                    }
                     if ui.button("Close repository").clicked() {
                         close = Some(i);
                         ui.close();
@@ -1842,6 +1899,9 @@ impl GitemApp {
                         }
                     }
                 }).response.on_hover_text(format!("{} more open", plural(hidden, "repository", "repositories")));
+            }
+            if let Some((from, to)) = reorder {
+                self.move_repo_tab(from, to);
             }
             if let Some(i) = close {
                 self.request_close_repo(i);
@@ -2345,6 +2405,10 @@ impl GitemApp {
                 if let Some(f) = tab.data.forge() {
                     ui.label(RichText::new(format!("{} {}", f.kind.label(), f.path)).small().color(p.faint));
                 }
+                let stale_submodules = tab.data.submodules().iter().filter(|m| m.state == '+').count();
+                if stale_submodules > 0 && ui.small_button(RichText::new(plural(stale_submodules, "submodule to update", "submodules to update")).small()).on_hover_text("They're at other commits than this one expects. This updates them").clicked() {
+                    out.push(Action::Run(ops::submodule_update(None, true, true, false)));
+                }
                 // Found for one branch, it says nothing about another.
                 let current = tab.data.status.get().and_then(|s| s.branch.clone());
                 if let Some((_, n, url)) = tab.data.branch_pr.as_ref().filter(|(b, _, _)| Some(b) == current.as_ref()) {
@@ -2627,9 +2691,9 @@ impl GitemApp {
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z)) {
             out.push(Action::ToggleZen);
         }
-        let (palette, refresh, sidebar, changes, graph) = ctx.input(|i| {
-            (i.modifiers.command && i.key_pressed(egui::Key::P), i.key_pressed(egui::Key::F5), i.modifiers.command && i.key_pressed(egui::Key::B), i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::G), i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::H))
-        });
+        let bound = self.settings.key_bindings.clone();
+        let hit = |name: &str| crate::keys::chord_for(&bound, name).is_some_and(|(m, k)| ctx.input(|i| i.modifiers.matches_logically(m) && i.key_pressed(k)));
+        let (palette, refresh, sidebar, changes, graph) = (hit("palette"), hit("refresh"), hit("sidebar"), hit("changes"), hit("graph"));
         // Behind a dialog these would act on what's dimmed. Typing isn't in their way: every
         // one needs a key held, and egui's text boxes have no use for them.
         if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
@@ -2659,9 +2723,13 @@ impl GitemApp {
     fn more_shortcuts(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
         use egui::{Key, Modifiers};
         const CS: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
-        let (settings, open, close_tab, next, prev, fetch, pull, push) = ctx.input_mut(|i| {
-            (i.consume_key(Modifiers::COMMAND, Key::Comma), i.consume_key(Modifiers::COMMAND, Key::O), i.consume_key(Modifiers::COMMAND, Key::W), i.consume_key(Modifiers::COMMAND, Key::Tab), i.consume_key(CS, Key::Tab), i.consume_key(CS, Key::F), i.consume_key(CS, Key::L), i.consume_key(CS, Key::K))
-        });
+        let bound = self.settings.key_bindings.clone();
+        let take = |name: &str| crate::keys::chord_for(&bound, name).is_some_and(|(m, k)| ctx.input_mut(|i| i.consume_key(m, k)));
+        let (settings, open, close_tab, fetch, pull, push, undo) = (take("settings"), take("open"), take("close_tab"), take("fetch"), take("pull"), take("push"), take("undo_last"));
+        let (next, prev) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::Tab), i.consume_key(CS, Key::Tab)));
+        if undo {
+            out.push(Action::UndoLast);
+        }
         const NUMBERS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
         if let Some(n) = NUMBERS.iter().position(|k| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, *k)))
             && n < self.repos.len()
@@ -2787,7 +2855,7 @@ impl GitemApp {
             egui::ScrollArea::vertical().max_height(ctx.content_rect().height() - 220.0).show(ui, |ui| {
                 egui::Grid::new("keys").num_columns(2).spacing(egui::vec2(14.0, 4.0)).striped(true).show(ui, |ui| {
                     for (keys, what) in crate::keys::TABLE.iter().filter(|(k, w)| needle.is_empty() || k.to_lowercase().contains(&needle) || w.to_lowercase().contains(&needle)) {
-                        ui.label(RichText::new(*keys).monospace().color(p.text));
+                        ui.label(RichText::new(crate::keys::shown_keys(&self.settings.key_bindings, keys)).monospace().color(p.text));
                         ui.label(RichText::new(*what).color(p.dim));
                         ui.end_row();
                     }
@@ -2877,6 +2945,39 @@ impl GitemApp {
         }
     }
 
+    /// Starts taking what later launches hand over. Only the real window does, since a test or
+    /// a screenshot shouldn't take anyone's launches.
+    pub fn listen_for_launches(&mut self, ctx: &egui::Context) {
+        let wake = ctx.clone();
+        match gitem_core::instance::listen(&gitem_core::settings::config_dir(), move || wake.request_repaint()) {
+            Ok(i) => self.instance = Some(i),
+            // Only means later launches open windows of their own.
+            Err(e) => eprintln!("gitem: not listening for other launches: {e}"),
+        }
+    }
+
+    /// For a test: take what's handed over in this folder.
+    pub fn listen_in_for_test(&mut self, ctx: &egui::Context, dir: &Path) {
+        let wake = ctx.clone();
+        self.instance = gitem_core::instance::listen(dir, move || wake.request_repaint()).ok();
+    }
+
+    fn take_handed_over(&mut self, ctx: &egui::Context) {
+        let arrived: Vec<Vec<String>> = self.instance.as_ref().map(|i| i.incoming.try_iter().collect()).unwrap_or_default();
+        for args in arrived {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            for a in args {
+                if a.starts_with("gitem://") {
+                    if let Some(d) = gitem_core::forge::DeepLink::parse(&a) {
+                        self.apply_action(ctx, Action::DeepLink(d));
+                    }
+                } else {
+                    self.apply_action(ctx, Action::OpenRepo(PathBuf::from(a)));
+                }
+            }
+        }
+    }
+
     /// A scheduled look, if the user turned that on, and what any look found. A screenshot and a
     /// helper window never get here with the setting doing anything: neither saves, or asks.
     fn look_for_updates(&mut self, ctx: &egui::Context) {
@@ -2918,12 +3019,14 @@ impl GitemApp {
         self.apply_theme(&ctx);
         self.apply_ca_file(&ctx);
         self.look_for_updates(&ctx);
+        self.take_handed_over(&ctx);
         self.handle_shot(ui);
         // The window flashes in the taskbar until it's looked at. No more than that: a pop-up on
         // every fetch would be the reason to turn it off.
         let mut flash = false;
         for r in &mut self.repos {
             flash |= std::mem::take(&mut r.attention_due);
+            r.look_up_branch_pr(&ctx, &self.settings);
         }
         if flash && self.settings.attention_when_done {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));

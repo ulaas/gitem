@@ -586,6 +586,144 @@ impl ForgeClient {
     }
 }
 
+/// A pull request from anywhere on the host, with the repository it's in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvolvedPr {
+    pub repo: String,
+    pub pr: PullRequest,
+}
+
+/// A pull request a commit came in by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitPr {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+}
+
+impl ForgeClient {
+    /// Every open pull request you're involved in on this host, in any repository. What each host
+    /// counts as involved differs: on GitHub it's its own `involves:`, elsewhere what you opened,
+    /// were assigned or were asked to review, as far as its API says.
+    pub fn involved_prs(&self) -> Result<Vec<InvolvedPr>> {
+        self.needs_api()?;
+        let mut all: Vec<InvolvedPr> = Vec::new();
+        let mut add = |found: Vec<InvolvedPr>| {
+            for f in found {
+                if !all.iter().any(|x| x.pr.url == f.pr.url) {
+                    all.push(f);
+                }
+            }
+        };
+        match self.repo.kind {
+            ForgeKind::GitHub => {
+                let url = if self.repo.host == "github.com" && self.repo.api_base.is_none() { "https://api.github.com/graphql".to_string() } else { format!("{}/graphql", self.api_base().trim_end_matches("/v3")) };
+                let q = "query($c:String){search(query:\"is:open is:pr involves:@me archived:false\",type:ISSUE,first:50,after:$c){pageInfo{hasNextPage endCursor} nodes{... on PullRequest{number title url body isDraft state author{login} isCrossRepository headRepository{nameWithOwner} headRefName baseRefName mergeable reviewDecision additions deletions updatedAt repository{nameWithOwner} labels(first:10){nodes{name}} reviewRequests(first:15){nodes{requestedReviewer{... on User{login}}}} commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}";
+                let mut cursor = Value::Null;
+                let mut found = Vec::new();
+                loop {
+                    let v = self.request(Method::Post(json!({"query":q,"variables":{"c":cursor}})), &url)?;
+                    let Some(conn) = v.pointer("/data/search").filter(|c| !c.is_null()) else {
+                        return Err(Error::Other(v.pointer("/errors/0/message").and_then(Value::as_str).unwrap_or("The host's reply had no list in it.").to_string()));
+                    };
+                    found.extend(conn.pointer("/nodes").and_then(Value::as_array).into_iter().flatten().filter(|n| !n.is_null()).map(|n| InvolvedPr { repo: s(n.pointer("/repository/nameWithOwner")), pr: parse_github_pr(n) }));
+                    let more = conn.pointer("/pageInfo/hasNextPage").and_then(Value::as_bool).unwrap_or(false);
+                    cursor = conn.pointer("/pageInfo/endCursor").cloned().unwrap_or(Value::Null);
+                    if !more || cursor.is_null() || found.len() >= LIST_LIMIT {
+                        break;
+                    }
+                }
+                add(found);
+            }
+            ForgeKind::Gitea => {
+                let base = self.api_base();
+                for who in ["created=true", "assigned=true", "review_requested=true"] {
+                    let items = self.paged_get(|p| format!("{base}/repos/issues/search?type=pulls&state=open&{who}&limit={PER_PAGE}&page={p}"), "", "Pull requests")?;
+                    add(items.iter().map(|n| InvolvedPr { repo: s(n.pointer("/repository/full_name")), pr: PullRequest { number: n.get("number").and_then(Value::as_u64).unwrap_or(0), title: s(n.get("title")), url: s(n.get("html_url")), author: s(n.pointer("/user/login")), state: s(n.get("state")), updated: ts(n.get("updated_at")), draft: n.pointer("/pull_request/draft").and_then(Value::as_bool).unwrap_or(false), ..Default::default() } }).collect());
+                }
+            }
+            ForgeKind::GitLab => {
+                let base = self.api_base();
+                for who in ["created_by_me", "assigned_to_me"] {
+                    let items = self.paged_get(|p| format!("{base}/merge_requests?state=opened&scope={who}&per_page={PER_PAGE}&page={p}"), "", "Merge requests")?;
+                    add(items.iter().map(|n| InvolvedPr { repo: s(n.pointer("/references/full")).split('!').next().unwrap_or("").to_string(), pr: parse_gitlab_mr(n) }).collect());
+                }
+            }
+            ForgeKind::Bitbucket => {
+                let me = self.whoami()?;
+                let items = paged(|page| {
+                    let v = self.get(&format!("/pullrequests/{}?state=OPEN&pagelen={PER_PAGE}&page={page}", url_encode(&me)))?;
+                    let more = v.get("next").is_some_and(|x| !x.is_null());
+                    Ok((list_in(&v, "/values", "Pull requests")?, more))
+                })?;
+                add(items.iter().map(|n| InvolvedPr { repo: s(n.pointer("/destination/repository/full_name")), pr: parse_bitbucket_pr(n) }).collect());
+            }
+            ForgeKind::BitbucketServer => {
+                let (b, _, _) = self.server_api();
+                let items = paged(|page| {
+                    let v = self.request(Method::Get, &format!("{b}/dashboard/pull-requests?state=OPEN&limit={PER_PAGE}&start={}", (page - 1) * PER_PAGE))?;
+                    let more = v.get("isLastPage").and_then(Value::as_bool) == Some(false);
+                    Ok((list_in(&v, "/values", "Pull requests")?, more))
+                })?;
+                add(items
+                    .iter()
+                    .map(|n| {
+                        let (key, slug) = (s(n.pointer("/toRef/repository/project/key")), s(n.pointer("/toRef/repository/slug")));
+                        let mut pr = parse_bitbucket_server_pr(n, &self.repo);
+                        // A pull request elsewhere isn't at this repository's address.
+                        pr.url = n.pointer("/links/self/0/href").and_then(Value::as_str).map(String::from).unwrap_or_default();
+                        InvolvedPr { repo: format!("{key}/{slug}"), pr }
+                    })
+                    .collect());
+            }
+            ForgeKind::AzureDevOps => {
+                let (org, _, _) = self.azure_parts()?;
+                let who = self.request(Method::Get, &format!("{}/{org}/_apis/connectionData", self.azure_root()))?;
+                let id = s(who.pointer("/authenticatedUser/id"));
+                for filter in ["creatorId", "reviewerId"] {
+                    let root = self.azure_root();
+                    let items = self.paged_get(|p| format!("{root}/{org}/_apis/git/pullrequests?searchCriteria.status=active&searchCriteria.{filter}={id}&$top={PER_PAGE}&$skip={}&api-version=7.0", (p - 1) * PER_PAGE), "/value", "Pull requests")?;
+                    add(items
+                        .iter()
+                        .map(|n| {
+                            let (project, name) = (s(n.pointer("/repository/project/name")), s(n.pointer("/repository/name")));
+                            let mut pr = parse_azure_pr(n, &self.repo);
+                            pr.url = format!("{root}/{org}/{project}/_git/{name}/pullrequest/{}", pr.number);
+                            InvolvedPr { repo: format!("{project}/{name}"), pr }
+                        })
+                        .collect());
+                }
+            }
+            ForgeKind::Gerrit | ForgeKind::GoogleSource => unreachable!("rejected by needs_api"),
+        }
+        Ok(all)
+    }
+
+    /// The pull requests a commit came in by, on the hosts that can say.
+    pub fn prs_for_commit(&self, sha: &str) -> Result<Vec<CommitPr>> {
+        self.needs_api()?;
+        let from = |n: &Value, number: &str, url: &str| CommitPr { number: n.get(number).and_then(Value::as_u64).unwrap_or(0), title: s(n.get("title")), url: s(n.pointer(url)), state: s(n.get("state")) };
+        Ok(match self.repo.kind {
+            ForgeKind::GitHub => list_in(&self.get(&format!("/repos/{}/commits/{sha}/pulls", self.repo.path))?, "", "Pull requests")?.iter().map(|n| from(n, "number", "/html_url")).collect(),
+            // One at most. A 404 means there's none, not that something's wrong.
+            ForgeKind::Gitea => match self.get(&format!("/repos/{}/commits/{sha}/pull", self.repo.path)) {
+                Ok(n) => vec![from(&n, "number", "/html_url")],
+                Err(e) if e.to_string().contains("HTTP 404") => Vec::new(),
+                Err(e) => return Err(e),
+            },
+            ForgeKind::GitLab => list_in(&self.get(&format!("/projects/{}/repository/commits/{sha}/merge_requests", url_encode(&self.repo.path)))?, "", "Merge requests")?.iter().map(|n| from(n, "iid", "/web_url")).collect(),
+            ForgeKind::Bitbucket => list_in(&self.get(&format!("/repositories/{}/commit/{sha}/pullrequests", self.repo.path))?, "/values", "Pull requests")?.iter().map(|n| from(n, "id", "/links/html/href")).collect(),
+            ForgeKind::BitbucketServer => {
+                let (b, p, r) = self.server_api();
+                list_in(&self.request(Method::Get, &format!("{b}/projects/{p}/repos/{r}/commits/{sha}/pull-requests"))?, "/values", "Pull requests")?.iter().map(|n| from(n, "id", "/links/self/0/href")).collect()
+            }
+            ForgeKind::AzureDevOps => return Err(Error::Other("Azure DevOps has no simple way to ask this. Search for the commit on the host.".into())),
+            ForgeKind::Gerrit | ForgeKind::GoogleSource => unreachable!("rejected by needs_api"),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

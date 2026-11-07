@@ -147,9 +147,9 @@ impl PullRequestView {
                     let failed = d.checks.iter().filter(|c| c.state == CheckState::Failed).count();
                     let running = d.checks.iter().filter(|c| c.state == CheckState::Running).count();
                     if failed > 0 {
-                        chip(ui, &format!("{failed} checks failing"), p.danger);
+                        chip(ui, &format!("{} failing", plural(failed, "check", "checks")), p.danger);
                     } else if running > 0 {
-                        chip(ui, &format!("{running} checks running"), p.warn);
+                        chip(ui, &format!("{} running", plural(running, "check", "checks")), p.warn);
                     } else if !d.checks.is_empty() {
                         chip(ui, "Checks pass", p.good);
                     }

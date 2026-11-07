@@ -36,6 +36,10 @@ pub struct LaunchpadView {
     started: bool,
     /// What the lists were last loaded for: changes here make them out of date.
     loaded_for: Option<(u64, Option<String>)>,
+    /// Everything you're involved in on this host, rather than this repository's.
+    everywhere: bool,
+    involved: Task<Vec<forge::details::InvolvedPr>>,
+    involved_for: Option<u64>,
     /// The branch the status bar's pull request was last looked up for.
     pr_branch: Option<String>,
     /// The source branch as filled in. It follows the current branch until someone types.
@@ -62,6 +66,9 @@ impl Default for LaunchpadView {
             issues: Task::default(),
             started: false,
             loaded_for: None,
+            everywhere: false,
+            involved: Task::default(),
+            involved_for: None,
             pr_branch: None,
             auto_head: None,
             action: Task::default(),
@@ -263,6 +270,14 @@ impl LaunchpadView {
 
     fn prs_ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.everywhere, false, "This repository");
+            ui.add_enabled_ui(cx.forge().is_some(), |ui| ui.selectable_value(&mut self.everywhere, true, "Everything I'm in")).inner.on_hover_text("Open pull requests you're involved in across this host").on_disabled_hover_text("None of this repository's remotes is on a supported host.");
+        });
+        if self.everywhere {
+            self.involved_ui(ui, cx);
+            return;
+        }
         if let Some(e) = &self.prs.error {
             error_box(ui, e, &p);
             if let Some(r) = cx.forge().cloned()
@@ -329,6 +344,63 @@ impl LaunchpadView {
             }
         });
         self.prs.value = Some(loaded);
+    }
+
+    fn involved_ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        self.involved.poll();
+        let Some(remote) = cx.forge().cloned() else { return };
+        if self.involved_for != Some(cx.data.forge_gen) {
+            self.involved_for = Some(cx.data.forge_gen);
+            let git = cx.repo.git.clone();
+            self.involved.spawn(ui.ctx(), move || -> Result<Vec<forge::details::InvolvedPr>, String> { resolve_client(&git, &remote)?.involved_prs().map_err(|e| e.to_string()) });
+        }
+        if let Some(e) = &self.involved.error {
+            error_box(ui, e, &p);
+        }
+        let Some(list) = self.involved.get().cloned() else {
+            if self.involved.busy() {
+                spinner_row(ui, "Asking the host…", &p);
+            }
+            return;
+        };
+        ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
+        let q = self.filter.to_lowercase();
+        if list.len() >= forge::LIST_LIMIT {
+            ui.label(RichText::new(format!("Showing the first {} only.", forge::LIST_LIMIT)).small().color(p.dim));
+        }
+        egui::ScrollArea::vertical().id_salt("lp-everywhere").auto_shrink([false, false]).show(ui, |ui| {
+            if list.is_empty() {
+                empty_state(ui, "Nothing open", "Open pull requests you're involved in on this host appear here.", &p);
+            }
+            for x in list.iter().filter(|x| q.is_empty() || x.pr.title.to_lowercase().contains(&q) || x.repo.to_lowercase().contains(&q)) {
+                egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        chip(ui, &x.repo, p.series_text(6));
+                        crate::widgets::web_link(ui, format!("#{}", x.pr.number), &x.pr.url);
+                        ui.add(egui::Label::new(RichText::new(&x.pr.title).strong()).truncate());
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(if x.pr.head.is_empty() { x.pr.author.clone() } else { card_line(&x.pr, cx.settings.date_relative) }).small().color(p.dim));
+                        if x.pr.draft {
+                            chip(ui, "Draft", p.dim);
+                        }
+                        if ui.small_button("Open").clicked() {
+                            cx.url(x.pr.url.clone());
+                        }
+                        // A folder of that name opened here before. It's only a guess at which
+                        // clone, and opening it is all this does.
+                        if let Some(path) = local_copy(&x.repo, &cx.settings.recent_repos)
+                            && ui.small_button("Open repository").on_hover_text(path.clone()).clicked()
+                        {
+                            cx.out.push(Action::OpenRepo(path.into()));
+                        }
+                    });
+                });
+                ui.add_space(3.0);
+            }
+        });
     }
 
     fn pr_card(&mut self, ui: &mut Ui, cx: &mut Cx, pr: &PullRequest, cur: Option<&str>, all: &[PullRequest], me: &str) {
@@ -435,14 +507,27 @@ impl LaunchpadView {
                     })));
                 }
                 let is_snoozed = cx.settings.snoozed_prs.iter().any(|(k, u)| *k == key && *u > util::now_ts());
-                if ui.small_button(if is_snoozed { "Wake" } else { "Snooze a day" }).clicked() {
-                    let k = key.clone();
+                let snooze = |cx: &mut Cx, k: String, secs: i64| {
                     cx.out.push(Action::Settings(Box::new(move |s| {
                         s.snoozed_prs.retain(|(x, _)| *x != k);
-                        if !is_snoozed {
-                            s.snoozed_prs.push((k, util::now_ts() + 86400));
+                        if secs > 0 {
+                            s.snoozed_prs.push((k, util::now_ts() + secs));
                         }
                     })));
+                };
+                if is_snoozed {
+                    if ui.small_button("Wake").clicked() {
+                        snooze(cx, key.clone(), 0);
+                    }
+                } else {
+                    ui.menu_button(RichText::new("Snooze \u{E136}").small(), |ui| {
+                        for (label, secs) in [("An hour", 3600), ("A day", 86400), ("A week", 7 * 86400)] {
+                            if ui.button(label).clicked() {
+                                snooze(cx, key.clone(), secs);
+                                ui.close();
+                            }
+                        }
+                    });
                 }
                 if here && repo.as_ref().is_some_and(|r| r.kind == forge::ForgeKind::GitHub) && ui.small_button("Suggest my changes").on_hover_text("Post your uncommitted edits as suggested changes on this pull request").clicked()
                     && let Some(r2) = repo.clone() {
@@ -656,6 +741,12 @@ pub fn stack_of(pr: &PullRequest, all: &[PullRequest]) -> Vec<String> {
     chain
 }
 
+/// A folder opened here before whose name matches a repository's last part.
+fn local_copy(repo: &str, recent: &[String]) -> Option<String> {
+    let name = repo.rsplit('/').next()?.to_lowercase();
+    recent.iter().find(|r| r.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().is_some_and(|leaf| leaf.to_lowercase() == name)).cloned()
+}
+
 /// A host that sends no date for it gets none shown, rather than one from 1970.
 fn when(ts: i64, relative: bool) -> Option<String> {
     (ts > 0).then(|| time_label(ts, relative))
@@ -784,7 +875,7 @@ impl FetchPr {
 }
 
 /// A pull request from a fork goes back to its branch there, through a remote for that fork.
-fn push_to_fork_form(pr: &forge::PullRequest, local: &str, repo: Option<&forge::RemoteRepo>, remotes: &[gitem_core::model::Remote]) -> FormDialog {
+pub fn push_to_fork_form(pr: &forge::PullRequest, local: &str, repo: Option<&forge::RemoteRepo>, remotes: &[gitem_core::model::Remote]) -> FormDialog {
     let owner = pr.head_repo.split('/').next().filter(|o| !o.is_empty()).unwrap_or("fork").to_string();
     let url = repo.and_then(|f| remotes.iter().find_map(|r| forge::fork_remote_url(&r.push_url, &f.path, &pr.head_repo))).unwrap_or_default();
     let (local, head) = (local.to_string(), pr.head.clone());
@@ -819,6 +910,13 @@ mod tests {
         assert!(card_line(&dated, true).contains("ago"), "{}", card_line(&dated, true));
         let i = Issue { source: "Jira".into(), state: "Open".into(), ..Default::default() };
         assert_eq!(issue_line(&i, true), "Jira · Open");
+    }
+
+    #[test]
+    fn a_local_copy_is_found_by_folder_name() {
+        let recent = ["C:/work/Other".to_string(), "C:/work/gitem/".to_string()];
+        assert_eq!(local_copy("o/gitem", &recent).as_deref(), Some("C:/work/gitem/"));
+        assert_eq!(local_copy("o/none", &recent), None);
     }
 
     #[test]

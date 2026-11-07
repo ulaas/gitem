@@ -11,6 +11,8 @@ target/release/gitem [path-to-repository ...]
 
 `cargo build --profile dist` makes a smaller binary, in `target/dist`, and takes minutes.
 
+`packaging/windows/build.ps1` builds that and a per-user Windows installer, with Inno Setup. See `packaging/README.md`: neither has been run, and nothing is signed, so SmartScreen warns about the result. About has Check for updates, and Settings > Workflow can ask once a day. Either only tells you and links to the release's page: nothing is downloaded or run. It's off, and has nowhere to ask, until you give it the address of a releases/latest API.
+
 With no path, gitem restores the repositories from your last session. With a path, it opens that repository and leaves the saved session in place for next time.
 
 ### Which git is used
@@ -35,20 +37,22 @@ gitem looks for git in this order:
 | Git CodeLens | Recent-change and author summaries above symbols, by regex for common languages |
 | Revision navigation | Older and Newer across a file's history, following renames; compare with the previous or next revision, the working tree, or any branch or tag; open any revision |
 | Graph | Lanes with folding, ref badges, search with highlights and match options, Current and Smart presets, favorites, focus and hide refs, worktree pills, minimap by commits or lines changed, Changes column, columns you can resize, reorder, and hide by dragging or right-clicking headers, remembered between sessions, dim merges, jump to HEAD or upstream, `/` ref finder, multi-select, drag a ref onto a commit to merge, rebase, or compare, work-in-progress row, stashes |
-| Commit actions | Reword, squash, drop, Undo Commit, Push to Commit, fixup and Squash Fixups, recompose, copy as patch, compare with common base, conflict prediction |
+| Commit actions | Reword, squash, drop, revert a selection, Undo Commit, Push to Commit, fixup and Squash Fixups, recompose, copy as patch, compare with common base, conflict prediction |
 | Inspect / Commit Details | Metadata, signatures, autolinks, notes, containing refs, files with stats |
 | Commits, Branches, Remotes, Tags, Stashes, Contributors views | Sidebar trees, plus full views where useful. Local and remote branches open to their latest commits, and long lists have Load more |
-| Repositories, Workspaces | Tabs for several open repositories; named local workspaces with status overview and fetch-all |
+| Repositories, Workspaces | Tabs for several open repositories; named local workspaces with a status overview that follows what they do, and fetch all, pull all (fast-forward only) and open all, reporting failures together |
 | Worktrees | Add, open, move, lock, remove, prune, repair; per-worktree change counts; copy changes or apply a stash into another worktree; open a terminal, run a task, or start an agent CLI there |
 | File History, Line History | Commit lists for a file or a line range |
 | Visual History | Time and author bubble chart with churn bars, zoom, and pan, for a file, a folder, a branch, or the whole repository |
 | Treemaps, Repository Health | Files by size or recent commits; a verdict plus optimizations you can turn on and undo; maintenance on demand or at open |
+| Search contents | `git grep` across tracked files, here or at any revision, as plain text or a regular expression. A click opens the file at that line |
 | Search & Compare | The same search syntax (`message:`, `-message:`, `re:`, `author:`, `committer:`, `@me`, `commit:`, `file:`, `change:`, `after:`, `before:`, `is:merge`, `type:merge`), and compare of any two refs. Words are plain text and all must match, as with `fix(auth):` or `C++`. `re:` takes a regular expression, such as `re:fix\|feat` |
-| Rebase | Drag to reorder; pick, reword, edit, squash, fixup, drop, exec, break. Also works as git's own `sequence.editor` |
-| Git Command Palette | `Ctrl+P`: every command, branch, and file, with guided forms |
-| Launchpad | Pull requests grouped by what they need from you, with checks, review, and conflict state; pin, snooze, stacked-PR labels and rebase; current branch's PR in the status bar |
-| Start Work, Start Review | Branch or worktree from an issue; check out a PR, or open it in a worktree |
-| Remote provider integrations | GitHub, GitLab, Bitbucket, Bitbucket Server/Data Center, Azure DevOps (and Server), and Gitea/Forgejo, including self-hosted: links, PRs, issues, create, merge, approve, comment. Gerrit and Google Source: links only |
+| Rebase | Drag to reorder; pick, reword, edit, squash, fixup, drop, exec, break. Check for conflicts tries the plan out without touching anything, and names the commit it would stop at. Needs git 2.40. Also works as git's own `sequence.editor` |
+| Git Command Palette | `Ctrl+P`: every branch and file, and the commands from gitem's menus that apply to the repository, with guided forms. Commands that need a row to act on, such as those for a graph selection, stay on that row's menu |
+| Launchpad | Pull requests grouped by what they need from you, with checks, review, and conflict state; pin, snooze for an hour, a day or a week, stacked-PR labels, a rebase that moves the stack's branches and a push of them all together; the current branch's PR in the status bar, from Launchpad or, if turned on in Settings, without it. Everything you're involved in across the host is one click away, up to 200 per query. It needs a repository open, on that host |
+| Pull requests | A tab for each one: description, changed files with their diffs where the host gives them, each check with a link to its log, the conversation and inline comments, Approve, Request changes and Comment, a comment on a line, and Merge with a choice of merge, squash or rebase where the host takes one. Details shows which pull request a commit came in by, when asked |
+| Start Work, Start Review | Branch or worktree from an issue; check out a PR, or open it in a worktree; start your agent command there, in a new terminal |
+| Remote provider integrations | GitHub, GitLab, Bitbucket, Bitbucket Server/Data Center, Azure DevOps (and Server), and Gitea/Forgejo, including self-hosted: links, PRs and their details, issues, create, merge, approve, request changes, comment. GitLab has no request for changes, Bitbucket Server merges by its own setting, and Azure's file lists come with no diff. Gerrit and Google Source: links only |
 | Issue tracker integrations | Jira Cloud, Jira Data Center/Server, Linear, and Trello |
 | Remote commands | Open or copy links to commits, files and lines, branches, tags, comparisons, and the repository; open a file from a pasted link |
 | Autolinks | Configurable prefixes, plus `#123` for the repository's host |
@@ -56,7 +60,7 @@ gitem looks for git in this order:
 | Patches | A local patch library, shareable as a secret GitHub gist. No account required |
 | Hovers, avatars | Commit cards everywhere; initials by default, Gravatar opt-in |
 | Commit signatures | Verification status per commit, signing setup, SSH allowed signers editor |
-| Agents | A board of Claude Code and Codex sessions in this repository's worktrees, with resume, archive, and a file activity treemap; start a session in any worktree |
+| Agents | A board of Claude Code, Codex, Copilot CLI and OpenCode sessions in this repository's worktrees, with resume, archive, and a file activity treemap; start a session in any worktree |
 | Review | Sessions with a file checklist, comment threads, AI findings, a reading-order suggestion, and handing open notes to an agent |
 | Auto-rebase | Rebase with AI conflict resolution that pauses when the model is unsure, with an undo that keeps uncommitted changes, and stops without changing anything if they're in a file it has to change |
 | Files view | A sidebar view of the working tree: folders first, change marks on files and the folders holding them, a filter, and a changed-only mode |
@@ -66,6 +70,10 @@ gitem looks for git in this order:
 | Window | Every window, helpers included, has the app's own titlebar, and the main one has an icon rail of views with tooltips, so it looks the same on every platform; an About box shows the commit a build came from (also `gitem --version`) |
 | Modes | Zen mode (`Ctrl+Shift+Z`) hides the side panels; dockable tabs replace detachable views |
 | Terminal links | Not applicable. A Git console shows every command gitem runs and lets you run your own |
+| Navigation | The rail has Home, Graph, Changes, Search and Launchpad, with everything else in its More list, whose last view gives way to the next so tabs don't pile up. Settings can put every view on the rail. `Ctrl+P` and the title bar's search field reach everything |
+| Small windows | Details gives way first, then the sidebar, and their toolbar buttons show them over the view. With many repositories open, tabs shrink, and those that don't fit go in a list. The Details panel only shows beside views that have commits |
+| Dialogs | They dim what's behind them and take its clicks, leaving the window's own controls and title bar working. Enter submits one from a one-line field. Red is kept for what can lose work, and only those won't answer to Enter |
+| Accessibility | Whatever has the keyboard gets its own outline. Settings has colour-blind safe diffs (blue and orange) and reduced motion. Zoom keys stay in step with the zoom setting |
 
 ### Beyond GitLens
 
@@ -74,6 +82,11 @@ gitem looks for git in this order:
 - **Credential manager:** API tokens and git HTTPS credentials in Windows Credential Manager, a git credential helper, removal of stale Git Credential Manager entries, SSH key generation and agent management, connection tests, commit-signing setup, and dialogs for git's password and passphrase prompts.
 - **Repository tools:** reflog recovery, guided bisect (including automated runs), submodules, hooks, `.gitignore` editing with path testing, clean with preview, Git LFS, sparse checkout, maintenance, and a config editor.
 - **Docking:** drag tabs to split or rearrange the workspace.
+- **Your own tools:** a file's menu opens it in your diff tool, by the name git knows or git's own setting, and Settings > Agents and integrations chooses the terminal: cmd, PowerShell, Windows Terminal, Git Bash, or a program of your own.
+- **Cleaning up:** Clean up branches lists those merged or gone from the remote, and a branch you aren't on can be fast-forwarded from its menu.
+- **Undo:** after a merge, rebase, pull, reset, cherry-pick, revert, branch delete, stash drop, discard, or delete of untracked files, the toolbar's Undo says what it will take back, and Redo follows one that moved HEAD. Only the last thing done is on offer, and it says so if things have moved since. `Ctrl+Alt+Z` does the same. Clean, and deleting a branch on a remote, can't be undone.
+- **One window:** with Use one window on, opening a folder or a link from a terminal goes to the window already open. Settings can also add Open in gitem to Explorer, and take it away.
+- **Keys:** Settings > Workflow changes the keys for the main commands, and says if two collide.
 
 ### Differences from GitLens
 
@@ -86,6 +99,8 @@ This was compared against the GitLens README, Help Center, and changelog through
 - **Agent sessions** are read from the files Claude Code, Codex, Copilot CLI, and OpenCode write, so status is an estimate. You answer permission prompts in the agent, not in gitem. Copilot's format is undocumented and OpenCode's has changed between releases, so both may need updating. OpenCode sessions show no branch, because it doesn't record one.
 - **Localization** is experimental, as in GitLens: Spanish, Turkish, and Simplified Chinese cover navigation, toolbars, and context menus. The rest is English.
 - **Suggested changes** only work on GitHub.
+
+**Not included, though not GitKraken's:** PR and issue titles on autolink hovers, a conflict panel in the rebase editor (it names the first commit that would conflict, in a line above the plan), Launchpad with no repository open, inline check logs, and pull requests or issues over MCP, which would give an agent your token's reach.
 
 **Not applicable:** follow-the-terminal and terminal links, since gitem has no integrated terminal.
 
@@ -102,7 +117,7 @@ Scan for repositories, on the welcome screen and the + menu, finds them in a fol
 
 ## Using gitem from the command line
 
-Register these from **Credentials > Git integration**, or set them yourself:
+Register these from **Credentials > Git integration**, or set them yourself. The MCP server's line is in Settings, and links have their own button there:
 
 ```
 gitem --credential-helper get|store|erase    git credential helper
@@ -140,11 +155,12 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 | `Space` | Stage or unstage the current file in Changes |
 | `Alt+↑, Alt+↓` | Previous and next change in a diff; move a commit in the rebase editor |
 | `P` `R` `E` `S` `F` `D` | Set the rebase action |
-| `Ctrl+F` | Find in file; search in the graph |
+| `Ctrl+F` | Find in a file or a diff; search in the graph |
 | `/` | Find a ref in the graph |
 | `F3` `Shift+F3` | Next and previous search match |
 | `Alt+B` | Toggle blame in a file |
 | `Ctrl+Shift+Z` | Zen mode |
+| `Ctrl+Alt+Z` | Undo the last action |
 
 ## Words
 
@@ -167,10 +183,10 @@ The same words are used throughout, and F1 lists them too.
 
 ## Safety
 
-- Destructive commands ask first and show the exact git command, including a plain force push from the push form. You can turn this off in Settings. Deleting a stored secret asks too, and a revealed secret hides itself after 30 seconds or when you leave its page.
+- Destructive commands ask first and show the exact git command, including a plain force push from the push form, and any force push of the default branch, lease or no lease. You can turn this off in Settings. Amending a commit that's already on its upstream, or planning a rebase over such commits, says what that will mean. Deleting a stored secret asks too, and a revealed secret hides itself after 30 seconds or when you leave its page.
 - Unstaging during a merge, cherry-pick or rebase keeps the operation and its conflicts. The Composer waits until the operation is finished, except while a rebase is stopped at an edit step, where splitting a commit is the point.
 - The Composer keeps its plan until each commit has landed, leaves other staged files staged, and asks before committing a partly staged file whole.
-- Closing a tab, a repository or the window asks first if that would lose unsaved merge resolutions, a written commit message, a Composer plan, typing in an open dialog, or a running or queued git command. A fetch doesn't count. Not yet covered: rebase plans, Launchpad's pull request form, and review notes being typed.
+- Closing a tab, a repository or the window asks first if that would lose unsaved merge resolutions, a written commit message, a Composer plan, typing in an open dialog, or a running or queued git command. A fetch doesn't count. So do a rebase plan you've changed, a pull request or review you're writing, and review notes being typed.
 - Force with lease also uses `--force-if-includes`, so a push after a fetch is refused until you've taken in what the fetch brought.
 - Writes wait up to four seconds for another program's `index.lock`. A lock that stays gets a dialog offering to remove it, only when you ask and no git process is running on the computer. It's never removed automatically. Cancelling a pull can leave one behind, along with half-updated files.
 - Saved patches keep binary files, other encodings and, for all changes, untracked files. Applying tries a plain `git apply` first, which stages nothing, and falls back to a three-way merge and says so. A patch with text that isn't UTF-8 can't go on the clipboard or in a gist, so those are refused.
@@ -231,7 +247,7 @@ crates/gitem-core   Everything except UI: git runner, parsers, ops, diff and
 crates/gitem        The egui app, its views, and git helper modes
 ```
 
-Write operations are data (`ops.rs`), so every mutation can be logged, confirmed, and queued in one place.
+Write operations are data (`ops.rs`), so git commands can be logged, confirmed, and queued in one place. What isn't a git command doesn't go through it: renaming or deleting a hook, adding to an ignore file, settings, and the registry entries for links and Explorer. Those are direct file or `reg` writes, each from its own button, and don't appear in the Console.
 
 ## Tests
 
@@ -247,6 +263,7 @@ Write operations are data (`ops.rs`), so every mutation can be logged, confirmed
 - **Helper tests** that have real git invoke the built binary.
 - **Property tests** (`crates/gitem-core/tests/properties.rs`) of partial patches through real `git apply`, the merge engine, and the parsers. Case counts are small by default: set `PROPTEST_CASES` for a longer hunt.
 - **Performance tests** that fail if parsing stops scaling linearly (`crates/gitem-core/tests/perf.rs`), if a frame gets slow, or if an idle window starts running git, with very large histories, diffs, files, ref lists and statuses. The harness doesn't paint, so these don't measure drawing.
+- **Daily flows** (`crates/gitem/tests/daily_flows.rs`, `crates/gitem-core/tests/undo.rs`, `crates/gitem-core/tests/daily_ops.rs`): undo, branch cleanup and the smaller options, against real git, with the update check against a mock on localhost.
 - **Lifecycle tests** (`crates/gitem/tests/lifecycle.rs`) of real startup, exit, the saved session, and old, new and broken settings files.
 
 A contract test against a real Gitea, which needs a container, is opt-in. How to run it is at the top of `crates/gitem-core/tests/gitea_contract.rs`.
@@ -263,8 +280,5 @@ Tests create temporary repositories. Every test binary starts with its own scrat
 - Hosting, issue-tracker, and AI requests go to the local mock, so they prove gitem's side of each exchange against sample responses, not that a real service accepts them. Try these with your own accounts before relying on them.
 - Moving and resizing the custom window were checked by hand-style mouse input on Windows only, not in the test suite. On other platforms window corners stay square, and cancelling kills only git itself, not what it started.
 - Native file-picker dialogs aren't automated. Every picker also has a text field.
+- The installer has never been built or run: its script is only read by a test. The release workflow has never run. Registry entries for Explorer are checked as the commands they'd run, and never written. A flashing taskbar and a real second launch handing over to a real window weren't seen. Handing over is tested through its socket and the window's code, in one process.
 - Copilot CLI and OpenCode reading is tested against sample data. No real Copilot session was available, and the real OpenCode database had no tool calls in it.
-| Navigation | The rail has Home, Graph, Changes, Search and Launchpad, with everything else in its More list, whose last view gives way to the next so tabs don't pile up. Settings can put every view on the rail. `Ctrl+P` and the title bar's search field reach everything |
-| Small windows | Details gives way first, then the sidebar, and their toolbar buttons show them over the view. With many repositories open, tabs shrink, and those that don't fit go in a list. The Details panel only shows beside views that have commits |
-| Dialogs | They dim what's behind them and take its clicks, leaving the window's own controls and title bar working. Enter submits one from a one-line field. Red is kept for what can lose work, and only those won't answer to Enter |
-| Accessibility | Whatever has the keyboard gets its own outline. Settings has colour-blind safe diffs (blue and orange) and reduced motion. Zoom keys stay in step with the zoom setting |

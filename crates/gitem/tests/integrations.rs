@@ -67,6 +67,8 @@ fn api(host: &Shared, r: &Req) -> (u16, Vec<u8>) {
         ("GET", "/api/v1/repos/o/r/commits/headsha/statuses") => ok(json!([{"context":"build-job","status":"failure","description":"It broke","target_url":"http://127.0.0.1:9/ci/1"}])),
         ("GET", "/api/v1/repos/o/r/issues/7/comments") => ok(json!([{"user":{"login":"bea"},"body":"A thought about this","created_at":"2026-01-02T00:00:00Z"}])),
         ("GET", "/api/v1/repos/o/r/pulls/7/reviews") => ok(json!([])),
+        ("GET", "/api/v1/repos/issues/search") => ok(json!([{"number":2,"title":"A pull request somewhere else","html_url":"http://127.0.0.1:9/o/elsewhere/2","user":{"login":"me"},"state":"open","repository":{"full_name":"o/elsewhere"}}])),
+        ("GET", p) if p.starts_with("/api/v1/repos/o/r/commits/") && p.ends_with("/pull") => ok(json!({"number":7,"title":"The topic","html_url":"http://127.0.0.1:9/pulls/7","state":"open"})),
         ("POST", p) if p.starts_with("/api/v1/repos/o/r/pulls/") && p.ends_with("/merge") => {
             let n: u64 = p.split('/').nth(7).and_then(|x| x.parse().ok()).unwrap_or(0);
             h.prs.retain(|x| x["number"] != n);
@@ -1039,4 +1041,41 @@ fn a_ca_file_that_cannot_be_used_says_so_on_the_page() {
         assert!(t.elapsed() < PATIENCE, "it stayed");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+// ---- beyond this repository, and without Launchpad open
+
+#[test]
+fn everything_youre_in_lists_other_repositories_and_their_own_links() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |s| s.recent_repos = vec!["C:/work/elsewhere".to_string()]);
+    open_launchpad(&mut h);
+    click(&mut h, "Everything I'm in");
+    wait_for_label(&mut h, "o/elsewhere");
+    wait_for_text(&mut h, "A pull request somewhere else");
+    wait_for_label(&mut h, "Open repository");
+    no_errors(&h);
+}
+
+#[test]
+fn the_status_bar_finds_the_branchs_pull_request_only_when_turned_on() {
+    let f = Fx::new();
+    f.in_user(&["switch", "-q", "-c", "topic"]);
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    quiet(&mut h);
+    assert!(f.requests("GET", "/api/v1/repos/o/r/pulls").is_empty(), "off by default: not one request");
+    let mut h2 = f.harness(ForgeKind::Gitea, |s| s.status_bar_pr = true);
+    wait_for_label(&mut h2, "PR #7");
+    drop(h);
+}
+
+#[test]
+fn details_say_which_pull_request_a_commit_came_in_by() {
+    let f = Fx::new();
+    let sha = f.in_user(&["rev-parse", "HEAD"]);
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::Inspect(sha));
+    click(&mut h, "Find pull request");
+    wait_for_label(&mut h, "#7 The topic");
 }

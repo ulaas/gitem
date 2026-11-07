@@ -51,6 +51,9 @@ pub struct InspectPanel {
     moving: bool,
     /// Past the first few refs, shown on request.
     all_refs: bool,
+    /// The pull requests the commit came in by, once someone has asked. For that commit only.
+    prs: Task<Vec<gitem_core::forge::details::CommitPr>>,
+    prs_for: Option<String>,
 }
 
 fn load_details(repo: &gitem_core::Repo, sha: &str) -> Result<Details, String> {
@@ -172,6 +175,32 @@ impl InspectPanel {
                 cx.form(crate::forms::revert_form(c.sha.clone(), c.is_merge()));
             }
         });
+        self.prs.poll();
+        if let Some(remote) = cx.forge().cloned() {
+            let asked = self.prs_for.as_deref() == Some(c.sha.as_str());
+            ui.horizontal_wrapped(|ui| {
+                if !asked && ui.small_button("Find pull request").on_hover_text("Asks the host").clicked() {
+                    self.prs_for = Some(c.sha.clone());
+                    let (git, sha) = (cx.repo.git.clone(), c.sha.clone());
+                    self.prs.spawn(ui.ctx(), move || -> Result<Vec<gitem_core::forge::details::CommitPr>, String> { crate::views::launchpad::resolve_client(&git, &remote)?.prs_for_commit(&sha).map_err(|e| e.to_string()) });
+                }
+                if asked {
+                    if self.prs.busy() {
+                        ui.add(spinner(13.0));
+                    } else if let Some(e) = &self.prs.error {
+                        ui.colored_label(p.warn, e);
+                    } else if let Some(list) = self.prs.get() {
+                        if list.is_empty() {
+                            ui.label(RichText::new("No pull request has this commit.").small().color(p.dim));
+                        }
+                        for pr in list {
+                            crate::widgets::web_link(ui, format!("#{} {}", pr.number, pr.title), &pr.url);
+                            chip(ui, &pr.state.to_lowercase(), p.dim);
+                        }
+                    }
+                }
+            });
+        }
         match d.signature.status.as_str() {
             "G" => chip(ui, &format!("\u{E182} Signed by {}", d.signature.signer), p.good),
             "U" | "X" | "Y" => chip(ui, &format!("Signature from {} is untrusted or expired", d.signature.signer), p.warn),

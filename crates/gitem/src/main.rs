@@ -102,6 +102,7 @@ fn run_app(args: &[String]) -> i32 {
     let mut inspect = None;
     let mut palette = None;
     let mut link = None;
+    let mut link_text = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -146,7 +147,10 @@ fn run_app(args: &[String]) -> i32 {
             }
             s if s.starts_with("gitem://") => {
                 match gitem_core::forge::DeepLink::parse(s) {
-                    Some(d) => link = Some(d),
+                    Some(d) => {
+                        link = Some(d);
+                        link_text = Some(s.to_string());
+                    }
                     None => {
                         eprintln!("Not a valid gitem link: {s}");
                         return 2;
@@ -163,6 +167,15 @@ fn run_app(args: &[String]) -> i32 {
     let is_shot = shot.is_some();
     if is_shot {
         gitem_core::cred::turn_off_for_screenshots();
+    }
+    // Only an ordinary launch, and only when asked for. A screenshot has to draw for itself.
+    let single_window = !is_shot && tabs.is_empty() && gitem_core::settings::Settings::load().single_window;
+    if single_window {
+        let mut handing: Vec<String> = paths.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).to_string_lossy().into_owned()).collect();
+        handing.extend(link_text.iter().cloned());
+        if gitem_core::instance::hand_off(&gitem_core::settings::config_dir(), &handing) {
+            return 0;
+        }
     }
     let storage = standalone::eframe_storage("app.ron", is_shot);
     let options = eframe::NativeOptions { viewport: gitem::chrome::viewport("gitem", size).with_min_inner_size([800.0, 500.0]), persist_window: !is_shot, persistence_path: storage.clone(), ..Default::default() };
@@ -183,6 +196,9 @@ fn run_app(args: &[String]) -> i32 {
             }
             if let Some(d) = link {
                 a.apply_action(&cc.egui_ctx, gitem::action::Action::DeepLink(d));
+            }
+            if single_window {
+                a.listen_for_launches(&cc.egui_ctx);
             }
             a.shot = shot.map(|path| app::Shot { path, at: Instant::now(), sent: false, script: Vec::new() });
             Ok(Box::new(a))

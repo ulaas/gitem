@@ -707,3 +707,70 @@ fn find_in_a_diff_counts_and_moves_through_matches() {
     click(&mut h, "Next match");
     wait_for_text(&mut h, "1 of 2");
 }
+
+// ---- one window, and keys
+
+#[test]
+fn a_launch_handed_over_opens_in_this_window() {
+    let f = Fx::new();
+    let other = f.beside("other");
+    std::fs::create_dir(&other).unwrap();
+    f.git.run(Some(&other), &["init", "-q", "-b", "main"]).unwrap();
+    let mut h = f.harness(|_| {});
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().listen_in_for_test(&ctx, dir.path());
+    assert!(gitem_core::instance::hand_off(dir.path(), &[other.to_string_lossy().into_owned()]));
+    wait_for(&mut h, "the second tab", |h| h.state().repos.len() == 2);
+}
+
+#[test]
+fn a_changed_key_does_the_command_and_the_old_one_no_longer_does() {
+    use egui::{Key, Modifiers};
+    let f = Fx::new();
+    let mut h = f.harness(|s| {
+        s.key_bindings.insert("settings".to_string(), "Alt+F7".to_string());
+    });
+    let has_settings = |h: &Harness<GitemApp>| h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Settings(_)));
+    assert!(!has_settings(&h));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Comma);
+    h.step();
+    h.step();
+    assert!(!has_settings(&h), "the old keys do nothing now");
+    h.key_press_modifiers(Modifiers::ALT, Key::F7);
+    h.step();
+    h.step();
+    assert!(has_settings(&h));
+}
+
+#[test]
+fn undo_has_a_key() {
+    use egui::{Key, Modifiers};
+    let f = Fx::new();
+    f.git(&["branch", "gone"]);
+    let mut h = f.harness(|s| s.confirm_destructive = false);
+    h.state_mut().repos[0].queue_for_test(gitem_core::ops::branch_delete("gone", false));
+    settle(&mut h);
+    h.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::ALT), Key::Z);
+    h.step();
+    settle(&mut h);
+    assert_ne!(f.git(&["branch", "--list", "gone"]), "");
+}
+
+#[test]
+fn repository_tabs_can_be_moved_and_the_one_showing_stays() {
+    let f = Fx::new();
+    let other = f.beside("other");
+    std::fs::create_dir(&other).unwrap();
+    f.git.run(Some(&other), &["init", "-q", "-b", "main"]).unwrap();
+    let mut h = f.harness(|_| {});
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::OpenRepo(other));
+    wait_for(&mut h, "the second tab", |h| h.state().repos.len() == 2);
+    settle(&mut h);
+    let first = h.state().repos[0].repo.root.clone();
+    let showing = h.state().active;
+    h.state_mut().move_repo_tab(0, 1);
+    assert_eq!(h.state().repos[1].repo.root, first);
+    assert_eq!(h.state().active, 1 - showing, "the same repository is showing");
+}

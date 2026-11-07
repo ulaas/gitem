@@ -65,8 +65,19 @@ fn fake_host() -> String {
                 let _ = r.read_exact(&mut b);
                 let page_one = !path.contains("page=2");
                 let route = path.split('?').next().unwrap_or("");
+                if route == "/api/v1/repos/o/r/pulls/7.diff" {
+                    let diff = "diff --git a/src/parse.rs b/src/parse.rs\n--- a/src/parse.rs\n+++ b/src/parse.rs\n@@ -10,4 +10,6 @@ fn width(c: char) -> usize {\n     match c {\n-        _ => 1,\n+        '\\u{1100}'..='\\u{115F}' => 2,\n+        '\\u{3000}'..='\\u{9FFF}' => 2,\n+        _ => 1,\n     }\n }\n";
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{diff}", diff.len());
+                    return;
+                }
                 let body = match route {
                     "/api/v1/user" => json!({"login":"me"}),
+                    "/api/v1/repos/o/r/pulls/7" => json!({"head":{"sha":"headsha"},"base":{"sha":"basesha"}}),
+                    "/api/v1/repos/o/r/pulls/7/files" => json!([{"filename":"src/parse.rs","status":"changed","additions":3,"deletions":1},{"filename":"README.md","status":"changed","additions":1,"deletions":0}]),
+                    "/api/v1/repos/o/r/commits/headsha/statuses" => json!([{"context":"build / windows","status":"success","description":"Passed in 4m","target_url":"http://127.0.0.1:9/ci/1"},{"context":"test / linux","status":"failure","description":"2 tests failed","target_url":"http://127.0.0.1:9/ci/2"},{"context":"lint","status":"pending","description":"Waiting","target_url":""}]),
+                    "/api/v1/repos/o/r/issues/7/comments" => json!([{"user":{"login":"bea"},"body":"Could this handle combining marks as well? They come up in the Vietnamese test file.","created_at":"2026-11-02T10:00:00Z"}]),
+                    "/api/v1/repos/o/r/pulls/7/reviews" => json!([{"id":1,"user":{"login":"cy"},"state":"REQUEST_CHANGES","body":"The width table needs a test.","comments_count":0,"submitted_at":"2026-11-03T10:00:00Z"}]),
+                    "/api/v1/repos/issues/search" => json!([{"number":41,"title":"Add the new tokenizer","html_url":"http://127.0.0.1:9/o/other/41","user":{"login":"me"},"state":"open","repository":{"full_name":"o/other"}},{"number":3,"title":"Support long paths on Windows","html_url":"http://127.0.0.1:9/team/app/3","user":{"login":"bea"},"state":"open","repository":{"full_name":"team/app"},"pull_request":{"draft":true}}]),
                     "/api/v1/repos/o/r/pulls" if page_one => {
                         let mut fork = pr(15, "from-a-fork", "Someone else's fork", false);
                         fork["head"]["repo"]["full_name"] = json!("them/r");
@@ -397,6 +408,118 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         wait_for(&mut h, "Teach the parser");
         quiet(&mut h);
         out.save(&mut h, "launchpad");
+    }
+    if wanted("pr") || wanted("prfiles") || wanted("prchecks") || wanted("prtalk") || wanted("everywhere") || wanted("fork") || wanted("hosting") {
+        let base = fake_host();
+        let root = f.root.clone();
+        let _ = f.git.run(Some(&root), &["remote", "remove", "origin"]);
+        run(&f.git, &root, &["remote", "add", "origin", &format!("{base}/o/r.git")]);
+        let custom = CustomHost { host: "127.0.0.1".into(), kind: ForgeKind::Gitea, api_base: String::new(), templates: Default::default() };
+        let repo = identify(&format!("{base}/o/r.git"), std::slice::from_ref(&custom)).unwrap();
+        gitem_core::cred::set_forge_token(&repo.token_host(), "", "FAKE_SECRET_VALUE").unwrap();
+        let settings_with = |c: CustomHost| {
+            move |s: &mut Settings| {
+                s.theme = theme;
+                s.custom_hosts = vec![c];
+                s.recent_repos = vec!["C:/work/other".to_string()];
+                s.ca_file = "C:/not/a/real/ca.pem".to_string();
+            }
+        };
+        let pr = gitem_core::forge::PullRequest { number: 7, title: "Teach the parser about wide characters".into(), author: "someone-else".into(), head: "topic".into(), base: "main".into(), url: "http://127.0.0.1:9/pulls/7".into(), body: "East Asian text was measured a column short, so rows clipped.\n\nThis gives the parser a width table, and tests it against what egui lays out.".into(), ..Default::default() };
+        let mut h = f.harness(settings_with(custom.clone()), vec![]);
+        h.state_mut().repos[0].open_tab(Tab::PullRequest(Box::new(gitem::views::pullrequest::PullRequestView::new(pr.clone(), "me"))));
+        wait_for(&mut h, "Files (2)");
+        quiet(&mut h);
+        if wanted("pr") {
+            out.save(&mut h, "pr");
+        }
+        if wanted("prfiles") {
+            click(&mut h, "Files (2)");
+            quiet(&mut h);
+            click(&mut h, "   11");
+            quiet(&mut h);
+            out.save(&mut h, "prfiles");
+        }
+        if wanted("prchecks") {
+            click(&mut h, "Checks (3)");
+            quiet(&mut h);
+            out.save(&mut h, "prchecks");
+        }
+        if wanted("prtalk") {
+            click(&mut h, "Conversation (2)");
+            quiet(&mut h);
+            out.save(&mut h, "prtalk");
+        }
+        if wanted("everywhere") {
+            open(&mut h, Tab::Launchpad(Box::default()));
+            click(&mut h, "Everything I'm in");
+            wait_for(&mut h, "o/other");
+            quiet(&mut h);
+            out.save(&mut h, "everywhere");
+        }
+        if wanted("fork") {
+            let fork = gitem_core::forge::PullRequest { from_fork: true, head_repo: "them/r".into(), head: "from-a-fork".into(), ..pr.clone() };
+            let (remotes, ctx) = (h.state().repos[0].data.remotes().to_vec(), h.ctx.clone());
+            let form = gitem::views::launchpad::push_to_fork_form(&fork, "pr/7", Some(&repo), &remotes);
+            h.state_mut().apply_action(&ctx, gitem::action::Action::Form(form));
+            settle_a_moment(&mut h);
+            out.save(&mut h, "fork");
+            h.state_mut().apply_action(&ctx, gitem::action::Action::Refresh);
+        }
+        if wanted("hosting") {
+            let mut h = f.harness(settings_with(custom), vec![]);
+            open(&mut h, Tab::Settings(Box::new(gitem::views::settings::SettingsView::on_page("hosting"))));
+            settle_a_moment(&mut h);
+            out.save(&mut h, "hosting");
+        }
+    }
+    if wanted("prune") {
+        for b in ["finished-one", "finished-two"] {
+            let _ = f.git.run(Some(&f.root), &["branch", b]);
+        }
+        let mut h = f.harness(set, vec![]);
+        open(&mut h, Tab::Prune(Box::default()));
+        settle_a_moment(&mut h);
+        out.save(&mut h, "prune");
+    }
+    if wanted("undo") {
+        let _ = f.git.run(Some(&f.root), &["branch", "going"]);
+        let mut h = f.harness(set, vec![]);
+        h.state_mut().repos[0].queue_for_test(gitem_core::ops::branch_delete("going", true));
+        wait_for(&mut h, "Undo delete of branch going");
+        quiet(&mut h);
+        out.save(&mut h, "undo");
+        h.get_by_label("Undo delete of branch going").hover();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(900) {
+            h.step();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        out.save(&mut h, "tooltip");
+    }
+    if wanted("grep") {
+        let mut h = f.harness(set, vec![]);
+        h.state_mut().repos[0].open_tab(Tab::Grep(Box::new(gitem::views::grep::GrepView::looking_for("println", ""))));
+        quiet(&mut h);
+        h.query_all_by_label("Search").last().unwrap().click();
+        wait_for(&mut h, "src/lib.rs:2");
+        quiet(&mut h);
+        out.save(&mut h, "grep");
+    }
+    if wanted("keys") {
+        let mut h = f.harness(move |s| {
+            s.theme = theme;
+            s.key_bindings.insert("fetch".to_string(), "Ctrl+Shift+L".to_string());
+        }, vec![]);
+        open(&mut h, Tab::Settings(Box::new(gitem::views::settings::SettingsView::on_page("workflow"))));
+        settle_a_moment(&mut h);
+        out.save(&mut h, "keys");
+    }
+    if wanted("drop") {
+        let mut h = f.harness(set, vec![]);
+        h.input_mut().hovered_files.push(egui::HoveredFile { path: Some(f.root.clone()), mime: String::new() });
+        settle_a_moment(&mut h);
+        out.save(&mut h, "drop");
     }
     if wanted("credentials") {
         gitem_core::cred::set_forge_token("git.example.invalid", "someone", "FAKE_SECRET_VALUE").unwrap();

@@ -151,6 +151,15 @@ pub struct Settings {
     /// The toolbar's Pull stashes local changes first, and puts them back after.
     #[serde(default)]
     pub pull_autostash: bool,
+    /// A second launch hands its paths to the window already open.
+    #[serde(default)]
+    pub single_window: bool,
+    /// Ask the host for the current branch's pull request, for the status bar.
+    #[serde(default)]
+    pub status_bar_pr: bool,
+    /// Keys chosen for commands, by the command's name in `keys::BINDABLE`.
+    #[serde(default)]
+    pub key_bindings: std::collections::HashMap<String, String>,
     /// Pull and check out bring submodules along.
     #[serde(default)]
     pub recurse_submodules: bool,
@@ -285,6 +294,9 @@ impl Default for Settings {
             commit_sign: false,
             commit_signoff: false,
             pull_autostash: false,
+            single_window: false,
+            status_bar_pr: false,
+            key_bindings: Default::default(),
             recurse_submodules: false,
             attention_when_done: true,
             terminal: String::new(),

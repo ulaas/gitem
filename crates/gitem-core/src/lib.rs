@@ -14,6 +14,7 @@ pub mod cred;
 pub mod diff;
 pub mod editors;
 pub mod forge;
+pub mod instance;
 pub mod graph;
 pub mod mcp;
 pub mod merge;

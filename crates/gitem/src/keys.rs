@@ -18,6 +18,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Ctrl+Shift+L", "Pull"),
     ("Ctrl+Shift+K", "Push"),
     ("Ctrl+Shift+Z", "Zen mode, outside a text box"),
+    ("Ctrl+Alt+Z", "Undo the last action"),
     ("Enter", "Submit a dialog, from a one-line field. Answers a question that loses nothing"),
     ("Ctrl+Enter", "Submit the open form. With none open, or from the commit box, commit"),
     ("Esc", "Close a dialog or menu"),
@@ -52,8 +53,122 @@ pub const WORDS: &[(&str, &str)] = &[
     ("Patches", "A local library of saved changes"),
 ];
 
+/// Commands whose keys can be changed: `(name, default keys, what it does)`. The rest of
+/// `TABLE` is about where you are, such as a list or a dialog, and stays as it is.
+pub const BINDABLE: &[(&str, &str, &str)] = &[
+    ("palette", "Ctrl+P", "Command palette"),
+    ("refresh", "F5", "Reload this repository"),
+    ("sidebar", "Ctrl+B", "Show or hide the sidebar"),
+    ("changes", "Ctrl+Shift+G", "Changes"),
+    ("graph", "Ctrl+Shift+H", "Graph"),
+    ("settings", "Ctrl+,", "Settings"),
+    ("open", "Ctrl+O", "Open a folder"),
+    ("close_tab", "Ctrl+W", "Close this tab"),
+    ("fetch", "Ctrl+Shift+F", "Fetch"),
+    ("pull", "Ctrl+Shift+L", "Pull"),
+    ("push", "Ctrl+Shift+K", "Push"),
+    ("undo_last", "Ctrl+Alt+Z", "Undo the last action"),
+];
+
+/// Keys as typed: `Ctrl+Shift+F`, `Alt+F7`, `F5`. Ctrl means Cmd on a Mac, as egui has it.
+pub fn parse_chord(text: &str) -> Option<(egui::Modifiers, egui::Key)> {
+    let mut mods = egui::Modifiers::NONE;
+    let mut key = None;
+    for part in text.split('+').map(str::trim) {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "cmd" | "command" => mods = mods.plus(egui::Modifiers::COMMAND),
+            "shift" => mods = mods.plus(egui::Modifiers::SHIFT),
+            "alt" | "option" => mods = mods.plus(egui::Modifiers::ALT),
+            "" => return None,
+            _ if key.is_some() => return None,
+            _ => key = Some(egui::Key::from_name(&part.to_uppercase()).or_else(|| egui::Key::from_name(part))?),
+        }
+    }
+    let key = key?;
+    // A bare letter would go off while typing in nothing in particular.
+    let plain_ok = matches!(key.name().strip_prefix('F').map(|n| n.parse::<u8>().is_ok()), Some(true));
+    (!mods.is_none() || plain_ok).then_some((mods, key))
+}
+
+/// What a command is bound to now: the user's keys if they read, otherwise its default.
+pub fn chord_for(bindings: &std::collections::HashMap<String, String>, name: &str) -> Option<(egui::Modifiers, egui::Key)> {
+    let default = BINDABLE.iter().find(|b| b.0 == name)?.1;
+    bindings.get(name).and_then(|t| parse_chord(t)).or_else(|| parse_chord(default))
+}
+
+/// How the keys read in F1's list, where they've been changed.
+pub fn shown_keys(bindings: &std::collections::HashMap<String, String>, listed: &str) -> String {
+    match BINDABLE.iter().find(|b| b.1 == listed) {
+        Some(b) => bindings.get(b.0).filter(|t| parse_chord(t).is_some()).cloned().unwrap_or_else(|| listed.to_string()),
+        None => listed.to_string(),
+    }
+}
+
+/// What's wrong with these bindings, to say beside them.
+pub fn binding_problems(bindings: &std::collections::HashMap<String, String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, _, what) in BINDABLE {
+        if let Some(t) = bindings.get(*name).filter(|t| !t.trim().is_empty())
+            && parse_chord(t).is_none()
+        {
+            problems.push(format!("\"{t}\" for {what} can't be read, so its default is in use."));
+        }
+    }
+    for (i, (a, _, what_a)) in BINDABLE.iter().enumerate() {
+        for (b, _, what_b) in &BINDABLE[i + 1..] {
+            if chord_for(bindings, a) == chord_for(bindings, b) {
+                problems.push(format!("{what_a} and {what_b} have the same keys."));
+            }
+        }
+    }
+    problems
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_read_as_typed_and_a_bare_letter_is_refused() {
+        use egui::{Key, Modifiers};
+        assert_eq!(parse_chord("Ctrl+Shift+F"), Some((Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F)));
+        assert_eq!(parse_chord("alt + f7"), Some((Modifiers::ALT, Key::F7)));
+        assert_eq!(parse_chord("F5"), Some((Modifiers::NONE, Key::F5)));
+        assert_eq!(parse_chord("Ctrl+,"), Some((Modifiers::COMMAND, Key::Comma)));
+        for bad in ["F", "x", "", "Ctrl+", "Ctrl+A+B", "Hyper+Q", "Ctrl+Nonsense"] {
+            assert_eq!(parse_chord(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_default_reads_and_none_collide() {
+        for (name, keys, _) in BINDABLE {
+            assert!(parse_chord(keys).is_some(), "{name}: {keys}");
+        }
+        assert_eq!(binding_problems(&Default::default()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_change_wins_a_bad_one_falls_back_and_a_clash_is_said() {
+        let mut b = std::collections::HashMap::new();
+        b.insert("fetch".to_string(), "Ctrl+Alt+F".to_string());
+        assert_eq!(chord_for(&b, "fetch"), parse_chord("Ctrl+Alt+F"));
+        assert_eq!(shown_keys(&b, "Ctrl+Shift+F"), "Ctrl+Alt+F");
+        assert_eq!(shown_keys(&b, "Ctrl+Shift+L"), "Ctrl+Shift+L");
+        b.insert("fetch".to_string(), "nonsense".to_string());
+        assert_eq!(chord_for(&b, "fetch"), parse_chord("Ctrl+Shift+F"));
+        assert_eq!(binding_problems(&b).len(), 1);
+        b.insert("fetch".to_string(), "Ctrl+Shift+L".to_string());
+        assert!(binding_problems(&b)[0].contains("same keys"));
+    }
+
+    #[test]
+    fn every_bindable_default_is_in_the_table_f1_shows() {
+        for (_, keys, _) in BINDABLE.iter().filter(|b| b.0 != "undo_last") {
+            assert!(TABLE.iter().any(|t| t.0 == *keys), "{keys}");
+        }
+    }
+
     #[test]
     fn the_readme_lists_every_key() {
         let readme = include_str!("../../../README.md");

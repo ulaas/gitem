@@ -560,6 +560,7 @@ impl SettingsView {
                 ui.add(egui::DragValue::new(&mut s.auto_fetch_minutes).range(0..=240));
             });
             g.switch(&mut s.prune_on_fetch, "Prune when fetching", "Removes remote branches that were deleted on the server.");
+            g.switch(&mut s.status_bar_pr, "Show the branch's pull request in the status bar", "Asks the host when the branch changes, whether Launchpad is open or not.");
             g.switch(&mut s.pull_autostash, "Stash changes around a pull", "The toolbar's Pull puts uncommitted changes aside and brings them back after.");
             g.switch(&mut s.recurse_submodules, "Bring submodules along", "Pull and check out also update submodules, as --recurse-submodules does.");
             g.switch(&mut s.attention_when_done, "Flash the taskbar when something's done", "When something that took a while finishes, or anything fails, while you're in another window.");
@@ -570,6 +571,26 @@ impl SettingsView {
             g.row("Start Work branch name", "Tokens: ${id} ${title}", |ui| {
                 field(ui, &mut s.start_work_format, "${id}-${title}", 240.0);
             });
+        });
+        group(ui, "Keyboard", p, |g| {
+            for (name, keys, what) in crate::keys::BINDABLE {
+                g.row(what, keys, |ui| {
+                    let mut text = s.key_bindings.get(*name).cloned().unwrap_or_default();
+                    if field(ui, &mut text, keys, 160.0).changed() {
+                        if text.trim().is_empty() {
+                            s.key_bindings.remove(*name);
+                        } else {
+                            s.key_bindings.insert(name.to_string(), text);
+                        }
+                    }
+                });
+            }
+        });
+        for problem in crate::keys::binding_problems(&s.key_bindings) {
+            ui.colored_label(p.warn, problem);
+        }
+        group(ui, "Launching", p, |g| {
+            g.switch(&mut s.single_window, "Use one window", "Opening a folder from a terminal or Explorer goes to the window already open, once it's been restarted with this on.");
         });
         group(ui, "Updates", p, |g| {
             g.switch(&mut s.check_updates, "Check for updates", "Asks once a day whether there's a newer release, and tells you. Nothing is downloaded. About has a button for asking now.");
@@ -835,8 +856,30 @@ impl SettingsView {
             });
         });
         if cfg!(windows) {
+            group(ui, "Explorer", p, |g| {
+                g.row("Open in gitem", "Adds an entry to folders' right-click menu in Explorer, for you only.", |ui| {
+                    if ui.button("Add").clicked() {
+                        match run_reg(&explorer_entries(&exe)) {
+                            Ok(()) => cx.toast("Folders now have Open in gitem"),
+                            Err(e) => cx.error(format!("Could not add it: {e}")),
+                        }
+                    }
+                    if ui.button("Remove").clicked() {
+                        match run_reg(&removal_entries(false)) {
+                            Ok(()) => cx.toast("Open in gitem is gone from Explorer"),
+                            Err(e) => cx.error(format!("Could not remove it: {e}")),
+                        }
+                    }
+                });
+            });
             group(ui, "gitem:// links", p, |g| {
                 g.row("Link handler", "Makes \"Copy gitem link\" URLs open here. Adds a per-user registry entry.", |ui| {
+                    if ui.button("Unregister").clicked() {
+                        match run_reg(&removal_entries(true)) {
+                            Ok(()) => cx.toast("gitem:// links no longer open here"),
+                            Err(e) => cx.error(format!("Could not remove it: {e}")),
+                        }
+                    }
                     if ui.button("Register").clicked() {
                         match register_links(&exe) {
                             Ok(()) => cx.toast("gitem:// links now open here"),
@@ -880,6 +923,36 @@ pub fn import_settings_form() -> crate::forms::FormDialog {
     })
 }
 
+/// What `reg` is run with to add "Open in gitem" to folders in Explorer, for this user.
+pub fn explorer_entries(exe: &str) -> Vec<Vec<String>> {
+    let exe = exe.replace('/', "\\");
+    let mut runs = Vec::new();
+    for (key, arg) in [(r"HKCU\Software\Classes\Directory\shell\gitem", "%1"), (r"HKCU\Software\Classes\Directory\Background\shell\gitem", "%V")] {
+        let run = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        runs.push(run(&["add", key, "/ve", "/d", "Open in gitem", "/f"]));
+        runs.push(run(&["add", key, "/v", "Icon", "/d", &exe, "/f"]));
+        runs.push(run(&["add", &format!(r"{key}\command"), "/ve", "/d", &format!("\"{exe}\" \"{arg}\""), "/f"]));
+    }
+    runs
+}
+
+/// And what takes that back, and the link handler if that's what's named.
+pub fn removal_entries(links: bool) -> Vec<Vec<String>> {
+    let keys: &[&str] = if links { &[r"HKCU\Software\Classes\gitem"] } else { &[r"HKCU\Software\Classes\Directory\shell\gitem", r"HKCU\Software\Classes\Directory\Background\shell\gitem"] };
+    keys.iter().map(|k| vec!["delete".to_string(), k.to_string(), "/f".to_string()]).collect()
+}
+
+fn run_reg(runs: &[Vec<String>]) -> Result<(), String> {
+    for args in runs {
+        let o = std::process::Command::new("reg").args(args).output().map_err(|e| format!("Could not run reg: {e}"))?;
+        // Taking away what isn't there is what was wanted.
+        if !o.status.success() && args.first().is_none_or(|a| a != "delete") {
+            return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+        }
+    }
+    Ok(())
+}
+
 pub fn register_links(exe: &str) -> Result<(), String> {
     let exe = exe.replace('/', "\\");
     let root = r"HKCU\Software\Classes\gitem";
@@ -893,4 +966,30 @@ pub fn register_links(exe: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    /// What would be written, without writing it: this is the test machine's registry otherwise.
+    #[test]
+    fn explorer_entries_stay_in_this_users_classes_and_quote_the_program() {
+        let runs = explorer_entries("C:/Program Files/gitem/gitem.exe");
+        assert_eq!(runs.len(), 6);
+        for r in &runs {
+            assert_eq!(r[0], "add");
+            assert!(r[1].starts_with(r"HKCU\Software\Classes\Directory\"), "{r:?}");
+        }
+        assert!(runs.iter().any(|r| r.iter().any(|a| a == "\"C:\\Program Files\\gitem\\gitem.exe\" \"%1\"")), "{runs:?}");
+        assert!(runs.iter().any(|r| r.iter().any(|a| a == "\"C:\\Program Files\\gitem\\gitem.exe\" \"%V\"")), "{runs:?}");
+    }
+
+    #[test]
+    fn removal_names_only_what_was_added() {
+        assert_eq!(removal_entries(true), vec![vec!["delete".to_string(), r"HKCU\Software\Classes\gitem".to_string(), "/f".to_string()]]);
+        for r in removal_entries(false) {
+            assert!(r[1].ends_with(r"\shell\gitem"), "{r:?}");
+        }
+    }
 }
