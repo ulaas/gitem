@@ -383,7 +383,9 @@ pub fn git_credential_reject(git: &GitExe, url: &str) -> Result<()> {
         return Ok(());
     }
     let opts = RunOpts { stdin: Some(format!("url={url}\n\n").into_bytes()), is_write: true, ..Default::default() };
-    git.run_opts(None, &["credential".to_string(), "reject".to_string()], &opts, &mut |_| {})?.into_result()?;
+    // From a neutral folder, so that whatever folder gitem started in has no say.
+    let dir = std::env::temp_dir();
+    git.run_opts(Some(&dir), &["credential".to_string(), "reject".to_string()], &opts, &mut |_| {})?.into_result()?;
     Ok(())
 }
 
@@ -522,11 +524,21 @@ pub fn ssh_agent_add(path: &str) -> Result<String> {
 }
 
 /// `ssh -T git@host`: forges answer with a greeting and exit 1, so report output either way.
+/// Trying a key is no reason to start trusting a host: a typo or a spoofed name would be
+/// added to `known_hosts` for good. So an unknown host fails, and this says what to do.
 pub fn ssh_test(host: &str) -> String {
-    match run_tool("ssh", &["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", &format!("git@{host}")]) {
+    let out = match run_tool("ssh", &["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10", &format!("git@{host}")]) {
         Ok(s) => s,
         Err(e) => e.to_string(),
+    };
+    explain_host_key_failure(host, out)
+}
+
+fn explain_host_key_failure(host: &str, out: String) -> String {
+    if out.contains("Host key verification failed") {
+        return format!("{out}\n\n{host} isn't in your known_hosts file, or its key has changed, so nothing was sent. To accept it, connect once from a terminal with: ssh git@{host}\nCheck the fingerprint it shows against the one your host publishes.");
     }
+    out
 }
 
 /// Register gitem as credential helper in git config (`global` or `local`).
@@ -552,6 +564,14 @@ pub fn helper_main(op: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_unknown_host_is_explained_and_other_output_left_alone() {
+        let e = explain_host_key_failure("h.invalid", "Host key verification failed.".to_string());
+        assert!(e.contains("known_hosts") && e.contains("ssh git@h.invalid"), "{e}");
+        assert_eq!(explain_host_key_failure("h", "Hi there".to_string()), "Hi there");
+    }
+
     use super::*;
 
     #[test]
