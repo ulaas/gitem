@@ -310,6 +310,7 @@ fn with_changes_in_a_pane_details_points_to_it() {
 fn an_svg_shows_as_a_picture_and_its_source_is_a_click_away() {
     let f = Fx::new();
     f.write("drawing.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="red"/></svg>"#);
+    f.write("words.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="90" height="20"><text y="15" font-family="No Such Font">Words</text></svg>"#);
     f.write("hostile.svg", &format!(r#"<svg xmlns="http://www.w3.org/2000/svg">{}{}</svg>"#, "<g>".repeat(5000), "</g>".repeat(5000)));
     f.commit("two drawings");
     let mut h = f.harness(|_| {});
@@ -322,6 +323,8 @@ fn an_svg_shows_as_a_picture_and_its_source_is_a_click_away() {
     settle(&mut h);
     click(&mut h, "Picture");
     settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("words.svg", None, None));
+    wait_for_text(&mut h, "this computer's fonts don't have");
     h.state_mut().repos[0].open_tab(Tab::file("hostile.svg", None, None));
     wait_for_text(&mut h, "This SVG can't be drawn");
     wait_for_text(&mut h, "It nests too deeply");
@@ -336,6 +339,27 @@ fn an_svg_shows_as_a_picture_and_its_source_is_a_click_away() {
     wait_for_text(&mut h, "40 × 20 px");
     assert!(h.query_by_label("Before").is_some() && h.query_by_label("After").is_some());
     no_errors(&h);
+}
+
+/// A render that doesn't end is injected. The view stops waiting, says so, and has its Source.
+#[test]
+fn an_svg_that_takes_too_long_stops_being_waited_for_and_source_still_works() {
+    let f = Fx::new();
+    f.write("slow.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><!-- slow-in-this-test --></svg>"#);
+    f.commit("a slow drawing");
+    let release = gitem::svg::slow_for_test("slow-in-this-test", Duration::from_millis(100));
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("slow.svg", None, None));
+    wait_for_text(&mut h, "took too long to draw");
+    assert!(h.query_by_label_contains("Drawing").is_none());
+    no_errors(&h);
+    // Its lines are painted, so what shows is that the picture's message has given way to them.
+    click(&mut h, "Source");
+    wait_for(&mut h, "the source", |h| h.query_by_label_contains("took too long").is_none());
+    click(&mut h, "Picture");
+    wait_for_text(&mut h, "took too long to draw");
+    release.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ---- FG-39 and FG-35

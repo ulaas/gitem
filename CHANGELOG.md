@@ -15,7 +15,7 @@ Added:
 - With no repository open: the palette, Pull requests I'm in, Credentials.
 - Stash Hunks, whose stash pops back with the rest of the file still changed.
 - An opt-in branch model: start and finish feature, release and hotfix branches.
-- SVG drawn in the file view and diffs, without its text, with hostile files refused or kept to size.
+- SVG drawn in the file view and diffs, with hostile files refused or kept to size, and given up on after 10 seconds.
 - Several branches picked in the sidebar with `Ctrl+click`, deleted together.
 - Keys for lists and views can be changed, as well as the main commands.
 - Optional: a system notification on Windows, names on the rail, staging and committing in Details.

@@ -1037,8 +1037,8 @@ impl DiffView {
                     }
                     match crate::svg::render(&b) {
                         Ok(d) => {
-                            if d.no_text {
-                                why = Some("Text in an SVG isn't drawn here. Text, above, has it.".to_string());
+                            if d.font_missing {
+                                why = Some(crate::svg::FONT_MISSING.to_string());
                             }
                             Some(d.image)
                         }
@@ -1079,7 +1079,8 @@ impl DiffView {
                         ui.label(RichText::new(format!("{} × {} px", size.x as u32, size.y as u32)).small().color(pal.faint));
                     }
                     None => {
-                        ui.label(RichText::new("Not present").color(pal.faint));
+                        // An SVG that couldn't be drawn is there all the same, and the line above says why.
+                        ui.label(RichText::new(if svg && self.images.why.is_some() { "Not present, or not drawn" } else { "Not present" }).color(pal.faint));
                     }
                 }
             }

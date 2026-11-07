@@ -218,21 +218,21 @@ impl FileView {
         if self.svg.poll()
             && let Some(d) = self.svg.value.take()
         {
-            self.svg_picture = Some((ui.ctx().load_texture("file-view-svg", d.image, egui::TextureOptions::LINEAR), d.no_text));
+            self.svg_picture = Some((ui.ctx().load_texture("file-view-svg", d.image, egui::TextureOptions::LINEAR), d.font_missing));
         }
-        if let Some((t, no_text)) = &self.svg_picture {
-            if *no_text {
-                ui.label(RichText::new("Its text isn't drawn here. Source has it.").small().color(pal.warn));
+        if let Some((t, font_missing)) = &self.svg_picture {
+            if *font_missing {
+                ui.label(RichText::new(crate::svg::FONT_MISSING).small().color(pal.warn));
             }
             let size = t.size_vec2();
             egui::ScrollArea::both().id_salt("file-svg").auto_shrink([false, false]).show(ui, |ui| {
                 let fit = (ui.available_width() / size.x).min(ui.available_height() / size.y).min(1.0);
                 ui.image((t.id(), size * fit));
             });
+        } else if self.svg.busy() {
+            spinner_row(ui, "Drawing…", pal);
         } else if let Some(why) = &self.svg.error {
             empty_state(ui, "This SVG can't be drawn", why, pal);
-        } else {
-            spinner_row(ui, "Drawing…", pal);
         }
     }
 
