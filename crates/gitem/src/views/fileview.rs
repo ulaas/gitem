@@ -252,8 +252,13 @@ impl FileView {
                     None => repo.worktree_file(&path),
                 }
                 .map_err(|e| e.to_string())?;
-                crate::svg::render(&bytes)
+                // Set when this view closes or asks again, which kills the renderer.
+                crate::svg::render(&bytes, repo.git.cancel.as_deref())
             });
+        } else {
+            // A revision under another name that isn't one.
+            self.svg.stop();
+            self.svg_picture = None;
         }
         self.data.spawn_git(ctx, cx.repo, move |repo| -> Result<FileData, String> {
             let empty = |binary| FileData { lines: Vec::new(), binary, blame_skipped: false, lens_rows: Vec::new(), max_chars: 0, syntax: Vec::new(), encoding: None, image: None, blame: Vec::new(), changes: HashMap::new(), deletions: HashMap::new(), newest: 0, oldest: 0, lens: Vec::new() };

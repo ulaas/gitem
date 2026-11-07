@@ -1,14 +1,20 @@
 //! Drawing an SVG, which in a repository is untrusted input: it can claim any size, nest without
 //! end, expand itself like a zip bomb, or point at files and addresses. So it's looked over before
-//! the renderer sees it, the picture has a fixed largest size, it runs on a thread with a stack of
-//! its own, and nothing the file names is ever read: no pictures, no fonts, no styles, and scripts
-//! aren't run by anything here. The only fonts are this computer's and the one that came with gitem,
-//! found on the worker thread the first time one's needed.
+//! the renderer sees it, the picture has a fixed largest size, and nothing the file names is ever
+//! read: no pictures, no fonts, no styles, and scripts aren't run by anything here. The only fonts
+//! are this computer's and the one that came with gitem, and only for a file with text in it.
 //!
-//! Waiting is bounded, and the work isn't. A thread can't be stopped from outside, and the renderer
-//! has nowhere to ask whether to go on, so a file that's slow within these limits is given up on and
-//! goes on running until it ends. At most `MAX_WORKERS` run, so opening it again and again doesn't
-//! add threads: one that can't get a turn says so.
+//! A thread can't be stopped from outside and the renderer has nowhere to ask whether to go on, so
+//! it runs in a process of its own: gitem's own executable with a hidden option, handed the file on
+//! stdin, answering on stdout. That process can be killed at the time limit, and when whoever was
+//! waiting has gone. A hostile file that crashes it costs one picture.
+//!
+//! All the limits here are applied on the child's side. What it answers is untrusted too, so the
+//! parent reads only so much of it and checks its size again. It's not a sandbox: the child has the
+//! user's rights, and what keeps it from files and the network is the renderer's options below.
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
@@ -37,12 +43,22 @@ const MAX_TEXT_ELEMENTS: u64 = 5_000;
 const MAX_TEXT_CHARS: u64 = 200_000;
 /// How many `use` can lead through each other. Looking it over goes down them on the stack.
 const MAX_USE_DEPTH: usize = 256;
-/// How long a view waits for a picture, and for a turn to draw one.
+/// How long a view waits for a picture. Then the child is killed.
 const TIME_LIMIT: Duration = Duration::from_secs(10);
-/// Drawing at once, including any that have been given up on and are still going.
-const MAX_WORKERS: usize = 2;
-const TOO_SLOW: &str = "It took too long to draw, so gitem stopped waiting. Source still shows it.";
-const NO_TURN: &str = "Other SVGs are taking too long to draw, so this one wasn't started. Source still shows it.";
+/// How long the child lets itself run, in case the parent is stopped and not gone.
+const CHILD_OWN_LIMIT: Duration = Duration::from_secs(15);
+/// Children running at once. More wait for a turn.
+const MAX_CHILDREN: usize = 2;
+/// Said for one that didn't end in time, crashed, or answered with something that isn't an answer.
+pub const GAVE_UP: &str = "It took too long to draw, or stopped the renderer, so gitem gave up on it. Source still shows it.";
+pub const NO_TURN: &str = "Other SVGs are taking too long to draw, so this one wasn't started. Source still shows it.";
+/// Nobody's waiting for this, so nobody reads it.
+const STOPPED: &str = "Whoever asked for this has gone.";
+/// The hidden option, ahead of all the others in `main`.
+pub const CHILD_ARG: &str = "--render-svg";
+/// All a child gets of the parent's environment, which can hold tokens. Where fonts are, and what
+/// Windows needs to start a process.
+const KEPT_ENV: &[&str] = &["SYSTEMROOT", "WINDIR", "USERPROFILE", "HOME", "XDG_DATA_HOME", "XDG_DATA_DIRS", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "FONTCONFIG_FILE", "FONTCONFIG_PATH"];
 
 /// An entity that refers to another grows by powers, and only a few lines of that fill the memory.
 /// One that doesn't is ordinary: some drawing tools write them for namespaces.
@@ -120,8 +136,8 @@ fn tally_under<'a, 'i>(n: roxmltree::Node<'a, 'i>, ids: &std::collections::HashM
     Ok(count)
 }
 
-/// Whether this can be given to the renderer, and if not, why.
-fn look_over(text: &str) -> Result<(), String> {
+/// Whether this can be given to the renderer, and if not, why. If so, what's in it.
+fn look_over(text: &str) -> Result<Tally, String> {
     entities_are_safe(text)?;
     let options = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: 4 * MAX_ELEMENTS as u32, ..Default::default() };
     let doc = roxmltree::Document::parse_with_options(text, options).map_err(|e| if matches!(e, roxmltree::Error::NodesLimitReached) { "It has too many parts.".to_string() } else { format!("It isn't well formed: {e}") })?;
@@ -149,11 +165,11 @@ fn look_over(text: &str) -> Result<(), String> {
     if all.text_elements > MAX_TEXT_ELEMENTS || all.text_chars > MAX_TEXT_CHARS {
         return Err("It has too much text, once what it repeats is counted.".to_string());
     }
-    Ok(())
+    Ok(all)
 }
 
-/// This computer's fonts and the one gitem came with, and that one's id. Once, whichever worker
-/// gets here first: it reads a folder of files.
+/// This computer's fonts and the one gitem came with, and that one's id. It reads a folder of files,
+/// in each child that has text to draw.
 fn fonts() -> &'static (Arc<usvg::fontdb::Database>, Option<usvg::fontdb::ID>) {
     static FONTS: OnceLock<(Arc<usvg::fontdb::Database>, Option<usvg::fontdb::ID>)> = OnceLock::new();
     FONTS.get_or_init(|| {
@@ -213,19 +229,19 @@ pub struct Drawn {
 /// Said beside a picture with `font_missing`.
 pub const FONT_MISSING: &str = "Its text asks for something this computer's fonts don't have, so some is in another font or not drawn. Source has it.";
 
-fn draw(text: &str, stop: &AtomicBool) -> Result<Drawn, String> {
+/// Fonts are the slow part of a child starting, and most drawings have no text.
+fn draw(text: &str) -> Result<Drawn, String> {
+    let found = look_over(text)?;
+    if found.text_elements == 0 {
+        return draw_with(text, Arc::new(usvg::fontdb::Database::new()), None);
+    }
     let (db, own) = fonts();
-    draw_with(text, stop, db.clone(), *own)
+    draw_with(text, db.clone(), *own)
 }
 
-/// `stop` is looked at between the steps, as nothing inside one asks.
-fn draw_with(text: &str, stop: &AtomicBool, db: Arc<usvg::fontdb::Database>, own: Option<usvg::fontdb::ID>) -> Result<Drawn, String> {
-    let given_up = || if stop.load(Ordering::Relaxed) { Err(TOO_SLOW.to_string()) } else { Ok(()) };
-    look_over(text)?;
-    given_up()?;
+fn draw_with(text: &str, db: Arc<usvg::fontdb::Database>, own: Option<usvg::fontdb::ID>) -> Result<Drawn, String> {
     let missing = Arc::new(AtomicBool::new(false));
     let tree = usvg::Tree::from_str(text, &options(db, own, missing.clone())).map_err(|e| e.to_string())?;
-    given_up()?;
     let size = tree.size();
     let (w, h) = (size.width(), size.height());
     if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
@@ -238,26 +254,378 @@ fn draw_with(text: &str, stop: &AtomicBool, db: Arc<usvg::fontdb::Database>, own
     Ok(Drawn { image: egui::ColorImage::from_rgba_premultiplied([pw as usize, ph as usize], pixmap.data()), font_missing: missing.load(Ordering::Relaxed) })
 }
 
-/// Draws one, off whichever thread this is called on. Not from the UI thread: it takes a while.
-pub fn render(bytes: &[u8]) -> Result<Drawn, String> {
+fn draw_bytes(bytes: &[u8]) -> Result<Drawn, String> {
     if bytes.len() > MAX_BYTES {
         return Err(format!("It's over {} MB.", MAX_BYTES / (1024 * 1024)));
     }
-    let text = std::str::from_utf8(bytes).map_err(|_| "It isn't UTF-8.".to_string())?.to_string();
-    static WORKERS: LazyLock<Arc<Slots>> = LazyLock::new(|| Arc::new(Slots::new(MAX_WORKERS)));
-    let slow = SLOW_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|s| text.contains(s.marker)).map(|s| (s.limit, s.release.clone()));
-    let limit = slow.as_ref().map_or(TIME_LIMIT, |(l, _)| *l);
-    with_limit(&WORKERS, limit, move |stop| {
-        if let Some((_, release)) = &slow {
-            while !release.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-        draw(&text, stop)
-    })
+    draw(std::str::from_utf8(bytes).map_err(|_| "It isn't UTF-8.".to_string())?)
 }
 
-/// Places for workers to run in, one held for as long as its thread lasts.
+/// On a stack large enough for the limits above. None if the renderer panicked.
+fn on_own_stack(bytes: Vec<u8>) -> Option<Result<Drawn, String>> {
+    std::thread::Builder::new().name("svg".to_string()).stack_size(STACK).spawn(move || draw_bytes(&bytes)).ok()?.join().ok()
+}
+
+// ---- what the child answers: `GSV1`, then 0, width, height, whether a font's missing and the
+// pixels, or 1 and why it was refused.
+
+const MAGIC: &[u8; 4] = b"GSV1";
+const PICTURE_HEADER: usize = MAGIC.len() + 1 + 4 + 4 + 1;
+const MAX_WHY: usize = 1024;
+/// The largest answer that could be right. The parent reads no more than this.
+const MAX_ANSWER: usize = PICTURE_HEADER + (MAX_SIDE as usize) * (MAX_SIDE as usize) * 4;
+
+fn answer(result: &Result<Drawn, String>) -> Vec<u8> {
+    let mut out = MAGIC.to_vec();
+    match result {
+        Ok(d) => {
+            out.reserve_exact(PICTURE_HEADER + d.image.pixels.len() * 4);
+            out.push(0);
+            out.extend_from_slice(&(d.image.size[0] as u32).to_le_bytes());
+            out.extend_from_slice(&(d.image.size[1] as u32).to_le_bytes());
+            out.push(d.font_missing as u8);
+            out.extend(d.image.pixels.iter().flat_map(|p| p.to_array()));
+        }
+        Err(why) => {
+            out.push(1);
+            let mut end = why.len().min(MAX_WHY);
+            while !why.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.extend_from_slice(&why.as_bytes()[..end]);
+        }
+    }
+    out
+}
+
+/// What a child answered, which is no more to be trusted than the file it was given. Anything that
+/// isn't exactly right is told as a renderer gone wrong, as a crash is.
+fn read_answer(bytes: &[u8]) -> Result<Drawn, String> {
+    let wrong = || GAVE_UP.to_string();
+    let rest = bytes.strip_prefix(MAGIC).ok_or_else(wrong)?;
+    let (&kind, rest) = rest.split_first().ok_or_else(wrong)?;
+    match kind {
+        0 => {
+            let (head, pixels) = rest.split_at_checked(9).ok_or_else(wrong)?;
+            let (w, h) = (u32::from_le_bytes([head[0], head[1], head[2], head[3]]), u32::from_le_bytes([head[4], head[5], head[6], head[7]]));
+            let side = 1..=MAX_SIDE as u32;
+            if !side.contains(&w) || !side.contains(&h) || head[8] > 1 || pixels.len() as u64 != u64::from(w) * u64::from(h) * 4 {
+                return Err(wrong());
+            }
+            Ok(Drawn { image: egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixels), font_missing: head[8] == 1 })
+        }
+        // It goes on the screen, so it's only ever a short line of text.
+        1 if rest.len() <= MAX_WHY => Err(std::str::from_utf8(rest).map_err(|_| wrong())?.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()),
+        _ => Err(wrong()),
+    }
+}
+
+// ---- the child
+
+/// A crash here is one picture that doesn't show, so nothing about it may reach the user directly:
+/// no box from Windows, no crash report offered at the next launch.
+fn keep_crashes_quiet() {
+    std::panic::set_hook(Box::new(|_| {}));
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SetErrorMode};
+        // SAFETY: only sets a flag on this process.
+        unsafe {
+            SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        }
+    }
+}
+
+/// Ends this process when the parent does, however it does: its end of stdin closes then. And in
+/// any case at the time limit, as a parent that's only stopped closes nothing.
+fn end_with_the_parent() {
+    std::thread::spawn(|| {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        std::process::exit(5);
+    });
+    std::thread::spawn(|| {
+        std::thread::sleep(CHILD_OWN_LIMIT);
+        std::process::exit(6);
+    });
+}
+
+/// `gitem --render-svg`. Opens no window and reads no settings: `main` comes here first. Nothing
+/// happens until the file has arrived, and the parent sends it only once it can kill this process.
+pub fn child_main() -> i32 {
+    keep_crashes_quiet();
+    let mut input = std::io::stdin();
+    let mut size = [0; 8];
+    if input.read_exact(&mut size).is_err() {
+        return 2;
+    }
+    let size = u64::from_le_bytes(size);
+    if size > MAX_BYTES as u64 {
+        return 2;
+    }
+    let mut bytes = vec![0; size as usize];
+    if input.read_exact(&mut bytes).is_err() {
+        return 2;
+    }
+    #[cfg(debug_assertions)]
+    if let Ok(mode) = std::env::var(TEST_MODE) {
+        return act_for_test(&mode);
+    }
+    end_with_the_parent();
+    let Some(result) = on_own_stack(bytes) else { return 3 };
+    let mut out = std::io::stdout().lock();
+    if out.write_all(&answer(&result)).is_err() || out.flush().is_err() {
+        return 4;
+    }
+    0
+}
+
+/// Only by this variable, which only a test sets, and only in a debug build: nothing in a file can
+/// get here. The parent passes on nothing else of its environment, so it's not read from the user's.
+#[cfg(debug_assertions)]
+const TEST_MODE: &str = "GITEM_SVG_TEST";
+
+#[cfg(debug_assertions)]
+fn act_for_test(mode: &str) -> i32 {
+    let say = |bytes: &[u8]| {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(bytes);
+        let _ = out.flush();
+    };
+    let picture = |w: u32, h: u32, pixels: usize| {
+        let mut out = MAGIC.to_vec();
+        out.push(0);
+        out.extend_from_slice(&w.to_le_bytes());
+        out.extend_from_slice(&h.to_le_bytes());
+        out.push(0);
+        out.resize(out.len() + pixels, 255);
+        out
+    };
+    // A minute, so a test that goes wrong can't leave one for good.
+    let never_ending = || std::thread::sleep(Duration::from_secs(60));
+    match mode {
+        // Ends with the parent, as the real thing does.
+        "hang" => {
+            end_with_the_parent();
+            never_ending();
+        }
+        // Ends only if it's killed. This is the renderer stuck where nothing else can run.
+        "hang-deaf" => never_ending(),
+        "panic" => panic!("a panic asked for by a test"),
+        "abort" => std::process::abort(),
+        "exit-quietly" => {}
+        "garbage" => say(b"this is not an answer"),
+        "wrong-size" => say(&picture(2, 2, 3)),
+        "too-many-pixels" => say(&picture(2, 2, 17)),
+        "too-wide" => say(&picture(MAX_SIDE as u32 + 1, 1, (MAX_SIDE as usize + 1) * 4)),
+        "overflowing-sides" => say(&picture(u32::MAX, u32::MAX, 4)),
+        "long-why" => say(&[&MAGIC[..], &[1], &vec![b'x'; MAX_WHY + 1]].concat()),
+        "control-characters" => say(&[&MAGIC[..], &[1], b"line\x1b[31m\none"].concat()),
+        "flood" => {
+            let mut out = std::io::stdout().lock();
+            while out.write_all(&[7; 65536]).is_ok() {}
+        }
+        "answer-then-hang" => {
+            say(&answer(&Err("too early".to_string())));
+            never_ending();
+        }
+        "environment" => {
+            let names: Vec<String> = std::env::vars_os().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+            say(&answer(&Err(names.join(" "))));
+        }
+        _ => return 9,
+    }
+    0
+}
+
+// ---- the parent
+
+/// How to run a child. `Default` is how the app does.
+pub struct Renderer {
+    pub exe: PathBuf,
+    pub limit: Duration,
+    /// What a debug build's child should do instead of drawing. Release builds ignore it.
+    pub test_mode: Option<&'static str>,
+    /// Where a test hears the id of each child started.
+    pub started: Option<Started>,
+}
+
+pub type Started = Arc<Mutex<Vec<u32>>>;
+
+static EXE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// For tests, whose own executable isn't gitem.
+pub fn use_renderer(exe: impl Into<PathBuf>) {
+    *EXE.lock().unwrap_or_else(|e| e.into_inner()) = Some(exe.into());
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        let exe = EXE.lock().unwrap_or_else(|e| e.into_inner()).clone().or_else(|| std::env::current_exe().ok()).unwrap_or_default();
+        Self { exe, limit: TIME_LIMIT, test_mode: None, started: None }
+    }
+}
+
+/// Draws one in a child, off whichever thread this is called on. Not from the UI thread: it waits.
+/// Once `cancel` is set the child is killed and nothing more is done.
+pub fn render(bytes: &[u8], cancel: Option<&AtomicBool>) -> Result<Drawn, String> {
+    #[allow(unused_mut)]
+    let mut renderer = Renderer::default();
+    #[cfg(debug_assertions)]
+    if let Some(slow) = SLOW_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|s| bytes.windows(s.marker.len()).any(|w| w == s.marker.as_bytes())) {
+        renderer.limit = slow.limit;
+        renderer.test_mode = Some("hang-deaf");
+        renderer.started = Some(slow.started.clone());
+    }
+    renderer.render(bytes, cancel)
+}
+
+impl Renderer {
+    pub fn render(&self, bytes: &[u8], cancel: Option<&AtomicBool>) -> Result<Drawn, String> {
+        if bytes.len() > MAX_BYTES {
+            return Err(format!("It's over {} MB.", MAX_BYTES / (1024 * 1024)));
+        }
+        static TURNS: LazyLock<Arc<Slots>> = LazyLock::new(|| Arc::new(Slots::new(MAX_CHILDREN)));
+        let cancelled = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+        // The ones ahead of this are killed at the limit, so a turn comes by then if there's one.
+        let _turn = TURNS.take(self.limit.saturating_mul(2), &cancelled)?;
+        let mut child = Running::start(self).map_err(|e| format!("gitem couldn't start its renderer: {e}"))?;
+        let until = Instant::now() + self.limit;
+        let answered = child.exchange(bytes);
+        loop {
+            if cancelled() {
+                return Err(STOPPED.to_string());
+            }
+            let left = until.checked_duration_since(Instant::now()).ok_or(GAVE_UP)?;
+            match answered.recv_timeout(left.min(Duration::from_millis(10))) {
+                Ok(got) => return read_answer(&got),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Err(GAVE_UP.to_string()),
+            }
+        }
+    }
+}
+
+/// Which children are running, by process id. For tests, to see one go.
+pub fn children_running() -> Vec<u32> {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+static LIVE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// A child, killed and waited for when this is dropped, however its parent stopped waiting.
+struct Running {
+    child: Child,
+    /// Open for as long as it runs, as its end closing is what tells the child the parent's gone.
+    stdin: Option<Arc<ChildStdin>>,
+}
+
+impl Running {
+    fn start(with: &Renderer) -> std::io::Result<Self> {
+        let mut cmd = Command::new(&with.exe);
+        cmd.arg(CHILD_ARG).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).env_clear();
+        for name in KEPT_ENV {
+            if let Some(value) = std::env::var_os(name) {
+                cmd.env(name, value);
+            }
+        }
+        #[cfg(debug_assertions)]
+        if let Some(mode) = with.test_mode {
+            cmd.env(TEST_MODE, mode);
+        }
+        // Not wherever the parent is: on Windows a process holds its folder against being removed.
+        let quiet_place = std::env::temp_dir();
+        if quiet_place.is_dir() {
+            cmd.current_dir(quiet_place);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn()?;
+        #[cfg(windows)]
+        job::hold(&child);
+        LIVE.lock().unwrap_or_else(|e| e.into_inner()).push(child.id());
+        if let Some(started) = &with.started {
+            started.lock().unwrap_or_else(|e| e.into_inner()).push(child.id());
+        }
+        let stdin = child.stdin.take().map(Arc::new);
+        Ok(Self { child, stdin })
+    }
+
+    /// Sends the file and reads the answer, each on a thread of its own as a hostile child needn't
+    /// do either. Killing the child ends both. What comes back is one read more than could be right,
+    /// so one that goes on writing is found out without it filling the memory.
+    fn exchange(&mut self, bytes: &[u8]) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        if let Some(stdin) = self.stdin.clone() {
+            let message = [&(bytes.len() as u64).to_le_bytes()[..], bytes].concat();
+            std::thread::spawn(move || {
+                let _ = (&*stdin).write_all(&message);
+                let _ = (&*stdin).flush();
+            });
+        }
+        let (tx, rx) = channel();
+        if let Some(stdout) = self.child.stdout.take() {
+            std::thread::spawn(move || {
+                let mut got = Vec::new();
+                if stdout.take(MAX_ANSWER as u64 + 1).read_to_end(&mut got).is_ok() {
+                    let _ = tx.send(got);
+                }
+            });
+        }
+        rx
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stdin = None;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let id = self.child.id();
+        LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != id);
+    }
+}
+
+/// Windows ends every process in a job when the last handle to the job closes, and this process
+/// holds the only one, so nothing outlives it, however it ends. It's created when first needed and
+/// never closed. If it can't be, a child still ends when its stdin does, unless it's stuck in a way
+/// that stops that thread too.
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::LazyLock;
+
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject};
+
+    /// As a number, since a handle isn't `Send`. It's only passed back to the calls below.
+    static JOB: LazyLock<Option<usize>> = LazyLock::new(|| {
+        // SAFETY: no name and no attributes, so it can't be found or inherited. The information
+        // passed is fully initialised, its size is given, and it outlives the call.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const limits).cast(), size_of_val(&limits) as u32);
+            (set != 0).then_some(job as usize)
+        }
+    });
+
+    pub(super) fn hold(child: &std::process::Child) {
+        if let Some(job) = *JOB {
+            // SAFETY: both handles are open: the job for good, the child for as long as it's borrowed.
+            unsafe {
+                AssignProcessToJobObject(job as _, child.as_raw_handle() as _);
+            }
+        }
+    }
+}
+
+/// Places for children to run in, one held from before a child starts until it's gone.
 struct Slots {
     max: usize,
     taken: Mutex<usize>,
@@ -269,20 +637,25 @@ impl Slots {
         Self { max, taken: Mutex::new(0), freed: Condvar::new() }
     }
 
-    /// One, if one comes free in this time.
-    fn take(self: &Arc<Self>, patience: Duration) -> Option<Slot> {
+    /// One, if one comes free in this time and nobody calls it off first.
+    fn take(self: &Arc<Self>, patience: Duration, cancelled: &dyn Fn() -> bool) -> Result<Slot, String> {
         let until = Instant::now() + patience;
         let mut taken = self.taken.lock().unwrap_or_else(|e| e.into_inner());
-        while *taken >= self.max {
-            let left = until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
-            taken = self.freed.wait_timeout(taken, left).unwrap_or_else(|e| e.into_inner()).0;
+        loop {
+            if cancelled() {
+                return Err(STOPPED.to_string());
+            }
+            if *taken < self.max {
+                *taken += 1;
+                return Ok(Slot(self.clone()));
+            }
+            let left = until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(NO_TURN)?;
+            taken = self.freed.wait_timeout(taken, left.min(Duration::from_millis(50))).unwrap_or_else(|e| e.into_inner()).0;
         }
-        *taken += 1;
-        Some(Slot(self.clone()))
     }
 }
 
-/// Given back when its thread ends, however that happens.
+/// Given back when its child has gone.
 struct Slot(Arc<Slots>);
 
 impl Drop for Slot {
@@ -292,46 +665,24 @@ impl Drop for Slot {
     }
 }
 
-/// Runs `work` on a worker and waits for it up to `limit`, after waiting up to as long for a turn.
-/// What's given up on is told through its flag, and holds its place until it ends.
-fn with_limit<T: Send + 'static>(slots: &Arc<Slots>, limit: Duration, work: impl FnOnce(&AtomicBool) -> Result<T, String> + Send + 'static) -> Result<T, String> {
-    let slot = slots.take(limit).ok_or(NO_TURN)?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = channel();
-    let flag = stop.clone();
-    std::thread::Builder::new()
-        .name("svg".to_string())
-        .stack_size(STACK)
-        .spawn(move || {
-            let _slot = slot;
-            let _ = tx.send(work(&flag));
-        })
-        .map_err(|e| e.to_string())?;
-    match rx.recv_timeout(limit) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => {
-            stop.store(true, Ordering::Relaxed);
-            Err(TOO_SLOW.to_string())
-        }
-        // A panic in the renderer is one picture that doesn't show.
-        Err(RecvTimeoutError::Disconnected) => Err("The renderer couldn't draw it.".to_string()),
-    }
-}
-
+#[cfg(debug_assertions)]
 struct SlowForTest {
     marker: &'static str,
     limit: Duration,
-    release: Arc<AtomicBool>,
+    started: Started,
 }
 
-static SLOW_FOR_TEST: Mutex<Option<SlowForTest>> = Mutex::new(None);
+#[cfg(debug_assertions)]
+static SLOW_FOR_TEST: Mutex<Vec<SlowForTest>> = Mutex::new(Vec::new());
 
-/// For a test of what a view does: a file with this in it draws only once the flag returned is set,
-/// and is waited for this long. Nothing else takes any notice.
-pub fn slow_for_test(marker: &'static str, limit: Duration) -> Arc<AtomicBool> {
-    let release = Arc::new(AtomicBool::new(false));
-    *SLOW_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(SlowForTest { marker, limit, release: release.clone() });
-    release
+/// For a test of what a view does: a file with this in it gets a child that never ends, killed at
+/// this limit, and the ids of those are returned. Debug builds only, in the test's own process: a
+/// test has to ask, or a file's content means nothing.
+#[cfg(debug_assertions)]
+pub fn slow_for_test(marker: &'static str, limit: Duration) -> Started {
+    let started = Started::default();
+    SLOW_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).push(SlowForTest { marker, limit, started: started.clone() });
+    started
 }
 
 pub fn is_svg(path: &str) -> bool {
@@ -341,7 +692,11 @@ pub fn is_svg(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+
+    /// The limits and the drawing, in this process. `svg_process.rs` has the real child.
+    fn render(bytes: &[u8]) -> Result<Drawn, String> {
+        on_own_stack(bytes.to_vec()).expect("no panic")
+    }
 
     const RED: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="red"/></svg>"#;
 
@@ -380,8 +735,7 @@ mod tests {
 
     #[test]
     fn with_no_fonts_at_all_the_text_is_left_out_and_said() {
-        let stop = AtomicBool::new(false);
-        let d = draw_with(&text_in(r#"font-family="Ubuntu""#), &stop, Arc::new(usvg::fontdb::Database::new()), None).unwrap();
+        let d = draw_with(&text_in(r#"font-family="Ubuntu""#), Arc::new(usvg::fontdb::Database::new()), None).unwrap();
         assert_eq!(opaque(&d.image), 0);
         assert!(d.font_missing);
     }
@@ -425,16 +779,14 @@ mod tests {
         assert!(render(doc.as_bytes()).err().unwrap().contains("nests too deeply"));
     }
 
-    /// Within the limits, and as awkward as it can be: it ends, at the picture's size or told as
-    /// too slow, and never larger.
+    /// Within the limits, and as awkward as it can be: it ends, at the picture's size and no larger.
+    /// The time limit is the parent's.
     #[test]
     fn text_within_the_limits_stays_inside_them() {
         let doc = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="900" height="900">{}</svg>"#, r#"<text x="1" y="50" font-size="40">Some words</text>"#.repeat(2_000));
         let t = Instant::now();
-        match render(doc.as_bytes()) {
-            Ok(d) => assert!(d.image.size[0] <= 2048 && opaque(&d.image) > 0),
-            Err(e) => assert_eq!(e, TOO_SLOW),
-        }
+        let d = render(doc.as_bytes()).unwrap();
+        assert!(d.image.size[0] <= 2048 && opaque(&d.image) > 0);
         eprintln!("2,000 text elements: {:?}", t.elapsed());
         for huge in [r#"font-size="100000000""#, r#"font-size="1" letter-spacing="1e30""#, r#"font-size="1e30""#] {
             let doc = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="90" height="90"><text x="1" y="50" {huge}>Words</text></svg>"#);
@@ -444,81 +796,91 @@ mod tests {
         }
     }
 
-    // ---- the time limit, with a slow render that's injected rather than timed
+    // ---- what a child answers, which is as untrusted as the file
 
-    const SHORT: Duration = Duration::from_millis(40);
-
-    /// Work that goes on until it's let go, as a slow render does, and says it's begun.
-    fn stuck(begun: &Arc<AtomicUsize>, let_go: &Arc<AtomicBool>) -> impl FnOnce(&AtomicBool) -> Result<u32, String> + Send + 'static {
-        let (begun, let_go) = (begun.clone(), let_go.clone());
-        move |_| {
-            begun.fetch_add(1, Ordering::SeqCst);
-            while !let_go.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Ok(1)
-        }
+    fn picture(w: u32, h: u32, flag: u8, pixels: usize) -> Vec<u8> {
+        let mut out = MAGIC.to_vec();
+        out.push(0);
+        out.extend_from_slice(&w.to_le_bytes());
+        out.extend_from_slice(&h.to_le_bytes());
+        out.push(flag);
+        out.resize(out.len() + pixels, 9);
+        out
     }
 
-    fn eventually(what: &str, f: impl Fn() -> bool) {
-        let t = Instant::now();
-        while !f() {
-            assert!(t.elapsed() < Duration::from_secs(30), "{what}");
-            std::thread::sleep(Duration::from_millis(1));
+    #[test]
+    fn a_good_answer_comes_back_as_it_went() {
+        let d = render(RED.as_bytes()).unwrap();
+        let back = read_answer(&answer(&Ok(d))).unwrap();
+        assert_eq!(back.image.size, [40, 20]);
+        assert_eq!(back.image.pixels[0], egui::Color32::from_rgb(255, 0, 0));
+        assert!(!back.font_missing);
+        assert_eq!(read_answer(&answer(&Err("It nests too deeply.".to_string()))).err().as_deref(), Some("It nests too deeply."));
+        // The largest there is, at exactly what the parent's willing to read.
+        let side = MAX_SIDE as u32;
+        let full = picture(side, side, 1, (side * side * 4) as usize);
+        assert_eq!(full.len(), MAX_ANSWER);
+        assert!(read_answer(&full).unwrap().font_missing);
+    }
+
+    #[test]
+    fn a_reason_too_long_is_cut_on_a_character_for_sending() {
+        let long = "é".repeat(MAX_WHY);
+        let sent = answer(&Err(long));
+        assert!(sent.len() <= MAGIC.len() + 1 + MAX_WHY);
+        assert!(read_answer(&sent).err().unwrap().starts_with('é'));
+    }
+
+    #[test]
+    fn an_answer_that_isnt_right_is_told_as_a_renderer_gone_wrong() {
+        let side = MAX_SIDE as u32;
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("nothing", Vec::new()),
+            ("garbage", b"this is not an answer".to_vec()),
+            ("magic only", MAGIC.to_vec()),
+            ("unknown kind", [&MAGIC[..], &[2]].concat()),
+            ("header cut short", picture(2, 2, 0, 0)[..12].to_vec()),
+            ("too few pixels", picture(2, 2, 0, 15)),
+            ("too many pixels", picture(2, 2, 0, 17)),
+            ("no width", picture(0, 2, 0, 0)),
+            ("no height", picture(2, 0, 0, 0)),
+            ("too wide", picture(side + 1, 1, 0, ((side + 1) * 4) as usize)),
+            ("too tall", picture(1, side + 1, 0, ((side + 1) * 4) as usize)),
+            ("sides whose product wraps", picture(0x8000_0000, 2, 0, 0)),
+            ("the largest sides", picture(u32::MAX, u32::MAX, 0, 4)),
+            ("a flag that's no flag", picture(1, 1, 2, 4)),
+            ("a reason too long", [&MAGIC[..], &[1], &vec![b'x'; MAX_WHY + 1]].concat()),
+            ("a reason that isn't text", [&MAGIC[..], &[1], &[0xff, 0xfe]].concat()),
+        ];
+        for (what, bytes) in cases {
+            assert_eq!(read_answer(&bytes).err().as_deref(), Some(GAVE_UP), "{what}");
         }
     }
 
     #[test]
-    fn a_slow_one_is_given_up_on_at_the_limit_and_told_to_stop_where_it_can() {
-        let slots = Arc::new(Slots::new(2));
-        let seen = Arc::new(AtomicBool::new(false));
-        let (told, let_go) = (seen.clone(), Arc::new(AtomicBool::new(false)));
-        let release = let_go.clone();
-        let got: Result<u32, String> = with_limit(&slots, SHORT, move |stop| {
-            while !release.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            told.store(stop.load(Ordering::SeqCst), Ordering::SeqCst);
-            Ok(1)
-        });
-        assert_eq!(got.err().as_deref(), Some(TOO_SLOW));
-        let_go.store(true, Ordering::SeqCst);
-        eventually("its place back", || *slots.taken.lock().unwrap() == 0);
-        assert!(seen.load(Ordering::SeqCst), "its flag was set");
+    fn a_reason_goes_on_the_screen_without_its_control_characters() {
+        let e = read_answer(&[&MAGIC[..], &[1], b"line\x1b[31m\none"].concat()).err().unwrap();
+        assert_eq!(e, "line [31m one");
     }
 
-    /// The view asks again each time it's opened. Threads stay at the limit, later asks get an
-    /// answer in the same time, and once the slow ones end it all works again.
-    #[test]
-    fn opening_a_slow_one_again_and_again_doesnt_add_threads() {
-        let slots = Arc::new(Slots::new(2));
-        let (begun, let_go) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
-        let mut answers = Vec::new();
-        for _ in 0..12 {
-            answers.push(with_limit(&slots, SHORT, stuck(&begun, &let_go)).err().unwrap());
-        }
-        assert_eq!(answers[..2], [TOO_SLOW, TOO_SLOW]);
-        assert!(answers[2..].iter().all(|a| a == NO_TURN), "{answers:?}");
-        assert_eq!(begun.load(Ordering::SeqCst), 2, "no more than two ever started");
-        assert_eq!(*slots.taken.lock().unwrap(), 2);
-        let_go.store(true, Ordering::SeqCst);
-        eventually("their places back", || *slots.taken.lock().unwrap() == 0);
-        assert_eq!(with_limit(&slots, Duration::from_secs(30), |_| Ok(7)), Ok(7));
-    }
+    // ---- turns
 
     #[test]
-    fn a_turn_coming_free_in_time_is_taken_and_a_panic_gives_its_place_back() {
+    fn a_turn_is_taken_or_waited_for_or_called_off() {
+        let never = || false;
         let slots = Arc::new(Slots::new(1));
-        let (begun, let_go) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
-        assert!(with_limit(&slots, SHORT, stuck(&begun, &let_go)).is_err());
-        let (waiter, go) = (slots.clone(), let_go.clone());
-        let later = std::thread::spawn(move || with_limit(&waiter, Duration::from_secs(30), |_| Ok(2)));
-        go.store(true, Ordering::SeqCst);
-        assert_eq!(later.join().unwrap(), Ok(2));
-        eventually("its place back", || *slots.taken.lock().unwrap() == 0);
-        let got: Result<u32, String> = with_limit(&slots, Duration::from_secs(30), |_| panic!("deliberately, in a test"));
-        assert!(got.err().unwrap().contains("couldn't draw"));
-        eventually("its place back after a panic", || *slots.taken.lock().unwrap() == 0);
+        let held = slots.take(Duration::ZERO, &never).unwrap();
+        assert_eq!(slots.take(Duration::from_millis(20), &never).err().as_deref(), Some(NO_TURN));
+        let flag = AtomicBool::new(true);
+        let t = Instant::now();
+        let called_off = slots.take(Duration::from_secs(30), &|| flag.load(Ordering::Relaxed));
+        assert_eq!(called_off.err().as_deref(), Some(STOPPED));
+        assert!(t.elapsed() < Duration::from_secs(20));
+        let waiter = slots.clone();
+        let later = std::thread::spawn(move || waiter.take(Duration::from_secs(30), &|| false).is_ok());
+        drop(held);
+        assert!(later.join().unwrap());
+        assert_eq!(*slots.taken.lock().unwrap(), 0, "given back");
     }
 
     #[test]

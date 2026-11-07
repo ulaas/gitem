@@ -15,10 +15,10 @@ Added:
 - With no repository open: the palette, Pull requests I'm in, Credentials.
 - Stash Hunks, whose stash pops back with the rest of the file still changed.
 - An opt-in branch model: start and finish feature, release and hotfix branches.
-- SVG drawn in the file view and diffs, with hostile files refused or kept to size, and given up on after 10 seconds.
+- SVG drawn in the file view and diffs, in a process of its own, with hostile files refused or kept to size, and the process killed after 10 seconds or when the view moves on.
 - Several branches picked in the sidebar with `Ctrl+click`, deleted together.
 - Keys for lists and views can be changed, as well as the main commands.
-- Optional: a system notification on Windows, names on the rail, staging and committing in Details.
+- Optional: a system notification on Windows, Linux (`notify-send`) and macOS (`osascript`), the last two never yet run; names on the rail, staging and committing in Details.
 - An AppImage script and a release job for it, neither of them run yet.
 - Your own diff and merge tools and terminal. Pull all and open all in a workspace. Changeable keys. One window. Open in gitem in Explorer. Settings export and import. An installer script and an opt-in update check.
 

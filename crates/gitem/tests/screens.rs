@@ -149,6 +149,7 @@ impl Fx {
         let dir = tempfile::tempdir().unwrap();
         let top = dir.path().canonicalize().unwrap();
         let git = GitExe::discover(None).unwrap();
+        gitem::svg::use_renderer(env!("CARGO_BIN_EXE_gitem"));
         let root = top.join("repo");
         make_repo(&git, &root);
         Self { _dir: dir, top, root, git }

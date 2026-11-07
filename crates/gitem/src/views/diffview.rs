@@ -715,6 +715,10 @@ impl DiffView {
             self.binary(ui, cx, f);
             return;
         }
+        // Moved to a file with no pictures, or back to Text: dropping this kills what's drawing them.
+        if self.images.decoding.busy() {
+            self.images = ImagePair::default();
+        }
         if f.header.first().is_some_and(|l| l.starts_with("diff --cc ")) {
             empty_state(ui, "This file is in conflict", "Git can't show one diff of it until the conflict is settled.", &pal);
             ui.vertical_centered(|ui| {
@@ -1035,7 +1039,8 @@ impl DiffView {
                     if !svg {
                         return decode_image(&b);
                     }
-                    match crate::svg::render(&b) {
+                    // Set when this pair is replaced or the view closes, which kills the renderer.
+                    match crate::svg::render(&b, repo.git.cancel.as_deref()) {
                         Ok(d) => {
                             if d.font_missing {
                                 why = Some(crate::svg::FONT_MISSING.to_string());

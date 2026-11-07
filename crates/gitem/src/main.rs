@@ -42,6 +42,11 @@ fn tab_by_name(name: &str) -> Option<Tab> {
 }
 
 fn main() {
+    // Ahead of everything, the crash hook included: a hostile file that crashes this mustn't leave a
+    // report for the next launch to offer, and this mustn't read settings or open a window.
+    if std::env::args_os().nth(1).is_some_and(|a| a == gitem::svg::CHILD_ARG) {
+        std::process::exit(gitem::svg::child_main());
+    }
     gitem::crash::install_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     std::process::exit(dispatch(&args));

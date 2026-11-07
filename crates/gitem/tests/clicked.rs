@@ -31,6 +31,7 @@ impl Fx {
         std::fs::create_dir(&root).unwrap();
         let mut git = GitExe::discover(None).expect("git");
         git.helper = Some(PathBuf::from(env!("CARGO_BIN_EXE_gitem")));
+        gitem::svg::use_renderer(env!("CARGO_BIN_EXE_gitem"));
         let f = Self { _dir: dir, root, git };
         f.git(&["init", "-q", "-b", "main"]);
         for (k, v) in [("user.name", "Test User"), ("user.email", "test@example.com"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
@@ -341,13 +342,15 @@ fn an_svg_shows_as_a_picture_and_its_source_is_a_click_away() {
     no_errors(&h);
 }
 
-/// A render that doesn't end is injected. The view stops waiting, says so, and has its Source.
+/// A render that doesn't end is asked for of a debug build's child. The child is killed, the view
+/// says so, and has its Source.
+#[cfg(debug_assertions)]
 #[test]
 fn an_svg_that_takes_too_long_stops_being_waited_for_and_source_still_works() {
     let f = Fx::new();
     f.write("slow.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><!-- slow-in-this-test --></svg>"#);
     f.commit("a slow drawing");
-    let release = gitem::svg::slow_for_test("slow-in-this-test", Duration::from_millis(100));
+    let started = gitem::svg::slow_for_test("slow-in-this-test", Duration::from_millis(100));
     let mut h = f.harness(|_| {});
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::file("slow.svg", None, None));
@@ -359,7 +362,120 @@ fn an_svg_that_takes_too_long_stops_being_waited_for_and_source_still_works() {
     wait_for(&mut h, "the source", |h| h.query_by_label_contains("took too long").is_none());
     click(&mut h, "Picture");
     wait_for_text(&mut h, "took too long to draw");
-    release.store(true, std::sync::atomic::Ordering::Relaxed);
+    let ids = started.lock().unwrap().clone();
+    assert!(!ids.is_empty());
+    for id in ids {
+        renderer_goes(&mut h, id);
+    }
+}
+
+/// Well short of the 60 s it's given, so only being told can have ended it.
+#[cfg(debug_assertions)]
+fn renderer_goes(h: &mut Harness<GitemApp>, id: u32) {
+    let t = std::time::Instant::now();
+    wait_for(h, "the renderer to go", move |_| !gitem::svg::children_running().contains(&id));
+    assert!(t.elapsed() < Duration::from_secs(40), "{:?}", t.elapsed());
+}
+
+#[cfg(debug_assertions)]
+fn slow_svg(marker: &str) -> String {
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><!-- {marker} --></svg>"#)
+}
+
+#[cfg(debug_assertions)]
+fn renderer_started(h: &mut Harness<GitemApp>, started: &gitem::svg::Started) -> u32 {
+    let seen = started.clone();
+    wait_for(h, "a renderer to start", move |_| !seen.lock().unwrap().is_empty());
+    let id = started.lock().unwrap()[0];
+    assert!(gitem::svg::children_running().contains(&id));
+    id
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn closing_an_svgs_view_kills_its_renderer() {
+    let f = Fx::new();
+    f.write("closes.svg", &slow_svg("closes-in-this-test"));
+    f.commit("a drawing");
+    let started = gitem::svg::slow_for_test("closes-in-this-test", Duration::from_secs(60));
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    let tab = Tab::file("closes.svg", None, None);
+    let key = tab.key();
+    h.state_mut().repos[0].open_tab(tab);
+    let id = renderer_started(&mut h, &started);
+    let dock = &mut h.state_mut().repos[0].dock;
+    let path = dock.find_tab_from(|t| t.key() == key).expect("its tab");
+    dock.remove_tab(path);
+    renderer_goes(&mut h, id);
+    no_errors(&h);
+}
+
+/// A diff draws what's selected. Another file replaces the pair it was drawing.
+#[cfg(debug_assertions)]
+#[test]
+fn a_diff_moving_to_another_file_kills_the_renderer_and_draws_that_one() {
+    let f = Fx::new();
+    f.write("moves.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"/>"#);
+    f.write("other.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="red"/></svg>"#);
+    f.commit("drawings");
+    f.write("moves.svg", &slow_svg("moves-in-this-test"));
+    f.write("other.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="blue"/></svg>"#);
+    let started = gitem::svg::slow_for_test("moves-in-this-test", Duration::from_secs(60));
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(gitem_core::repo::DiffSource::Unstaged, None));
+    wait_for_label(&mut h, "Pictures");
+    click(&mut h, "Pictures");
+    let id = renderer_started(&mut h, &started);
+    let other = h.query_all_by_label_contains("other.svg").last().unwrap().accesskit_node().label().unwrap().to_string();
+    click(&mut h, &other);
+    renderer_goes(&mut h, id);
+    wait_for_text(&mut h, "40 × 20 px");
+    no_errors(&h);
+}
+
+/// The same with nothing to draw next, as nothing then replaces the pair.
+#[cfg(debug_assertions)]
+#[test]
+fn a_diff_moving_to_a_file_with_no_pictures_kills_the_renderer() {
+    let f = Fx::new();
+    f.write("leaves.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"/>"#);
+    f.write("words.txt", "one\n");
+    f.commit("two files");
+    f.write("leaves.svg", &slow_svg("leaves-in-this-test"));
+    f.write("words.txt", "two\n");
+    let started = gitem::svg::slow_for_test("leaves-in-this-test", Duration::from_secs(60));
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(gitem_core::repo::DiffSource::Unstaged, None));
+    wait_for_label(&mut h, "Pictures");
+    click(&mut h, "Pictures");
+    let id = renderer_started(&mut h, &started);
+    let other = h.query_all_by_label_contains("words.txt").last().unwrap().accesskit_node().label().unwrap().to_string();
+    click(&mut h, &other);
+    renderer_goes(&mut h, id);
+    no_errors(&h);
+}
+
+/// Back to Text, in the same file.
+#[cfg(debug_assertions)]
+#[test]
+fn a_diff_going_back_to_text_kills_the_renderer() {
+    let f = Fx::new();
+    f.write("back.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"/>"#);
+    f.commit("a drawing");
+    f.write("back.svg", &slow_svg("back-in-this-test"));
+    let started = gitem::svg::slow_for_test("back-in-this-test", Duration::from_secs(60));
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::diff(gitem_core::repo::DiffSource::Unstaged, Some("back.svg".to_string())));
+    wait_for_label(&mut h, "Pictures");
+    click(&mut h, "Pictures");
+    let id = renderer_started(&mut h, &started);
+    click(&mut h, "Text");
+    renderer_goes(&mut h, id);
+    no_errors(&h);
 }
 
 // ---- FG-39 and FG-35
