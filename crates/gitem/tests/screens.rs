@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::vec2;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use gitem::app::GitemApp;
 use gitem::views::Tab;
@@ -76,7 +76,21 @@ fn fake_host() -> String {
                     "/api/v1/repos/o/r/pulls/7/files" => json!([{"filename":"src/parse.rs","status":"changed","additions":3,"deletions":1},{"filename":"README.md","status":"changed","additions":1,"deletions":0}]),
                     "/api/v1/repos/o/r/commits/headsha/statuses" => json!([{"context":"build / windows","status":"success","description":"Passed in 4m","target_url":"http://127.0.0.1:9/ci/1"},{"context":"test / linux","status":"failure","description":"2 tests failed","target_url":"http://127.0.0.1:9/ci/2"},{"context":"lint","status":"pending","description":"Waiting","target_url":""}]),
                     "/api/v1/repos/o/r/issues/7/comments" => json!([{"user":{"login":"bea"},"body":"Could this handle combining marks as well? They come up in the Vietnamese test file.","created_at":"2026-11-02T10:00:00Z"}]),
-                    "/api/v1/repos/o/r/pulls/7/reviews" => json!([{"id":1,"user":{"login":"cy"},"state":"REQUEST_CHANGES","body":"The width table needs a test.","comments_count":0,"submitted_at":"2026-11-03T10:00:00Z"}]),
+                    "/api/v1/repos/o/r/pulls/7/reviews" => json!([{"id":1,"user":{"login":"cy"},"state":"REQUEST_CHANGES","body":"The width table needs a test.","comments_count":1,"submitted_at":"2026-11-03T10:00:00Z"}]),
+                    "/api/v1/repos/o/r/pulls/7/reviews/1/comments" => json!([{"id":61,"user":{"login":"cy"},"body":"What about zero-width joiners?","path":"src/parse.rs","position":12,"created_at":"2026-11-03T10:00:01Z"}]),
+                    "/api/v3/user" => json!({"login":"me"}),
+                    "/api/v3/repos/o/r/pulls/7" => json!({"head":{"sha":"headsha"},"base":{"sha":"basesha"}}),
+                    "/api/v3/repos/o/r/pulls/7/files" => json!([{"filename":"src/parse.rs","status":"modified","additions":3,"deletions":1,"patch":"@@ -10,4 +10,6 @@\n     match c {\n-        _ => 1,\n+        _ => 2,"}]),
+                    "/api/v3/repos/o/r/issues/7/comments" => json!([{"id":1,"user":{"login":"bea"},"body":"Could this handle combining marks as well?","created_at":"2026-11-02T10:00:00Z"}]),
+                    "/api/v3/repos/o/r/pulls/7/comments" => json!([
+                        {"id":31,"user":{"login":"cy"},"body":"Why 2 here and not the table's width?","path":"src/parse.rs","line":11,"created_at":"2026-11-03T10:00:00Z"},
+                        {"id":32,"in_reply_to_id":31,"user":{"login":"me"},"body":"The table only covers Hangul so far.","path":"src/parse.rs","line":11,"created_at":"2026-11-03T11:00:00Z"},
+                        {"id":33,"in_reply_to_id":31,"user":{"login":"cy"},"body":"Fair. A test for it, then?","path":"src/parse.rs","line":11,"created_at":"2026-11-03T12:00:00Z"},
+                        {"id":40,"user":{"login":"bea"},"body":"This could use a comment saying where the ranges come from.","path":"src/parse.rs","line":12,"created_at":"2026-11-04T09:00:00Z"},
+                    ]),
+                    "/api/v3/repos/o/r/commits/headsha/check-runs" => json!({"check_runs":[]}),
+                    "/api/v3/repos/o/r/commits/headsha/status" => json!({"statuses":[]}),
+                    "/api/v4/merge_requests" => json!([{"iid":5,"title":"Move the settings file","web_url":"http://127.0.0.1:9/team/app/-/merge_requests/5","author":{"username":"me"},"references":{"full":"team/app!5"},"source_branch":"settings","target_branch":"main","updated_at":"2026-11-01T10:00:00Z"}]),
                     "/api/v1/repos/issues/search" => json!([{"number":41,"title":"Add the new tokenizer","html_url":"http://127.0.0.1:9/o/other/41","user":{"login":"me"},"state":"open","repository":{"full_name":"o/other"}},{"number":3,"title":"Support long paths on Windows","html_url":"http://127.0.0.1:9/team/app/3","user":{"login":"bea"},"state":"open","repository":{"full_name":"team/app"},"pull_request":{"draft":true}}]),
                     "/api/v1/repos/o/r/pulls" if page_one => {
                         let mut fork = pr(15, "from-a-fork", "Someone else's fork", false);
@@ -409,7 +423,7 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         quiet(&mut h);
         out.save(&mut h, "launchpad");
     }
-    if wanted("pr") || wanted("prfiles") || wanted("prchecks") || wanted("prtalk") || wanted("everywhere") || wanted("fork") || wanted("hosting") {
+    if wanted("pr") || wanted("prfiles") || wanted("prchecks") || wanted("prtalk") || wanted("prthread") || wanted("everywhere") || wanted("hosts") || wanted("fork") || wanted("hosting") {
         let base = fake_host();
         let root = f.root.clone();
         let _ = f.git.run(Some(&root), &["remote", "remove", "origin"]);
@@ -446,9 +460,23 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
             out.save(&mut h, "prchecks");
         }
         if wanted("prtalk") {
-            click(&mut h, "Conversation (2)");
+            click(&mut h, "Conversation (3)");
             quiet(&mut h);
             out.save(&mut h, "prtalk");
+        }
+        if wanted("prthread") {
+            let github = CustomHost { host: "127.0.0.1".into(), kind: ForgeKind::GitHub, api_base: String::new(), templates: Default::default() };
+            let mut h = f.harness(settings_with(github), vec![]);
+            h.state_mut().repos[0].open_tab(Tab::PullRequest(Box::new(gitem::views::pullrequest::PullRequestView::new(pr.clone(), "me"))));
+            wait_for(&mut h, "Conversation (5)");
+            click(&mut h, "Conversation (5)");
+            wait_for(&mut h, "Reply to cy's thread");
+            quiet(&mut h);
+            out.save(&mut h, "prthread");
+            click(&mut h, "Reply to bea");
+            wait_for(&mut h, "Post reply");
+            settle_a_moment(&mut h);
+            out.save(&mut h, "prreply");
         }
         if wanted("everywhere") {
             open(&mut h, Tab::Launchpad(Box::default()));
@@ -456,6 +484,39 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
             wait_for(&mut h, "o/other");
             quiet(&mut h);
             out.save(&mut h, "everywhere");
+        }
+        if wanted("hosts") {
+            // A second host that answers, one that can't be reached, and one with nothing saved.
+            let lab = fake_host();
+            let (dead, unsaved) = ("http://127.0.0.1:9", fake_host());
+            let customs: Vec<CustomHost> = [(lab.as_str(), ForgeKind::GitLab), (dead, ForgeKind::Gitea), (unsaved.as_str(), ForgeKind::Gitea)].iter().map(|(b, kind)| CustomHost { host: b.trim_start_matches("http://").to_string(), kind: *kind, api_base: String::new(), templates: Default::default() }).collect();
+            let mut recent = Vec::new();
+            for (i, (b, c)) in [lab.as_str(), dead, unsaved.as_str()].iter().zip(&customs).enumerate() {
+                let dir = f.top.join(format!("recent{i}"));
+                make_repo(&f.git, &dir);
+                run(&f.git, &dir, &["remote", "add", "origin", &format!("{b}/team/app.git")]);
+                recent.push(gitem_core::Repo::open(f.git.clone(), &dir).unwrap().root.to_string_lossy().replace('\\', "/"));
+                if i < 2 {
+                    let id = identify(&format!("{b}/team/app.git"), std::slice::from_ref(c)).unwrap();
+                    gitem_core::cred::set_forge_token(&id.token_host(), "", "FAKE_SECRET_VALUE").unwrap();
+                }
+            }
+            let mut all = customs.clone();
+            all.push(custom.clone());
+            let mut h = f.harness(
+                move |s: &mut Settings| {
+                    s.theme = theme;
+                    s.custom_hosts = all;
+                    s.recent_repos = recent;
+                },
+                vec![],
+            );
+            open(&mut h, Tab::Launchpad(Box::default()));
+            click(&mut h, "Everything I'm in");
+            wait_for(&mut h, "o/other");
+            wait_for(&mut h, "team/app");
+            quiet(&mut h);
+            out.save(&mut h, "hosts");
         }
         if wanted("fork") {
             let fork = gitem_core::forge::PullRequest { from_fork: true, head_repo: "them/r".into(), head: "from-a-fork".into(), ..pr.clone() };
@@ -505,6 +566,45 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         wait_for(&mut h, "src/lib.rs:2");
         quiet(&mut h);
         out.save(&mut h, "grep");
+    }
+    if wanted("keysbelow") {
+        let mut h = f.harness(move |s| {
+            s.theme = theme;
+            s.key_bindings.insert("fetch".to_string(), "Ctrl+Shift+L".to_string());
+        }, vec![]);
+        open(&mut h, Tab::Settings(Box::new(gitem::views::settings::SettingsView::on_page("workflow"))));
+        settle_a_moment(&mut h);
+        h.set_size(vec2(1280.0, 2400.0));
+        settle_a_moment(&mut h);
+        out.save(&mut h, "keysbelow");
+    }
+    if wanted("helpkeys") {
+        let mut h = f.harness(move |s| {
+            s.theme = theme;
+            s.key_bindings.insert("fetch".to_string(), "Ctrl+Shift+L".to_string());
+        }, vec![]);
+        h.key_press(egui::Key::F1);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "helpkeys");
+    }
+    if wanted("across") {
+        let other = f.top.join("other-repo");
+        make_repo(&f.git, &other);
+        std::fs::write(other.join("new.txt"), "n\n").unwrap();
+        let mut h = f.harness(set, vec![other]);
+        wait_for(&mut h, " open");
+        quiet(&mut h);
+        out.save(&mut h, "across");
+        let summary = h.query_all_by_label_contains(" open").next().unwrap().accesskit_node().label().unwrap().to_string();
+        click(&mut h, &summary);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "acrossopen");
+    }
+    if wanted("restored") {
+        let mut h = f.harness(set, vec![]);
+        open(&mut h, Tab::from_spec("search:change:parser after:2024-01-01").unwrap());
+        settle_a_moment(&mut h);
+        out.save(&mut h, "restored");
     }
     if wanted("keys") {
         let mut h = f.harness(move |s| {

@@ -634,11 +634,16 @@ impl LaunchpadView {
                             Ok(format!("Posted {} on #{n}", plural(s.len(), "suggestion", "suggestions")))
                         })));
                     }
-                if let Some(parent) = parent
-                    && here && ui.small_button("Rebase stack").on_hover_text(format!("Rebase onto {}, moving the branches between with it", parent.head)).clicked() {
-                        cx.form(forms::rebase_stack_form(parent.head.clone()));
-                    }
                 let stack = stack_of(pr, all);
+                // Onto what the bottom of the stack sits on. Its parent's branch would replay only
+                // this one's commits, and move nothing else.
+                if parent.is_some()
+                    && here
+                    && let Some(onto) = stack_base(&stack, all)
+                    && ui.small_button("Rebase stack").on_hover_text(format!("Rebase onto {onto}, moving {} with it", stack[..stack.len() - 1].join(", "))).clicked()
+                {
+                    cx.form(forms::rebase_stack_form(onto));
+                }
                 if here && stack.len() > 1 && ui.small_button("Push stack…").on_hover_text("Force-with-lease every branch below this one, all or none. For after a rebase moved them").clicked() {
                     cx.confirm("Push the stack", &format!("Push {} to {remote} with force-with-lease? It only overwrites what was last fetched from there, and either all of them go or none does.", stack.join(", ")), "Push stack", ops::push_stack(&remote, &stack));
                 }
@@ -816,6 +821,12 @@ impl LaunchpadView {
             }
         });
     }
+}
+
+/// What the bottom of a stack is based on: the branch the whole stack goes onto in a rebase.
+pub fn stack_base(stack: &[String], all: &[PullRequest]) -> Option<String> {
+    let bottom = stack.first()?;
+    all.iter().find(|x| !x.from_fork && x.head == *bottom).map(|x| x.base.clone()).filter(|b| !stack.contains(b))
 }
 
 /// The branches of a stack from its bottom up to this pull request, following each one's base to
@@ -1017,6 +1028,7 @@ mod tests {
         let all = vec![pr(1, "a", "main"), pr(2, "b", "a"), pr(3, "c", "b"), PullRequest { from_fork: true, ..pr(4, "main", "x") }];
         assert_eq!(stack_of(&all[2], &all), ["a", "b", "c"]);
         assert_eq!(stack_of(&all[0], &all), ["a"]);
+        assert_eq!(stack_base(&stack_of(&all[2], &all), &all).as_deref(), Some("main"), "what the bottom sits on, not the parent");
         let round = vec![pr(1, "a", "b"), pr(2, "b", "a")];
         assert_eq!(stack_of(&round[0], &round), ["b", "a"]);
     }

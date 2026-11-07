@@ -509,6 +509,8 @@ impl Sidebar {
                     let t = &refs.tags[*i];
                     let (rect, resp) = keyed_row(ui, ROW, false, &p, ("sidebar tag", &t.name));
                     paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &format!("◆ {}", t.name), prop(12.5), p.dim);
+                    // Painted, so this is how a screen reader or a test gets its name.
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.name.as_str()));
                     let resp = if t.subject.is_empty() { resp } else { resp.on_hover_text(&t.subject) };
                     if resp.clicked() {
                         cx.inspect(&t.sha);
@@ -533,6 +535,7 @@ impl Sidebar {
             for s in &list {
                 let (rect, resp) = row(ui, ROW, false, &p);
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &s.message, prop(12.5), p.dim);
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, s.message.as_str()));
                 let resp = resp.on_hover_text(format!("{} on {}", s.selector, s.branch));
                 if resp.clicked() {
                     cx.inspect(&s.sha);
@@ -555,6 +558,7 @@ impl Sidebar {
                 let (rect, resp) = row(ui, ROW, w.is_current, &p);
                 let name = w.branch.clone().unwrap_or_else(|| "detached".to_string());
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &name, prop(12.5), p.dim);
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name.as_str()));
                 let resp = resp.on_hover_text(&w.path);
                 if resp.double_clicked() && !w.is_current {
                     cx.out.push(crate::action::Action::OpenRepo(w.path.clone().into()));
@@ -604,6 +608,7 @@ impl Sidebar {
             for s in &list {
                 let (rect, resp) = row(ui, ROW, false, &p);
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &s.path, prop(12.5), p.dim);
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, s.path.as_str()));
                 if resp.on_hover_text(&s.url).clicked() {
                     cx.open(Tab::Tools(Box::default()));
                 }

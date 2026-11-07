@@ -1285,3 +1285,58 @@ fn everything_youre_in_works_from_a_repository_with_no_host_of_its_own() {
     click(&mut h, "Everything I'm in");
     wait_for_text(&mut h, "From elsewhere");
 }
+
+// ---- a stack of pull requests, clicked
+
+/// The user is on `two`, on top of `one`, on the old `main`, whose own `main` has since moved. Both
+/// are pushed. Pushes go straight to the bare repository, since this host only serves reads.
+fn stacked_user(f: &Fx) -> (String, String) {
+    run(&f.git, &f.root, &["remote", "set-url", "--push", "origin", "../bare.git"]);
+    for (branch, file) in [("one", "one.txt"), ("two", "two.txt")] {
+        f.in_user(&["switch", "-q", "-c", branch]);
+        std::fs::write(f.root.join(file), "x\n").unwrap();
+        f.in_user(&["add", "-A"]);
+        f.in_user(&["commit", "-q", "-m", branch]);
+    }
+    f.in_user(&["push", "-q", "origin", "one", "two"]);
+    let old = (f.in_user(&["rev-parse", "one"]), f.in_user(&["rev-parse", "two"]));
+    f.in_user(&["switch", "-q", "main"]);
+    std::fs::write(f.root.join("m.txt"), "m\n").unwrap();
+    f.in_user(&["add", "-A"]);
+    f.in_user(&["commit", "-q", "-m", "main moved"]);
+    f.in_user(&["switch", "-q", "two"]);
+    let mut top = gitea_pr(8, "two", "The top");
+    top["base"]["ref"] = json!("one");
+    f.host.lock().unwrap().prs = vec![gitea_pr(7, "one", "The bottom"), top];
+    old
+}
+
+#[test]
+fn rebase_stack_moves_the_whole_stack_onto_what_it_sits_on_and_push_stack_sends_it() {
+    let f = Fx::new();
+    let (one, two) = stacked_user(&f);
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    wait_for_label(&mut h, "Rebase stack");
+    click(&mut h, "Rebase stack");
+    wait_for_label(&mut h, "Rebase the current branch onto main");
+    wait_for_text(&mut h, "Push stack, from Launchpad, sends them all");
+    click(&mut h, "Rebase");
+    quiet(&mut h);
+    no_errors(&h);
+    let (new_one, new_two) = (f.in_user(&["rev-parse", "one"]), f.in_user(&["rev-parse", "two"]));
+    assert_ne!(new_two, two);
+    assert_ne!(new_one, one, "the branch below moved with it");
+    assert_eq!(f.in_user(&["rev-parse", "one~1"]), f.in_user(&["rev-parse", "main"]), "and it's on main");
+    assert_eq!(f.in_user(&["rev-parse", "two~1"]), new_one);
+
+    wait_for_label(&mut h, "Push stack…");
+    click(&mut h, "Push stack…");
+    wait_for_text(&mut h, "Push one, two to origin with force-with-lease");
+    click(&mut h, "Push stack");
+    quiet(&mut h);
+    no_errors(&h);
+    let at_bare = |r: &str| run(&f.git, f.root.parent().unwrap(), &["--git-dir=bare.git", "rev-parse", r]).trim().to_string();
+    assert_eq!(at_bare("refs/heads/one"), new_one);
+    assert_eq!(at_bare("refs/heads/two"), new_two);
+}
