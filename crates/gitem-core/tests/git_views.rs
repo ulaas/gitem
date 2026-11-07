@@ -759,3 +759,30 @@ fn a_confirm_preview_names_the_files_even_when_they_go_over_stdin() {
     assert!(preview.contains("number-0.txt") && preview.contains("and 1195 more"), "{}", &preview[..200.min(preview.len())]);
     assert!(preview.len() < 1000, "a question stays short: {}", preview.len());
 }
+
+#[test]
+fn a_line_in_a_file_with_edits_is_found_in_head() {
+    let d = tempfile::tempdir().unwrap();
+    let r = repo_with_file(d.path());
+    assert_eq!(r.lines_in_head("f.txt", 3, 3).unwrap(), Some((2, 2)), "a line was put in above it");
+    assert_eq!(r.lines_in_head("f.txt", 1, 1).unwrap(), None, "it is the new line");
+}
+
+fn repo_with_file(root: &std::path::Path) -> gitem_core::Repo {
+    let git = gitem_core::GitExe::discover(None).unwrap();
+    let run = |a: &[&str]| { git.run(Some(root), a).unwrap(); };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.name", "T"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "core.autocrlf", "false"]);
+    std::fs::write(root.join("f.txt"), "one
+two
+").unwrap();
+    run(&["add", "-A"]);
+    run(&["commit", "-q", "-m", "x"]);
+    std::fs::write(root.join("f.txt"), "new
+one
+two
+").unwrap();
+    gitem_core::Repo::open(git.clone(), root).unwrap()
+}

@@ -164,7 +164,10 @@ impl ReviewView {
                 self.base_typed = Some(Instant::now());
             }
             let busy = self.findings.busy();
-            if ui.add_enabled(!busy, egui::Button::new("Review with AI")).on_hover_text("Adds findings as threads").clicked() {
+            // On the base branch itself there's nothing between the two.
+            let nothing = self.files.get().is_some_and(|(f, _)| f.is_empty());
+            let why = "There are no changes since that base.";
+            if ui.add_enabled(!busy && !nothing, egui::Button::new("Review with AI")).on_hover_text("Adds findings as threads").on_disabled_hover_text(why).clicked() {
                 let (r, src, cfg) = (cx.repo.clone(), self.source(), cx.settings.ai.clone());
                 self.findings.spawn(ui.ctx(), move || -> Result<String, String> {
                     let diff = r.diff_for_ai(&src).map_err(|e| e.to_string())?;
@@ -176,7 +179,7 @@ impl ReviewView {
             if busy {
                 ui.add(spinner(14.0));
             }
-            if ui.button("Orient").on_hover_text("Ask AI for a sensible reading order").clicked() {
+            if ui.add_enabled(!nothing, egui::Button::new("Orient")).on_hover_text("Ask AI for a sensible reading order").on_disabled_hover_text(why).clicked() {
                 let src = self.source();
                 ai_tab(cx, "Reading order", move |r| {
                     let d = r.diff_for_ai(&src).map_err(|e| e.to_string())?;
@@ -185,13 +188,17 @@ impl ReviewView {
             }
             let open = self.saved.threads.iter().filter(|t| !t.dismissed).count();
             let agent = cx.settings.agent_command.clone();
-            if ui.add_enabled(open > 0 && !agent.trim().is_empty(), egui::Button::new(if open == 0 { "Hand notes to agent".to_string() } else { format!("Hand {} to agent", plural(open, "note", "notes")) })).clicked() {
+            if ui.add_enabled(open > 0 && !agent.trim().is_empty(), egui::Button::new(if open == 0 { "Hand notes to agent".to_string() } else { format!("Hand {} to agent", plural(open, "note", "notes")) })).on_disabled_hover_text(if open == 0 { "There are no open notes." } else { "Set an agent command in Settings." }).clicked() {
                 self.hand_off(cx, &agent);
             }
             if ui.button("New review").on_hover_text("Clear the checklist and threads").clicked() {
                 self.confirm_new = true;
             }
         });
+        if self.files.get().is_some_and(|(f, _)| f.is_empty()) && self.saved.threads.is_empty() {
+            ui.label(RichText::new("No changes to review").strong());
+            ui.label(RichText::new(format!("This branch has nothing that {} doesn't. Pick another base above.", self.saved.base)).color(p.dim));
+        }
         // Nothing to lose means nothing to ask. On its own row: this one is often full.
         let mut clear = self.confirm_new && self.saved.reviewed.is_empty() && self.saved.threads.is_empty();
         if self.confirm_new && !clear {

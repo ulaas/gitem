@@ -343,16 +343,16 @@ impl GraphView {
             }
             if !self.match_list.is_empty() || self.matches.get().is_some() {
                 ui.label(RichText::new(format!("{} of {}", if self.match_list.is_empty() { 0 } else { self.match_pos + 1 }, self.match_list.len())).color(p.dim));
-                if ui.small_button(icon::CARET_UP).on_hover_text("Previous match").clicked() && !self.match_list.is_empty() {
+                if small_icon_button(ui, icon::CARET_UP, "Previous match", "Shift+F3").clicked() && !self.match_list.is_empty() {
                     self.match_pos = (self.match_pos + self.match_list.len() - 1) % self.match_list.len();
                     self.scroll_to = Some(self.match_list[self.match_pos]);
                 }
-                if ui.small_button(icon::CARET_DOWN).on_hover_text("Next match").clicked() && !self.match_list.is_empty() {
+                if small_icon_button(ui, icon::CARET_DOWN, "Next match", "F3").clicked() && !self.match_list.is_empty() {
                     self.match_pos = (self.match_pos + 1) % self.match_list.len();
                     self.scroll_to = Some(self.match_list[self.match_pos]);
                 }
                 toggle(ui, &mut self.filter_to_matches, "Only matches", "Hide commits that don't match");
-                if ui.small_button(icon::X).on_hover_text("Clear search").clicked() {
+                if small_icon_button(ui, icon::X, "Clear search", "").clicked() {
                     self.query.clear();
                     self.matches = Task::default();
                     self.match_list.clear();
@@ -881,16 +881,16 @@ impl GraphView {
                         let by_key = self.menu_key && self.selected.last() == Some(&c.sha);
                         keyed_context_menu(&resp, by_key, |ui| {
                             self.row_menu(ui, cx, c, g);
-                                ui.separator();
-                                let folded = self.folded.contains(&r.column);
-                                if ui.button(if folded { "Unfold this lane" } else { "Fold this lane" }).clicked() {
-                                    self.fold_request.set(Some(Some(r.column)));
-                                    ui.close();
-                                }
-                                if !self.folded.is_empty() && ui.button("Unfold all lanes").clicked() {
-                                    self.fold_request.set(Some(None));
-                                    ui.close();
-                                }
+                            ui.separator();
+                            let folded = self.folded.contains(&r.column);
+                            if ui.button(if folded { "Unfold this lane" } else { "Fold this lane" }).clicked() {
+                                self.fold_request.set(Some(Some(r.column)));
+                                ui.close();
+                            }
+                            if !self.folded.is_empty() && ui.button("Unfold all lanes").clicked() {
+                                self.fold_request.set(Some(None));
+                                ui.close();
+                            }
                         });
                         // Drop a dragged ref on this commit.
                         if let Some(name) = resp.dnd_release_payload::<String>() {
@@ -944,16 +944,26 @@ impl GraphView {
             cx.form(forms::cherry_pick_form(shas));
             ui.close();
         }
-        // Branch-specific commands for refs on this commit.
-        for r in c.refs.iter().filter(|r| matches!(r.kind, RefKind::Branch | RefKind::Remote)) {
-            if let Some(b) = cx.data.branches().iter().find(|b| b.name == r.name).cloned() {
-                ui.menu_button(format!("Branch {}", r.name), |ui| menus::branch_menu(ui, cx, &b));
+        // Branch-specific commands for refs on this commit. A commit can have dozens, so
+        // past a few they go in a list of their own, or the menu outgrows the window.
+        let ref_entries = |ui: &mut Ui, cx: &mut Cx| {
+            for r in c.refs.iter().filter(|r| matches!(r.kind, RefKind::Branch | RefKind::Remote)) {
+                if let Some(b) = cx.data.branches().iter().find(|b| b.name == r.name).cloned() {
+                    ui.menu_button(format!("Branch {}", r.name), |ui| menus::branch_menu(ui, cx, &b));
+                }
             }
-        }
-        for r in c.refs.iter().filter(|r| r.kind == RefKind::Tag) {
-            if let Some(t) = cx.data.tags().iter().find(|t| t.name == r.name).cloned() {
-                ui.menu_button(format!("Tag {}", r.name), |ui| menus::tag_menu(ui, cx, &t));
+            for r in c.refs.iter().filter(|r| r.kind == RefKind::Tag) {
+                if let Some(t) = cx.data.tags().iter().find(|t| t.name == r.name).cloned() {
+                    ui.menu_button(format!("Tag {}", r.name), |ui| menus::tag_menu(ui, cx, &t));
+                }
             }
+        };
+        if c.refs.len() > 3 {
+            ui.menu_button(format!("{} here", plural(c.refs.len(), "ref", "refs")), |ui| {
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| ref_entries(ui, cx));
+            });
+        } else {
+            ref_entries(ui, cx);
         }
         if let Some(s) = cx.data.stashes().iter().find(|s| s.sha == c.sha).cloned() {
             ui.menu_button(format!("Stash {}", s.selector), |ui| menus::stash_menu(ui, cx, &s));

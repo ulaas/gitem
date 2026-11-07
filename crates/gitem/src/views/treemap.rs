@@ -23,6 +23,8 @@ enum Mode {
 
 #[derive(Default)]
 pub struct TreemapView {
+    by_folder: bool,
+    show_locks: bool,
     mode: Mode,
     loaded: Option<(u64, bool)>,
     files: Task<Vec<(String, u64)>>,
@@ -32,6 +34,12 @@ pub struct TreemapView {
 fn ext(path: &str) -> &str {
     let name = path.rsplit('/').next().unwrap_or(path);
     name.rsplit_once('.').map(|x| x.1).unwrap_or("(none)")
+}
+
+/// Generated, large, and rarely what anyone wants to see the size of.
+fn is_lockfile(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(name, "Cargo.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" | "go.sum" | "poetry.lock" | "composer.lock" | "Gemfile.lock" | "uv.lock" | "bun.lockb")
 }
 
 impl TreemapView {
@@ -58,6 +66,8 @@ impl TreemapView {
             ui.selectable_value(&mut self.mode, Mode::Size, "Files by size");
             ui.selectable_value(&mut self.mode, Mode::Activity, "Files by recent commits");
             ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter by path").desired_width(220.0));
+            toggle(ui, &mut self.by_folder, "By folder", "Colour files by top-level folder, not by type");
+            toggle(ui, &mut self.show_locks, "Lockfiles", "Include generated lockfiles, which are often the largest files and of little interest");
             if self.files.busy() {
                 ui.add(spinner(14.0));
             }
@@ -67,7 +77,9 @@ impl TreemapView {
         }
         let Some(all) = self.files.get() else { return };
         let q = self.filter.to_lowercase();
-        let mut items: Vec<&(String, u64)> = all.iter().filter(|(f, v)| *v > 0 && (q.is_empty() || f.to_lowercase().contains(&q))).collect();
+        let by_folder = self.by_folder;
+        let show_locks = self.show_locks;
+        let mut items: Vec<&(String, u64)> = all.iter().filter(|(f, v)| *v > 0 && (show_locks || !is_lockfile(f)) && (q.is_empty() || f.to_lowercase().contains(&q))).collect();
         items.sort_by_key(|x| std::cmp::Reverse(x.1));
         let hidden = items.len().saturating_sub(MAX_FILES);
         items.truncate(MAX_FILES);
@@ -78,13 +90,15 @@ impl TreemapView {
         }
         // Types in order of total weight; identity stays with the type name.
         let mut weight: HashMap<&str, u64> = HashMap::new();
-        for (f, v) in &items {
-            *weight.entry(ext(f)).or_default() += v;
+        let group = |f: &'_ str| -> String { if by_folder { f.split('/').next().filter(|_| f.contains('/')).unwrap_or("(top level)").to_string() } else { ext(f).to_string() } };
+        let groups: Vec<String> = items.iter().map(|(f, _)| group(f)).collect();
+        for (g, (_, v)) in groups.iter().zip(&items) {
+            *weight.entry(g.as_str()).or_default() += v;
         }
         let mut types: Vec<(&str, u64)> = weight.into_iter().collect();
         types.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         let kept: Vec<&str> = types.iter().take(MAX_TYPES).map(|x| x.0).collect();
-        let color_of = |f: &str| -> Color32 { kept.iter().position(|e| *e == ext(f)).map(|i| p.series[i]).unwrap_or(p.faint) };
+        let color_of = |f: &str| -> Color32 { let g = group(f); kept.iter().position(|e| *e == g).map(|i| p.series[i]).unwrap_or(p.faint) };
         let max = items.first().map(|x| x.1).unwrap_or(1).max(1) as f32;
 
         ui.horizontal_wrapped(|ui| {

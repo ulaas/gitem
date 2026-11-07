@@ -354,7 +354,8 @@ impl FileView {
 
     fn toolbar(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let pal = cx.pal.clone();
-        ui.horizontal(|ui| {
+        // Wraps, or what's at the end runs under the Details panel.
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.annot, Annot::Blame, "Blame");
             ui.selectable_value(&mut self.annot, Annot::Heatmap, "Heatmap");
             ui.selectable_value(&mut self.annot, Annot::Changes, "Changes");
@@ -364,7 +365,7 @@ impl FileView {
             if toggle(ui, &mut lens, "Lens", "Show recent-change summaries above symbols") {
                 self.code_lens = Some(lens);
             }
-            ui.menu_button("Blame options ▾", |ui| {
+            ui.menu_button("Blame options \u{E136}", |ui| {
                 ui.checkbox(&mut self.ignore_ws, "Ignore whitespace (-w)");
                 ui.checkbox(&mut self.moves, "Detect moved lines (-M)");
             });
@@ -412,10 +413,10 @@ impl FileView {
             if let Some((a, b)) = self.selected_range()
                 && ui.small_button(format!("Line history {}-{}", a + 1, b + 1)).clicked() {
                     let d = self.data.get();
-                    cx.open(self.line_history_tab(a as u32 + 1, b as u32 + 1, d));
+                    self.open_line_history(cx, a as u32 + 1, b as u32 + 1, d);
                 }
-            ui.menu_button("Compare ▾", |ui| self.compare_menu(ui, cx));
-            ui.menu_button("More ▾", |ui| menus::file_menu(ui, cx, &self.path, self.rev.as_deref()));
+            ui.menu_button("Compare \u{E136}", |ui| self.compare_menu(ui, cx));
+            ui.menu_button("More \u{E136}", |ui| menus::file_menu(ui, cx, &self.path, self.rev.as_deref()));
             if ui.small_button("Find").on_hover_text("Ctrl+F").clicked() || ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
                 self.find_open = !self.find_open;
             }
@@ -445,7 +446,7 @@ impl FileView {
                     r.request_focus();
                 }
                 ui.label(RichText::new(if self.find_hits.is_empty() { "No matches".to_string() } else { format!("{} of {}", self.find_pos + 1, self.find_hits.len()) }).color(pal.dim));
-                if ui.small_button("✖").clicked() {
+                if ui.small_button("\u{E4F6}").clicked() {
                     self.find_open = false;
                 }
             });
@@ -454,10 +455,25 @@ impl FileView {
 
     /// Line history for lines as numbered on screen. That's the revision shown, or for the
     /// working file HEAD, which edits not yet committed may have put out of step with it.
-    fn line_history_tab(&self, a: u32, b: u32, d: Option<&FileData>) -> Tab {
+    /// A file being edited has its own line numbers, and history follows the last commit's.
+    /// A line that only exists in the edits has none there, and that's said.
+    fn open_line_history(&self, cx: &mut Cx, a: u32, b: u32, d: Option<&FileData>) {
         let edited = self.rev.is_none() && d.is_some_and(|d| !d.changes.is_empty() || !d.deletions.is_empty());
-        let note = edited.then(|| "This file has uncommitted changes, so these line numbers may not match the last commit, which is what this follows.".to_string());
-        Tab::line_history_at(&self.path, a, b, self.rev.clone(), note)
+        if !edited {
+            cx.open(Tab::line_history_at(&self.path, a, b, self.rev.clone(), None));
+            return;
+        }
+        let (repo, path, rev) = (cx.repo.clone(), self.path.clone(), self.rev.clone());
+        cx.out.push(Action::Later(Box::new(move || {
+            let mapped = repo.lines_in_head(&path, a, b).map_err(|e| e.to_string())?;
+            Ok(Later::Tab(Box::new(move || match mapped {
+                Some((x, y)) => {
+                    let note = (x, y) != (a, b);
+                    Tab::line_history_at(&path, x, y, rev, note.then(|| format!("This file has uncommitted changes. Lines {a}-{b} here are lines {x}-{y} in the last commit, which is what this follows.")))
+                }
+                None => Tab::line_history_at(&path, a, b, rev, Some("These lines exist only in your uncommitted changes, so this follows the same numbers in the last commit, which may be other lines.".to_string())),
+            })))
+        })));
     }
 
     fn compare_menu(&self, ui: &mut Ui, cx: &mut Cx) {
@@ -572,7 +588,7 @@ impl FileView {
                         }
                         resp.context_menu(|ui| {
                             if ui.button("Line history of this block").clicked() {
-                                cx.open(self.line_history_tab(lens.line as u32 + 1, lens.end as u32, Some(d)));
+                                self.open_line_history(cx, lens.line as u32 + 1, lens.end as u32, Some(d));
                                 ui.close();
                             }
                             if ui.button("Open most recent commit").clicked() {
@@ -619,7 +635,9 @@ impl FileView {
                             paint_avatar(ui, pos2(gr.left() + 15.0, gr.center().y), 7.0, &b.author, &b.author_email, &pal, cx.settings.gravatar);
                             let date = util::relative_time(b.author_time, now);
                             let text = format!("{} · {}", b.author, date);
-                            paint_text(ui, Rect::from_min_size(gr.min + vec2(26.0, 0.0), vec2(gutter - 28.0, row_h)), &text, prop(font - 2.0), pal.dim);
+                            // The same person on the same day as the block above: no news, so quieter.
+                            let same = i.checked_sub(1).and_then(|at| d.blame.get(at)).is_some_and(|o: &BlameLine| o.author == b.author && util::relative_time(o.author_time, now) == date);
+                            paint_text(ui, Rect::from_min_size(gr.min + vec2(26.0, 0.0), vec2(gutter - 28.0, row_h)), &text, prop(font - 2.0), if same { pal.faint } else { pal.dim });
                         }
                     }
                     let gresp = ui.interact(gr, ui.id().with(("blame", i)), Sense::click());
@@ -711,7 +729,7 @@ impl FileView {
             let last = d.lines.len().saturating_sub(1);
             let (a, b) = self.selected_range().map(|(a, b)| (a.min(last), b.min(last))).unwrap_or((i, i));
             if ui.button(format!("Line history ({}-{})", a + 1, b + 1)).clicked() {
-                cx.open(self.line_history_tab(a as u32 + 1, b as u32 + 1, Some(d)));
+                self.open_line_history(cx, a as u32 + 1, b as u32 + 1, Some(d));
                 ui.close();
             }
             if ui.button("Copy selected lines").clicked() {

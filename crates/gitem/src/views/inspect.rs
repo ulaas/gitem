@@ -49,6 +49,8 @@ pub struct InspectPanel {
     /// When the selection last changed, and to what.
     last_change: Option<(String, Instant)>,
     moving: bool,
+    /// Past the first few refs, shown on request.
+    all_refs: bool,
 }
 
 fn load_details(repo: &gitem_core::Repo, sha: &str) -> Result<Details, String> {
@@ -149,7 +151,7 @@ impl InspectPanel {
                 cx.copy(c.sha.clone());
             }
             for par in &c.parents {
-                if ui.small_button(RichText::new(format!("↑ {}", gitem_core::util::prefix(par, 7))).monospace()).on_hover_text("Go to parent").clicked() {
+                if ui.small_button(RichText::new(format!("\u{E08E} {}", gitem_core::util::prefix(par, 7))).monospace()).on_hover_text("Go to parent").clicked() {
                     cx.inspect(par);
                 }
             }
@@ -159,12 +161,21 @@ impl InspectPanel {
                     cx.url(url);
                 }
             }
-            ui.menu_button("More ▾", |ui| menus::commit_menu(ui, cx, c));
+            ui.menu_button("More \u{E136}", |ui| menus::commit_menu(ui, cx, c));
+            if crate::chrome::icon_button(ui, crate::chrome::icon::GIT_BRANCH, "Check out this commit", "With a detached HEAD", false, &p).clicked() {
+                cx.confirm("Check out commit", &format!("Check out {} with a detached HEAD?", c.short()), "Check out", gitem_core::ops::checkout_detached(&c.sha).lossless());
+            }
+            if crate::chrome::icon_button(ui, crate::chrome::icon::ARROW_ELBOW_DOWN_RIGHT, "Cherry-pick this commit", "Apply it to the current branch", false, &p).clicked() {
+                cx.form(crate::forms::cherry_pick_form(vec![c.sha.clone()]));
+            }
+            if crate::chrome::icon_button(ui, crate::chrome::icon::ARROW_U_UP_LEFT, "Revert this commit", "Add a commit that undoes it", false, &p).clicked() {
+                cx.form(crate::forms::revert_form(c.sha.clone(), c.is_merge()));
+            }
         });
         match d.signature.status.as_str() {
-            "G" => chip(ui, &format!("✔ Signed by {}", d.signature.signer), p.good),
+            "G" => chip(ui, &format!("\u{E182} Signed by {}", d.signature.signer), p.good),
             "U" | "X" | "Y" => chip(ui, &format!("Signature from {} is untrusted or expired", d.signature.signer), p.warn),
-            "B" | "R" => chip(ui, "✖ Bad signature", p.danger),
+            "B" | "R" => chip(ui, "\u{E4F6} Bad signature", p.danger),
             "E" => chip(ui, &format!("Signed, but key {} is unavailable", d.signature.key), p.warn),
             _ => {}
         }
@@ -178,8 +189,10 @@ impl InspectPanel {
             linked_text(ui, &c.subject, &links, p.text);
         });
         if !c.body.is_empty() {
-            let links = forge::find_links(&c.body, &cx.settings.autolinks, forge_repo.as_ref());
-            linked_text(ui, &c.body, &links, p.dim);
+            // Hard wrapped for a terminal, it would read raggedly in a panel of any other width.
+            let body = util::unwrap_paragraphs(&c.body);
+            let links = forge::find_links(&body, &cx.settings.autolinks, forge_repo.as_ref());
+            linked_text(ui, &body, &links, p.dim);
         }
         if let Some(n) = &d.note {
             ui.add_space(4.0);
@@ -192,11 +205,18 @@ impl InspectPanel {
         // Refs on this commit.
         if !c.refs.is_empty() {
             ui.add_space(4.0);
+            // A commit with dozens of refs mustn't push its files out of sight.
+            const SHOWN: usize = 6;
+            let badges = crate::views::graph::badges_for(&c.refs);
+            let more = badges.len().saturating_sub(SHOWN);
             ui.horizontal_wrapped(|ui| {
-                for r in &c.refs {
+                for (r, _) in badges.iter().take(if self.all_refs { badges.len() } else { SHOWN }) {
                     let w = badge_width(ui, r);
                     let (rect, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
                     paint_badge(ui, rect.min, 18.0, r, &p);
+                }
+                if more > 0 && ui.small_button(if self.all_refs { "Fewer".to_string() } else { format!("+{more}") }).clicked() {
+                    self.all_refs = !self.all_refs;
                 }
             });
         }
@@ -216,7 +236,10 @@ impl InspectPanel {
                 Some(i) => format!("On {}, {}", plural(i.branches.len(), "branch", "branches"), plural(i.tags.len(), "tag", "tags")),
                 None => "Branches and tags with this commit".to_string(),
             };
-            if ui.selectable_label(self.show_refs, RichText::new(text).small().color(p.dim)).clicked() {
+            let caret = if self.show_refs { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
+            let r = ui.add(egui::Button::new(RichText::new(format!("{caret} {text}")).small().color(p.dim)).frame_when_inactive(false).small());
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text.as_str()));
+            if r.clicked() {
                 self.show_refs = !self.show_refs;
             }
             if self.show_refs && self.refs_info.busy() {
@@ -265,7 +288,7 @@ impl InspectPanel {
         let (add, del) = d.files.iter().fold((0u32, 0u32), |(a, b), f| (a + f.additions.unwrap_or(0), b + f.deletions.unwrap_or(0)));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} files changed", d.files.len())).strong());
+            ui.label(RichText::new(format!("{} changed", plural(d.files.len(), "file", "files"))).strong());
             ui.label(RichText::new(format!("+{add}")).color(p.add_fg).monospace());
             ui.label(RichText::new(format!("-{del}")).color(p.del_fg).monospace());
             if ui.small_button("Open all").clicked() {

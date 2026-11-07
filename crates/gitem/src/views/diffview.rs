@@ -398,10 +398,10 @@ impl DiffView {
             ui.selectable_value(&mut self.mode, Mode::Unified, "Unified");
             ui.separator();
             let label = match self.opts.ws {
-                WsMode::None => "Whitespace: show",
-                WsMode::All => "Whitespace: ignore all",
-                WsMode::Change => "Whitespace: ignore changes",
-                WsMode::Eol => "Whitespace: ignore at EOL",
+                WsMode::None => "Whitespace \u{E136}",
+                WsMode::All => "Whitespace: ignore all \u{E136}",
+                WsMode::Change => "Whitespace: ignore changes \u{E136}",
+                WsMode::Eol => "Whitespace: ignore at EOL \u{E136}",
             };
             ui.menu_button(label, |ui| {
                 for (w, t) in [(WsMode::None, "Show"), (WsMode::All, "Ignore all"), (WsMode::Change, "Ignore changes in amount"), (WsMode::Eol, "Ignore at end of line")] {
@@ -411,7 +411,7 @@ impl DiffView {
                     }
                 }
             });
-            ui.menu_button("Algorithm ▾", |ui| {
+            ui.menu_button("Algorithm \u{E136}", |ui| {
                 for (a, t) in [(DiffAlgo::Patience, "Patience"), (DiffAlgo::Histogram, "Histogram"), (DiffAlgo::Myers, "Myers"), (DiffAlgo::Minimal, "Minimal")] {
                     if ui.selectable_value(&mut self.opts.algo, a, t).clicked() {
                         reload = true;
@@ -425,10 +425,10 @@ impl DiffView {
                 reload |= ui.add(egui::DragValue::new(&mut self.opts.context).range(0..=200)).changed();
             }
             ui.separator();
-            if ui.small_button("▲").on_hover_text("Previous change (Alt+Up)").clicked() || ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp)) {
+            if small_icon_button(ui, "\u{E13C}", "Previous change", "Alt+Up").clicked() || ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp)) {
                 self.jump(-1);
             }
-            if ui.small_button("▼").on_hover_text("Next change (Alt+Down)").clicked() || ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown)) {
+            if small_icon_button(ui, "\u{E136}", "Next change", "Alt+Down").clicked() || ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown)) {
                 self.jump(1);
             }
             if let Some(path) = &self.path {
@@ -661,6 +661,8 @@ impl DiffView {
                         self.selected_lines.remove(&k);
                     } else {
                         self.selected_lines.insert(k);
+                        // Work has started here, which the next diff opened shouldn't replace.
+                        self.pinned = true;
                     }
                 }
             }

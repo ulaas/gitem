@@ -79,14 +79,17 @@ impl ReflogView {
             for i in range {
                 let e = shown[i];
                 let (rect, resp) = row(ui, 24.0, false, &p);
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, e.selector.as_str()));
                 let x = rect.left();
                 let cell = |a: f32, w: f32| egui::Rect::from_min_size(egui::pos2(x + a, rect.top()), egui::vec2(w, 24.0));
                 paint_text(ui, cell(6.0, 80.0), &e.selector, mono(11.5), p.faint);
                 paint_text(ui, cell(90.0, 66.0), gitem_core::util::prefix(&e.sha, 8), mono(11.5), p.dim);
-                paint_text(ui, cell(160.0, 110.0), &e.action, prop(12.0), p.series[6]);
+                paint_text(ui, cell(160.0, 110.0), &e.action, prop(12.0), p.series_text(6));
                 paint_text(ui, cell(274.0, (rect.width() - 400.0).max(60.0)), &e.message, prop(13.0), p.text);
                 paint_text(ui, cell(rect.width() - 120.0, 116.0), &time_label(e.date, cx.settings.date_relative), prop(12.0), p.dim);
-                if resp.clicked() {
+                if row_button(ui, &resp, crate::chrome::icon::ARROW_COUNTER_CLOCKWISE, "Restore: reset the current branch to here", false, &p) {
+                    cx.form(forms::reset_form(e.sha.clone()));
+                } else if resp.clicked() {
                     cx.inspect(&e.sha);
                 }
                 resp.context_menu(|ui| {
@@ -186,7 +189,7 @@ impl BisectView {
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Inspect").clicked() {
+                if ui.button("Show details").clicked() {
                     cx.inspect(sha);
                 }
                 if ui.button("Open changes").clicked() {
@@ -217,7 +220,7 @@ impl BisectView {
                 ui.label(RichText::new("Now testing").small().color(p.faint));
                 ui.label(RichText::new(&c.subject).strong());
                 ui.label(RichText::new(format!("{} · {} · {}", c.short(), c.author_name, time_label(c.commit_time, cx.settings.date_relative))).small().color(p.dim));
-                if ui.small_button("Inspect").clicked() {
+                if ui.small_button("Show details").clicked() {
                     cx.inspect(&c.sha);
                 }
             });
@@ -235,8 +238,8 @@ impl BisectView {
                     cx.run(ops::bisect_mark_commit(verdict, sha));
                 }
             };
-            mark(ui, egui::Button::new(RichText::new("✔ Good").color(crate::theme::ink_on(p.good))).fill(p.good), "good");
-            mark(ui, egui::Button::new(RichText::new("✖ Bad").color(crate::theme::ink_on(p.danger))).fill(p.danger), "bad");
+            mark(ui, egui::Button::new(RichText::new("\u{E182} Good").color(crate::theme::ink_on(p.good))).fill(p.good), "good");
+            mark(ui, egui::Button::new(RichText::new("\u{E4F6} Bad").color(crate::theme::ink_on(p.danger))).fill(p.danger), "bad");
             mark(ui, egui::Button::new("Skip"), "skip");
             if ui.button("End bisect").clicked() {
                 cx.run(ops::bisect_reset());

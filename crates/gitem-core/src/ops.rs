@@ -241,8 +241,21 @@ impl GitOp {
 
     /// What to say beyond "done", given what `run` returned.
     pub fn outcome_note(&self, outputs: &[GitOutput]) -> Option<String> {
-        self.fallback_note.clone().filter(|_| outputs.len() == self.steps.len())
+        self.fallback_note.clone().filter(|_| outputs.len() == self.steps.len()).or_else(|| {
+            // `[main 7e6d960] subject` is what a commit prints.
+            let is_commit = self.steps.last().and_then(|s| s.args.first()).is_some_and(|a| a == "commit");
+            outputs.last().filter(|_| is_commit).and_then(|o| commit_note(&o.text()))
+        })
     }
+}
+
+/// `7e6d960 on main`, from what `git commit` prints first.
+pub fn commit_note(printed: &str) -> Option<String> {
+    let inside = printed.lines().next()?.strip_prefix('[')?.split_once(']')?.0;
+    let mut words: Vec<&str> = inside.split_whitespace().collect();
+    let sha = words.pop()?;
+    let branch = words.first()?;
+    Some(format!("{sha} on {branch}"))
 }
 
 /// How long a write waits for another process's lock before giving up.

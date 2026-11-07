@@ -206,7 +206,9 @@ impl VisualView {
             let t = w0 + step * k;
             let x = x_of(t);
             painter.line_segment([pos2(x, plot.top()), pos2(x, bars.bottom())], Stroke::new(1.0, p.border.gamma_multiply(0.25)));
-            painter.text(pos2(x, plot.bottom() + 3.0), Align2::CENTER_TOP, tick_label(t, span_days), prop(11.0), p.faint);
+            // The ends stay inside, not half off the plot.
+            let align = if k == 0 { Align2::LEFT_TOP } else if k == ticks { Align2::RIGHT_TOP } else { Align2::CENTER_TOP };
+            painter.text(pos2(x, plot.bottom() + 3.0), align, tick_label(t, span_days), prop(11.0), p.faint);
         }
 
         // Bars: additions up, deletions down, from a shared baseline.
@@ -229,8 +231,9 @@ impl VisualView {
             }
             tallest_bar.remove(&pixel(x.time));
             let cx_x = x_of(x.time);
-            let a = x.additions as f32 / max_churn * (bars.height() / 2.0 - 2.0);
-            let d = x.deletions as f32 / max_churn * (bars.height() / 2.0 - 2.0);
+            // On a log scale, or one huge first commit would flatten all the others.
+            let scale = |n: u32| (n as f32 + 1.0).ln() / (max_churn + 1.0).ln() * (bars.height() / 2.0 - 2.0);
+            let (a, d) = (if x.additions > 0 { scale(x.additions) } else { 0.0 }, if x.deletions > 0 { scale(x.deletions) } else { 0.0 });
             if a > 0.0 {
                 painter.rect_filled(Rect::from_min_max(pos2(cx_x - bar_w / 2.0, baseline - a.max(1.0)), pos2(cx_x + bar_w / 2.0, baseline - 1.0)), 2.0, p.add_fg);
             }
@@ -238,7 +241,7 @@ impl VisualView {
                 painter.rect_filled(Rect::from_min_max(pos2(cx_x - bar_w / 2.0, baseline + 1.0), pos2(cx_x + bar_w / 2.0, baseline + d.max(1.0))), 2.0, p.del_fg);
             }
         }
-        painter.text(pos2(outer.left() + 20.0, baseline - 12.0), Align2::LEFT_CENTER, format!("+ lines added (max {max_churn:.0})"), prop(11.0), p.dim);
+        painter.text(pos2(outer.left() + 20.0, baseline - 12.0), Align2::LEFT_CENTER, format!("+ lines added, log scale (max {max_churn:.0})"), prop(11.0), p.dim);
         painter.text(pos2(outer.left() + 20.0, baseline + 12.0), Align2::LEFT_CENTER, "− lines removed", prop(11.0), p.dim);
 
         // Bubbles. Area, not radius, encodes churn. A surface ring keeps overlaps legible.

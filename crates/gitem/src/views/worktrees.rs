@@ -100,10 +100,10 @@ impl WorktreesView {
                                     chip(ui, &format!("{d} changed"), p.series[3]);
                                 }
                                 if *a > 0 {
-                                    chip(ui, &format!("↑{a}"), p.series[2]);
+                                    chip(ui, &format!("\u{E08E}{a}"), p.series[2]);
                                 }
                                 if *b > 0 {
-                                    chip(ui, &format!("↓{b}"), p.series[6]);
+                                    chip(ui, &format!("\u{E03E}{b}"), p.series[6]);
                                 }
                             }
                         });
@@ -112,7 +112,7 @@ impl WorktreesView {
                             if !w.is_current && w.prunable.is_none() && ui.small_button("Open").clicked() {
                                 cx.out.push(Action::OpenRepo(w.path.clone().into()));
                             }
-                            ui.menu_button("More ▾", |ui| menus::worktree_menu(ui, cx, &w));
+                            ui.menu_button("More \u{E136}", |ui| menus::worktree_menu(ui, cx, &w));
                         });
                     })
                     .response;

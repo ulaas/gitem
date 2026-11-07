@@ -248,7 +248,7 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             if item(ui, "Check out as local branch") {
                 cx.run(ops::checkout_remote(&name, &cx.data.remote_names()));
             }
-        } else if item(ui, "Switch to") {
+        } else if item(ui, "Check out") {
             cx.run(ops::checkout(&name));
         }
         if item(ui, "Merge into current…") {
@@ -303,35 +303,33 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             cx.open(Tab::search(&format!("ref:{rev}")));
         }
     });
-    if !b.is_current {
-        if item(ui, "Auto-rebase current onto this with AI…") {
-            let (n, r, cfg) = (rev.clone(), cx.repo.clone(), cx.settings.ai.clone());
-            let title = format!("Auto-rebase onto {name}");
-            let jobs = cx.data.jobs.clone();
-            cx.form(forms::FormDialog::new(title.clone(), "Start").info("Rebases the current branch, sending each conflict to your AI provider. It stops and leaves the rebase to you if the model is unsure, and also once it has resolved a commit's conflicts, so you can read the result before anything is committed from it. You can undo it afterwards, unless your uncommitted changes are in a file the undo has to change: then it stops and changes nothing.").check("unattended", "Don't stop for review: commit the model's answers and carry on", false).on_submit(move |v| {
-                let (n, mut r, cfg) = (n.clone(), r.clone(), cfg.clone());
-                let review = !v.on("unattended");
-                // Its steps are minutes apart, so nothing else in the app knows one is running.
-                if jobs.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-                    return Err("An auto-rebase is already running in this repository.".to_string());
+    if !b.is_current && item(ui, "Auto-rebase current onto this with AI…") {
+        let (n, r, cfg) = (rev.clone(), cx.repo.clone(), cx.settings.ai.clone());
+        let title = format!("Auto-rebase onto {name}");
+        let jobs = cx.data.jobs.clone();
+        cx.form(forms::FormDialog::new(title.clone(), "Start").info("Rebases the current branch, sending each conflict to your AI provider. It stops and leaves the rebase to you if the model is unsure, and also once it has resolved a commit's conflicts, so you can read the result before anything is committed from it. You can undo it afterwards, unless your uncommitted changes are in a file the undo has to change: then it stops and changes nothing.").check("unattended", "Don't stop for review: commit the model's answers and carry on", false).on_submit(move |v| {
+            let (n, mut r, cfg) = (n.clone(), r.clone(), cfg.clone());
+            let review = !v.on("unattended");
+            // Its steps are minutes apart, so nothing else in the app knows one is running.
+            if jobs.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                return Err("An auto-rebase is already running in this repository.".to_string());
+            }
+            let busy = crate::views::textview::JobGuard::new(jobs.clone());
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            r.git.cancel = Some(stop.clone());
+            let undo = crate::views::textview::UndoSlot::default();
+            let slot = undo.clone();
+            let job: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(move || {
+                let _busy = busy;
+                let key = gitem_core::cred::ai_key(cfg.provider.key_name());
+                let done = gitem_core::autorebase::run(&r, &n, &cfg.custom_instructions, review, &|s, u| gitem_core::ai::complete(&cfg, key.as_deref(), s, u)).map_err(|e| e.to_string())?;
+                if let Ok(mut u) = slot.lock() {
+                    *u = Some(gitem_core::autorebase::undo_op(&done));
                 }
-                let busy = crate::views::textview::JobGuard::new(jobs.clone());
-                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                r.git.cancel = Some(stop.clone());
-                let undo = crate::views::textview::UndoSlot::default();
-                let slot = undo.clone();
-                let job: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(move || {
-                    let _busy = busy;
-                    let key = gitem_core::cred::ai_key(cfg.provider.key_name());
-                    let done = gitem_core::autorebase::run(&r, &n, &cfg.custom_instructions, review, &|s, u| gitem_core::ai::complete(&cfg, key.as_deref(), s, u)).map_err(|e| e.to_string())?;
-                    if let Ok(mut u) = slot.lock() {
-                        *u = Some(gitem_core::autorebase::undo_op(&done));
-                    }
-                    Ok(done.describe(&n))
-                });
-                Ok(vec![Action::OpenTab(Tab::Text(Box::new(crate::views::textview::TextView::with_undo(&title, job, undo).stoppable(stop))))])
-            }));
-        }
+                Ok(done.describe(&n))
+            });
+            Ok(vec![Action::OpenTab(Tab::Text(Box::new(crate::views::textview::TextView::with_undo(&title, job, undo).stoppable(stop))))])
+        }));
     }
     if item(ui, "Explain with AI") {
         let (n, base) = (rev.clone(), cx.data.base_branch());

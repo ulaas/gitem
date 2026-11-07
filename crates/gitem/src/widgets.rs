@@ -319,8 +319,8 @@ pub fn status_color(s: FileStatus, p: &Palette) -> Color32 {
     match s {
         FileStatus::Added | FileStatus::Untracked => p.add_fg,
         FileStatus::Deleted => p.del_fg,
-        FileStatus::Modified | FileStatus::TypeChanged => p.series[3],
-        FileStatus::Renamed | FileStatus::Copied => p.series[6],
+        FileStatus::Modified | FileStatus::TypeChanged => p.series_text(3),
+        FileStatus::Renamed | FileStatus::Copied => p.series_text(6),
         FileStatus::Unmerged => p.warn,
         _ => p.dim,
     }
@@ -613,9 +613,14 @@ pub fn spinner(size: f32) -> impl egui::Widget {
     move |ui: &mut Ui| {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
         if ui.is_rect_visible(rect) {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000 / SPINNER_FPS));
             let color = ui.visuals().strong_text_color();
             let radius = rect.height() / 2.0 - 2.0;
+            // Motion turned off in Settings: a still ring says the same.
+            if ui.style().animation_time == 0.0 {
+                ui.painter().circle_stroke(rect.center(), radius, Stroke::new(1.5, color));
+                return resp;
+            }
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000 / SPINNER_FPS));
             let time = ui.input(|i| i.time);
             let start = time * std::f64::consts::TAU;
             let end = start + 240f64.to_radians() * ((time / 3.0).sin() * 0.5 + 0.75);
@@ -635,6 +640,13 @@ pub fn spinner_row(ui: &mut Ui, text: &str, p: &Palette) {
         ui.add(spinner(14.0));
         ui.label(RichText::new(text).color(p.dim));
     });
+}
+
+/// A small button showing a glyph, with a proper name for anyone who can't see that.
+pub fn small_icon_button(ui: &mut Ui, glyph: &str, name: &str, keys: &str) -> Response {
+    let r = ui.small_button(glyph);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    if keys.is_empty() { r.on_hover_text(name) } else { r.on_hover_text(format!("{name} ({keys})")) }
 }
 
 /// Compact toolbar toggle. It looks like something to press when it's off, too.

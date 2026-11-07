@@ -60,7 +60,7 @@ gitem looks for git in this order:
 | Review | Sessions with a file checklist, comment threads, AI findings, a reading-order suggestion, and handing open notes to an agent |
 | Auto-rebase | Rebase with AI conflict resolution that pauses when the model is unsure, with an undo that keeps uncommitted changes, and stops without changing anything if they're in a file it has to change |
 | Files view | A sidebar view of the working tree: folders first, change marks on files and the folders holding them, a filter, and a changed-only mode |
-| Changes list | Staged, unstaged, and conflicted files as a flat list or a tree, with folders you can close, and stage or unstage as one |
+| Changes | Files, diff and commit message on one screen. A click shows a file's diff beside the list, a double click or `Space` stages it, and `↑ ↓` walk the files. Staged, unstaged and conflicted files as a flat list or a tree, with folders you can close, and stage or unstage as one. In a pane too narrow for both, a click opens the diff in a tab, and any row's menu can too. During a rebase or similar, Continue and Abort take the commit button's place |
 | Themes | Seven dark and five light themes, with nineteen named accent colors or any custom color; named accents are tuned for dark and light, and tests check their contrast in every theme |
 | Command palette | `Ctrl+P`: commands, branches, and files in one search, with recent commands first. Start with `>` for commands, `@` for branches, `/` for files, or `:` for commits |
 | Window | Every window, helpers included, has the app's own titlebar, and the main one has an icon rail of views with tooltips, so it looks the same on every platform; an About box shows the commit a build came from (also `gitem --version`) |
@@ -228,3 +228,7 @@ Tests create temporary repositories. Every test binary starts with its own scrat
 - Moving and resizing the custom window were checked by hand-style mouse input on Windows only, not in the test suite. On other platforms window corners stay square, and cancelling kills only git itself, not what it started.
 - Native file-picker dialogs aren't automated. Every picker also has a text field.
 - Copilot CLI and OpenCode reading is tested against sample data. No real Copilot session was available, and the real OpenCode database had no tool calls in it.
+| Navigation | The rail has Home, Graph, Changes, Search and Launchpad, with everything else in its More list, whose last view gives way to the next so tabs don't pile up. Settings can put every view on the rail. `Ctrl+P` and the title bar's search field reach everything |
+| Small windows | Details gives way first, then the sidebar, and their toolbar buttons show them over the view. With many repositories open, tabs shrink, and those that don't fit go in a list. The Details panel only shows beside views that have commits |
+| Dialogs | They dim what's behind them and take its clicks, leaving the window's own controls and title bar working. Enter submits one from a one-line field. Red is kept for what can lose work, and only those won't answer to Enter |
+| Accessibility | Whatever has the keyboard gets its own outline. Settings has colour-blind safe diffs (blue and orange) and reduced motion. Zoom keys stay in step with the zoom setting |

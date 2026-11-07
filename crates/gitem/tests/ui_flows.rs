@@ -1254,8 +1254,8 @@ fn context_menus_work_on_graph_rows_and_sidebar_branches() {
     h.get_by_label("side").click_secondary();
     h.step();
     h.step();
-    pump_for_label(&mut h, "Switch to");
-    click(&mut h, "Switch to");
+    pump_for_label(&mut h, "Check out");
+    click(&mut h, "Check out");
     wait_for(&mut h, "switched", || f.git(&["branch", "--show-current"]).trim() == "side");
     no_errors(&h);
 }
@@ -2000,8 +2000,8 @@ fn a_bisect_mark_applies_to_the_commit_shown_however_often_it_is_clicked() {
     pump_for_label(&mut h, "Bisect in progress");
     wait_until_quiet(&mut h);
     // Two clicks before the first has run: the same as the worst double-click.
-    h.get_by_label("✔ Good").click();
-    h.get_by_label("✔ Good").click();
+    h.get_by_label("\u{E182} Good").click();
+    h.get_by_label("\u{E182} Good").click();
     h.step();
     h.step();
     let t = Instant::now();
@@ -3421,8 +3421,8 @@ fn open_composer(h: &mut Harness<GitemApp>) {
 
 /// Plans `path` as a new commit with this message, by the same clicks as a user.
 fn plan_commit(h: &mut Harness<GitemApp>, path_index: usize, message: &str) {
-    pump_for_any(h, "Add ▾");
-    click_nth(h, "Add ▾", path_index);
+    pump_for_any(h, "Add \u{E136}");
+    click_nth(h, "Add \u{E136}", path_index);
     pump_for_any(h, "New commit");
     // The toolbar's button comes first and the one in the menu after it.
     let n = h.query_all_by_label("New commit").count();
@@ -3609,7 +3609,7 @@ fn the_composer_refuses_to_commit_during_a_merge() {
     h.step();
     h.event(egui::Event::Text("one commit".into()));
     h.step();
-    h.query_all_by_label("Add ▾").next().unwrap().click();
+    h.query_all_by_label("Add \u{E136}").next().unwrap().click();
     h.step();
     h.step();
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Commit 1").click();
@@ -3911,7 +3911,7 @@ fn the_co_authors_menu_reads_history_once_while_open() {
     h.state_mut().repos[0].open_tab(Tab::changes());
     wait_until_quiet(&mut h);
     let before = git_commands_matching(&f, "user.email");
-    click(&mut h, "Co-authors ▾");
+    click(&mut h, "Co-authors \u{E136}");
     pump_for_label(&mut h, "Other Person <other@example.com>");
     for _ in 0..10 {
         h.step();
@@ -5520,7 +5520,7 @@ fn hiding_whitespace_takes_away_the_buttons_that_couldnt_apply() {
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("a.txt".into())));
     pump_for_label(&mut h, "Stage hunk");
-    h.get_by_label("Whitespace: show").click();
+    h.get_by_label("Whitespace \u{E136}").click();
     h.step();
     h.step();
     click(&mut h, "Ignore all");
@@ -5590,11 +5590,11 @@ fn the_first_jump_goes_to_the_first_conflict() {
     let mut h = harness(&f);
     open_merge(&mut h, "All ours");
     assert_eq!(merge_view_of(&h).unwrap().current_conflict(), None);
-    h.get_by_label(gitem::chrome::icon::CARET_DOWN).click();
+    h.get_by_label("Next conflict").click();
     h.step();
     h.step();
     assert_eq!(merge_view_of(&h).unwrap().current_conflict(), Some(0));
-    h.get_by_label(gitem::chrome::icon::CARET_DOWN).click();
+    h.get_by_label("Next conflict").click();
     h.step();
     h.step();
     assert_eq!(merge_view_of(&h).unwrap().current_conflict(), Some(1));
@@ -5986,7 +5986,7 @@ fn bisect_says_when_it_has_found_the_commit() {
     open_tab_now(&mut h, Tab::Bisect(Box::default()));
     pump_for_label(&mut h, "Bisect found the commit");
     pump_for_label(&mut h, "the bug");
-    assert!(h.query_by_label("✔ Good").is_none(), "nothing's left to mark");
+    assert!(h.query_by_label("\u{E182} Good").is_none(), "nothing's left to mark");
     assert!(h.query_by_label("Now testing").is_none());
     click(&mut h, "End bisect");
     wait_for(&mut h, "bisect ended", || !f.root.join(".git/BISECT_LOG").exists());
@@ -6008,10 +6008,10 @@ fn the_worktree_a_tab_is_open_on_cant_be_removed_from_it() {
     settle(&mut h);
     open_tab_now(&mut h, Tab::Worktrees(Box::default()));
     pump_for_label(&mut h, "open here");
-    let ups = h.query_all_by_label("More ▾").count();
+    let ups = h.query_all_by_label("More \u{E136}").count();
     assert_eq!(ups, 2);
     let current_is_second = h.get_by_label("open here").rect().top() > h.get_by_label("main worktree").rect().top();
-    h.query_all_by_label("More ▾").nth(usize::from(current_is_second)).unwrap().click();
+    h.query_all_by_label("More \u{E136}").nth(usize::from(current_is_second)).unwrap().click();
     h.step();
     h.step();
     pump_for_label(&mut h, "Copy path");
@@ -7095,4 +7095,252 @@ fn wrap_works_in_both_diff_layouts_and_keeps_the_hunk_actions() {
     wait_until_quiet(&mut h);
     click(&mut h, "Stage hunk");
     wait_for(&mut h, "the hunk to be staged", || f.git(&["status", "--short"]).contains("M  long.txt"));
+}
+
+/// HEAD that git can't make sense of: everything that reads history fails.
+fn break_head(f: &Fx) {
+    std::fs::write(f.root.join(".git/HEAD"), "this is not a ref\n").unwrap();
+}
+
+#[test]
+fn every_view_says_so_when_git_cant_read_the_repository() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("a.txt", "one\nTWO\nthree\nmore\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    break_head(&f);
+    h.state_mut().apply_action(&ctx, Action::Refresh);
+    wait_until_quiet(&mut h);
+    let mut silent = Vec::new();
+    for tab in all_tabs() {
+        let title = tab.title();
+        if matches!(tab, Tab::Settings(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Agents(_)) {
+            continue;
+        }
+        h.state_mut().repos[0].open_tab(tab);
+        wait_until_quiet(&mut h);
+        // The banner is enough for most, as it's there whichever view is in front. A view that
+        // read something and found it wanting should say so too, and these two have had to.
+        let boxes = error_boxes(&h);
+        if matches!(title.as_str(), "Contributors" | "Reflog") && boxes.is_empty() {
+            silent.push(title);
+        }
+    }
+    assert!(silent.is_empty(), "showing no error: {silent:?}");
+    assert!(h.query_by_label("Try again").is_some() || h.query_by_label_contains("can't read").is_some(), "the banner");
+}
+
+#[test]
+fn a_folder_that_has_gone_can_be_closed_from_the_banner() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().canonicalize().unwrap().join("moved-away");
+    std::fs::create_dir(&root).unwrap();
+    let git = real_git();
+    git.run(Some(&root), &["init", "-q", "-b", "main"]).unwrap();
+    let f = Fx::new();
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().open_repo(&ctx, &root, false));
+    wait_until_quiet(&mut h);
+    // Windows can refuse a folder rename while something watches inside it.
+    if std::fs::rename(&root, parent.path().join("elsewhere")).is_err() {
+        eprintln!("banner not shown: this system won't rename a watched folder");
+        let open = h.state().repos[1].repo.root.clone();
+        h.state_mut().apply_action(&ctx, Action::CloseRepo(open));
+    } else {
+        h.state_mut().apply_action(&ctx, Action::Refresh);
+        pump_for_label(&mut h, "Locate…");
+        assert_eq!(h.state().repos.len(), 2);
+        click(&mut h, "Close");
+    }
+    wait_until_quiet(&mut h);
+    assert_eq!(h.state().repos.len(), 1, "the tab went");
+}
+
+#[test]
+fn opening_a_missing_folder_offers_to_make_a_repository_there() {
+    let parent = tempfile::tempdir().unwrap();
+    let wanted = parent.path().join("new-project");
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::OpenRepo(wanted.clone()));
+    pump_for_label(&mut h, "Create repository here…");
+    click(&mut h, "Create repository here…");
+    pump_for_label(&mut h, "Initialize repository");
+    wait_until_quiet(&mut h);
+    click(&mut h, "Initialize");
+    let t = Instant::now();
+    while !wanted.join(".git").exists() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "no repository was made");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+#[test]
+fn a_folder_with_files_in_it_isnt_offered_that() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("work.txt"), "x").unwrap();
+    let full = format!("{} isn't a git repository:\nnope", d.path().display());
+    assert_eq!(gitem::app::folder_to_create(&full), None);
+    std::fs::remove_file(d.path().join("work.txt")).unwrap();
+    assert!(gitem::app::folder_to_create(&full).is_some());
+    assert_eq!(gitem::app::folder_to_create("Pull failed:\nwhatever"), None);
+}
+
+#[test]
+fn an_error_about_setup_leads_to_where_it_can_be_fixed() {
+    use gitem::app::{ErrorFix, explain_error};
+    assert_eq!(explain_error("No API key for OpenAI. Add one in Settings > AI.").map(|x| x.1), Some(ErrorFix::AiSettings));
+    assert_eq!(explain_error("Author identity unknown\n\n*** Please tell me who you are.").map(|x| x.1), Some(ErrorFix::Identity));
+}
+
+#[test]
+fn the_credentials_tab_doesnt_come_back_by_itself() {
+    assert!(Tab::Credentials(Box::default()).spec().is_none());
+    assert!(Tab::from_spec("credentials").is_none());
+    assert!(Tab::from_spec("reflog").is_some(), "others do");
+}
+
+#[test]
+fn an_amend_step_in_a_plan_can_be_changed_like_any_other() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::rebase(Some("HEAD~1".into())));
+    pump_for_label(&mut h, "Rebase 1 commit");
+    wait_until_quiet(&mut h);
+    for (_, t) in h.state_mut().repos[0].dock.iter_all_tabs_mut() {
+        if let Tab::Rebase(r) = t {
+            r.items[0] = gitem_core::rebase::TodoItem { action: gitem_core::rebase::RebaseAction::Other, sha: String::new(), text: "fixup -C abc1234 amend! one".to_string() };
+        }
+    }
+    wait_until_quiet(&mut h);
+    h.query(egui_kittest::kittest::by().role(egui::accesskit::Role::ComboBox).value("amend")).expect("an action box").click();
+    h.step();
+    click(&mut h, "drop");
+    wait_until_quiet(&mut h);
+    let item = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Rebase(r) = t { Some(r.items[0].clone()) } else { None }).unwrap();
+    assert_eq!(item, gitem_core::rebase::TodoItem { action: gitem_core::rebase::RebaseAction::Drop, sha: "abc1234".to_string(), text: "amend! one".to_string() });
+}
+
+#[test]
+fn config_marks_a_value_something_else_overrides() {
+    let f = Fx::new();
+    sample_history(&f);
+    // The test config has this at global level, and a local value goes on top.
+    f.git(&["config", "pull.rebase", "true"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Config(Box::default()));
+    pump_for_label(&mut h, "overridden");
+    // Editing is on the row under the pointer.
+    assert!(h.query_by_label("Edit").is_none());
+    let row = h.get_by_label("user.email").rect().center();
+    h.event(egui::Event::PointerMoved(row));
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Edit");
+}
+
+#[test]
+fn a_branch_folder_folds_away() {
+    let f = Fx::new();
+    sample_history(&f);
+    for b in ["team/one", "team/two", "team/three"] {
+        f.git(&["branch", b]);
+    }
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "team/one");
+    let chip = format!("{} team/ 3", gitem::chrome::icon::CARET_DOWN);
+    click(&mut h, &chip);
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("team/one").is_none());
+    assert!(h.query_by_label("main").is_some(), "only that folder");
+}
+
+#[test]
+fn the_toolbars_branch_menu_filters_and_lists_where_youve_been() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "alpha"]);
+    f.git(&["branch", "beta"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let menu = format!("{} main  {}", gitem::chrome::icon::GIT_BRANCH, gitem::chrome::icon::CARET_DOWN);
+    wait_until_quiet(&mut h);
+    h.query_all_by_label(&menu).next().unwrap().click();
+    h.step();
+    wait_until_quiet(&mut h);
+    // Each is also in the sidebar, behind this.
+    assert_eq!(h.query_all_by_label("beta").count(), 2);
+    h.event(egui::Event::Text("alp".into()));
+    h.step();
+    h.step();
+    assert_eq!(h.query_all_by_label("alpha").count(), 2);
+    assert_eq!(h.query_all_by_label("beta").count(), 1);
+}
+
+#[test]
+fn a_commit_says_what_it_made_and_can_be_taken_back_from_the_toolbar() {
+    let f = Fx::new();
+    two_changed_files(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    changes_with_message(&mut h, "from the box");
+    click(&mut h, "Stage all and commit 2 files");
+    wait_for(&mut h, "the commit", || f.subjects()[0] == "from the box");
+    wait_until_quiet(&mut h);
+    let short = f.git(&["rev-parse", "--short", "HEAD"]);
+    let name = format!("Undo commit {}", short.trim());
+    pump_for_label(&mut h, &name);
+    click(&mut h, &name);
+    pump_for_label(&mut h, "Undo commit");
+    click(&mut h, "Undo commit");
+    wait_for(&mut h, "the undo", || f.subjects()[0] != "from the box");
+}
+
+#[test]
+fn a_reflog_entry_has_its_restore_on_the_row() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Reflog(Box::default()));
+    wait_until_quiet(&mut h);
+    h.query_all_by_label("HEAD@{0}").next().expect("the latest entry").hover();
+    h.step();
+    h.step();
+    click(&mut h, "Restore: reset the current branch to here");
+    wait_until_quiet(&mut h);
+    assert!(h.query_all_by_label_contains("Reset").next().is_some(), "the form");
+    assert!(h.state().ops_idle(), "it asks how, first");
+}
+
+#[test]
+fn a_view_with_nothing_to_act_on_keeps_its_buttons_quiet() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    // On the base branch, there's nothing to review.
+    open_tab_now(&mut h, Tab::Review(Box::default()));
+    pump_for_label(&mut h, "No changes to review");
+    assert!(h.get_by_label("Review with AI").accesskit_node().is_disabled());
+    // With no rebase base picked, nothing to rebase.
+    open_tab_now(&mut h, Tab::rebase(None));
+    pump_for_label(&mut h, "Squash all into first");
+    assert!(h.get_by_label("Squash all into first").accesskit_node().is_disabled());
+    // With no host, no pull request can be made.
+    open_tab_now(&mut h, Tab::Launchpad(Box::default()));
+    pump_for_label(&mut h, "Create pull request");
+    assert!(h.query_all_by_label("Refresh").any(|n| n.accesskit_node().is_disabled()));
 }

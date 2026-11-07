@@ -430,10 +430,19 @@ impl SettingsView {
             g.row("Code font size", "", |ui| {
                 ui.add(egui::Slider::new(&mut s.editor_font_size, 9.0..=22.0).step_by(1.0).suffix(" pt"));
             });
-            g.row("Language", "Experimental and partial: the rail, some toolbar buttons, and some menu items.", |ui| {
-                let options: Vec<(String, &str)> = crate::i18n::LANGUAGES.iter().map(|(code, name)| (code.to_string(), *name)).collect();
-                segmented(ui, &mut s.language, &options, p);
-            });
+            g.switch(&mut s.colorblind_diff, "Colour-blind safe diffs", "Blue and orange in place of green and red.");
+            g.switch(&mut s.reduce_motion, "Reduce motion", "No spinning or animated transitions.");
+            g.switch(&mut s.rail_full, "All views on the rail", "Every view gets an icon of its own, in place of the More list.");
+            g.switch(&mut s.details_on_open, "Show details on opening the graph", "Opens the Details panel on the current commit.");
+            // Half-translated menus look broken, so this isn't offered until asked for.
+            let showing = s.show_experimental || s.language != gitem_core::settings::Settings::default().language;
+            g.switch(&mut s.show_experimental, "Show experimental settings", "");
+            if showing {
+                g.row("Language", "Experimental and partial: the rail, some toolbar buttons, and some menu items.", |ui| {
+                    let options: Vec<(String, &str)> = crate::i18n::LANGUAGES.iter().map(|(code, name)| (code.to_string(), *name)).collect();
+                    segmented(ui, &mut s.language, &options, p);
+                });
+            }
         });
         group(ui, "Commits", p, |g| {
             g.switch(&mut s.date_relative, "Relative dates", "\"3 hours ago\" instead of a date.");

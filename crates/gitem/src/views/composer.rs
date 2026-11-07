@@ -130,7 +130,7 @@ impl ComposerView {
         let unassigned: Vec<String> = changed.iter().filter(|f| !assigned.contains(*f)).cloned().collect();
 
         ui.horizontal(|ui| {
-            if ui.button("New commit").clicked() {
+            if ui.add_enabled(!changed.is_empty(), egui::Button::new("New commit")).on_disabled_hover_text("There are no changes to put in one.").clicked() {
                 self.groups.push(ComposedCommit { message: String::new(), files: Vec::new() });
             }
             let busy = self.suggest.busy();
@@ -217,13 +217,13 @@ impl ComposerView {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("Commit {}", i + 1)).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✖").on_hover_text("Remove this commit from the plan").clicked() {
+                            if ui.small_button("\u{E4F6}").on_hover_text("Remove this commit from the plan").clicked() {
                                 remove = Some(i);
                             }
-                            if i + 1 < n && ui.small_button("▼").clicked() {
+                            if i + 1 < n && ui.small_button("\u{E136}").clicked() {
                                 swap = Some((i, i + 1));
                             }
-                            if i > 0 && ui.small_button("▲").clicked() {
+                            if i > 0 && ui.small_button("\u{E13C}").clicked() {
                                 swap = Some((i, i - 1));
                             }
                         });
@@ -235,7 +235,7 @@ impl ComposerView {
                             if !changed.contains(&f) {
                                 ui.label(RichText::new("no changes now").small().color(p.faint));
                             }
-                            ui.menu_button("▾", |ui| {
+                            ui.menu_button("\u{E136}", |ui| {
                                 if ui.button("Remove from commit").clicked() {
                                     moves.push((f.clone(), None));
                                     ui.close();
@@ -272,7 +272,7 @@ impl ComposerView {
     fn file_item(&mut self, ui: &mut Ui, f: &str, n: usize) {
         ui.horizontal(|ui| {
             ui.add(egui::Label::new(RichText::new(f).monospace().small()).truncate());
-            ui.menu_button("Add ▾", |ui| {
+            ui.menu_button("Add \u{E136}", |ui| {
                 for k in 0..n {
                     if ui.button(format!("Commit {}", k + 1)).clicked() {
                         self.groups[k].files.push(f.to_string());

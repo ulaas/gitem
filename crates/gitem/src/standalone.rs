@@ -211,7 +211,7 @@ impl HelperApp {
         if !self.themed {
             self.themed = true;
             theme::install_fonts(&ctx);
-            theme::apply(&ctx, &self.pal, self.settings.ui_scale);
+            theme::apply(&ctx, &self.pal, self.settings.ui_scale, self.settings.reduce_motion);
         }
         self.auto_accept(&ctx);
         let p = self.pal.clone();

@@ -186,6 +186,10 @@ impl PatchesView {
             self.select(&id);
         }
         let Some(m) = self.selected.clone().and_then(|id| self.list.iter().find(|m| m.id == id).cloned()) else {
+            // Beside a list saying there are none, it would only say so twice.
+            if self.list.is_empty() {
+                return;
+            }
             empty_state(ui, "Select a patch", "Preview, apply, or share it.", &p);
             return;
         };

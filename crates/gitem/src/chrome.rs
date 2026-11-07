@@ -18,7 +18,7 @@ pub const TITLE_DRAG_ROOM: f32 = 28.0;
 pub const COMMAND_FIELD_WIDTH: f32 = 250.0;
 /// A repository's tab doesn't get narrower than this. Past that they go in a list.
 const MIN_REPO_TAB: f32 = 96.0;
-const RESIZE_EDGE: f32 = 4.0;
+const RESIZE_EDGE: f32 = 6.0;
 const RESIZE_CORNER: f32 = 10.0;
 const CLOSE_HOVER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
 
@@ -466,7 +466,8 @@ pub fn rail_bottom() -> &'static [RailItem] {
 
 /// One hue per rail group, drawn from the palette's fixed order.
 fn group_tint(group: usize, p: &Palette) -> Color32 {
-    p.series[[0, 2, 3, 6][group % 4]]
+    // These are graphics on the rail's background, which need 3:1.
+    crate::theme::readable(p.series[[0, 2, 3, 6][group % 4]], p.text, p.bg, 3.0)
 }
 
 fn rail_button(ui: &mut Ui, item: &RailItem, tint: Color32, active: bool, p: &Palette) -> Response {
@@ -609,6 +610,17 @@ mod tests {
         assert_eq!(alpha(0, 0), 0, "corner");
         assert_eq!(alpha(31, 31), 0, "corner");
         assert_eq!(alpha(16, 20), 255, "body");
+    }
+
+    #[test]
+    fn rail_icons_are_readable_in_every_theme() {
+        for t in gitem_core::settings::ThemeChoice::ALL {
+            let p = Palette::get(t);
+            for group in 0..4 {
+                let c = crate::theme::contrast(group_tint(group, &p), p.bg);
+                assert!(c >= 3.0, "{} group {group}: {c:.2}", t.name());
+            }
+        }
     }
 
     #[test]

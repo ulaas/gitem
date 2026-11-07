@@ -29,6 +29,8 @@ pub struct HomeView {
     summaries_for: Option<String>,
     workspace_idx: usize,
     scan_pick: Task<Option<std::path::PathBuf>>,
+    recent: Task<Vec<Commit>>,
+    recent_gen: Option<u64>,
 }
 
 impl HomeView {
@@ -67,10 +69,10 @@ impl HomeView {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(branch).strong().size(15.0));
                     if st.ahead > 0 {
-                        chip(ui, &format!("↑ {} to push", st.ahead), p.series[2]);
+                        chip(ui, &format!("\u{E08E} {} to push", st.ahead), p.outgoing());
                     }
                     if st.behind > 0 {
-                        chip(ui, &format!("↓ {} to pull", st.behind), p.series[6]);
+                        chip(ui, &format!("\u{E03E} {} to pull", st.behind), p.incoming());
                     }
                     if st.upstream.is_none() && st.branch.is_some() {
                         chip(ui, "not published", p.dim);
@@ -85,14 +87,16 @@ impl HomeView {
                 }
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Open changes").clicked() {
+                    if !st.is_clean() && ui.button("Changes").clicked() {
                         cx.open(Tab::changes());
                     }
-                    if ui.button("Commit graph").clicked() {
-                        cx.open(Tab::graph());
+                    let stashes = cx.data.stashes().len();
+                    if stashes > 0 {
+                        chip(ui, &plural(stashes, "stash", "stashes"), p.dim);
                     }
-                    if ui.button("Launchpad").clicked() {
-                        cx.open(Tab::Launchpad(Box::default()));
+                    let others = cx.data.worktrees().iter().filter(|w| !w.is_current).count();
+                    if others > 0 {
+                        chip(ui, &plural(others, "other worktree", "other worktrees"), p.dim);
                     }
                 });
             }
@@ -121,19 +125,57 @@ impl HomeView {
                         }),
                 );
             }
-            if ui.button("Review a pull request").clicked() {
+            // What leads nowhere isn't offered: no host means no pull requests.
+            if cx.forge().is_some() && ui.button("Pull requests").clicked() {
                 cx.open(Tab::Launchpad(Box::default()));
             }
-            if ui.button("Compare refs").clicked() {
+            let has_commits = cx.status().is_some_and(|s| !s.head_sha.is_empty());
+            if has_commits && ui.button("Compare refs").clicked() {
                 cx.open(Tab::Search(Box::new(crate::views::search::SearchView::compare("", ""))));
             }
-            if ui.button("Search commits").clicked() {
-                cx.open(Tab::Search(Box::default()));
-            }
-            if ui.button("Stash…").clicked() {
+            if cx.status().is_some_and(|s| !s.is_clean()) && ui.button("Stash…").clicked() {
                 cx.form(forms::stash_form(Vec::new()));
             }
         });
+        ui.add_space(2.0);
+        ui.label(RichText::new("Ctrl+P runs any command by name. F1 lists the keys.").small().color(p.dim));
+        self.recent_commits(ui, cx);
+    }
+
+    /// What's happened lately on this branch.
+    fn recent_commits(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        section(ui, "Recent commits", &p);
+        self.recent.poll();
+        if self.recent_gen != Some(cx.data.refs_gen) && !self.recent.busy() && cx.status().is_some_and(|s| !s.head_sha.is_empty()) {
+            self.recent_gen = Some(cx.data.refs_gen);
+            let r = cx.repo.clone();
+            self.recent.spawn(ui.ctx(), move || r.log(&LogQuery { revs: vec!["HEAD".to_string()], limit: 6, ..Default::default() }));
+        }
+        if let Some(e) = &self.recent.error {
+            error_box(ui, e, &p);
+            return;
+        }
+        let Some(list) = self.recent.get() else {
+            if cx.status().is_some_and(|s| s.head_sha.is_empty()) {
+                ui.label(RichText::new("No commits yet.").color(p.dim));
+            } else {
+                spinner_row(ui, "Reading history…", &p);
+            }
+            return;
+        };
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for c in list {
+            let (rect, resp) = row(ui, 22.0, false, &p);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, c.subject.as_str()));
+            paint_text(ui, egui::Rect::from_min_max(rect.min + egui::vec2(8.0, 0.0), egui::pos2(rect.right() - 90.0, rect.bottom())), &c.subject, prop(12.5), p.text);
+            paint_text(ui, egui::Rect::from_min_max(egui::pos2(rect.right() - 86.0, rect.top()), rect.max), &time_label(c.author_time, cx.settings.date_relative), prop(11.0), p.dim);
+            if resp.on_hover_text("Click to see its details").clicked() {
+                cx.open(Tab::graph());
+                cx.inspect(&c.sha);
+            }
+        }
+        ui.spacing_mut().item_spacing.y = 4.0;
     }
 
     fn right_column(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -152,14 +194,15 @@ impl HomeView {
         ui.spacing_mut().item_spacing.y = 0.0;
         for b in branches {
             let (rect, resp) = row(ui, 34.0, b.is_current, &p);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, b.name.as_str()));
             let name = if b.is_current { format!("● {}", b.name) } else { b.name.clone() };
             paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 2.0), egui::vec2(rect.width() - 110.0, 17.0)), &name, prop(13.0), p.text);
             paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 18.0), egui::vec2(rect.width() - 16.0, 14.0)), &format!("{} · {}", time_label(b.date, cx.settings.date_relative), b.subject), prop(11.0), p.dim);
             let track = match (b.ahead, b.behind) {
                 (0, 0) => String::new(),
-                (a, 0) => format!("↑{a}"),
-                (0, x) => format!("↓{x}"),
-                (a, x) => format!("↑{a} ↓{x}"),
+                (a, 0) => format!("\u{E08E}{a}"),
+                (0, x) => format!("\u{E03E}{x}"),
+                (a, x) => format!("\u{E08E}{a} \u{E03E}{x}"),
             };
             paint_text(ui, egui::Rect::from_min_size(egui::pos2(rect.right() - 90.0, rect.top() + 2.0), egui::vec2(86.0, 17.0)), &track, mono(11.0), p.dim);
             if resp.double_clicked() && !b.is_current {
@@ -285,7 +328,7 @@ impl HomeView {
                 paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 0.0), egui::vec2(200.0, 26.0)), &s.name, prop(13.0), p.text);
                 let detail = match &s.error {
                     Some(e) => e.clone(),
-                    None => format!("{} · {} changed · ↑{} ↓{}", s.branch, s.changes, s.ahead, s.behind),
+                    None => format!("{} · {} changed · \u{E08E}{} \u{E03E}{}", s.branch, s.changes, s.ahead, s.behind),
                 };
                 paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(212.0, 0.0), egui::vec2(rect.width() - 216.0, 26.0)), &detail, prop(12.0), if s.error.is_some() { p.danger } else { p.dim });
                 let resp = resp.on_hover_text("Click to open. Right-click to remove it from this workspace.");

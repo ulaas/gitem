@@ -6,6 +6,8 @@ use egui::{RichText, Sense, Ui, pos2, vec2};
 use gitem_core::model::*;
 use gitem_core::ops;
 
+use std::collections::HashSet;
+
 use crate::action::Cx;
 use crate::data::Refs;
 use crate::forms;
@@ -15,6 +17,8 @@ use crate::views::Tab;
 use crate::widgets::*;
 
 pub struct Sidebar {
+    /// Branch folders folded away.
+    closed_folders: HashSet<String>,
     filter: String,
     commits: Task<Vec<Commit>>,
     commits_gen: Option<u64>,
@@ -35,6 +39,18 @@ pub struct Sidebar {
 
 /// What's listed, by position in the refs. Worked out when the refs, the filter or what's
 /// open changes, not per frame: this is what thousands of refs cost.
+/// Folders in branch names that hold enough branches to be worth folding.
+fn branch_folders(branches: &[Branch]) -> Vec<(String, usize)> {
+    const AT_LEAST: usize = 3;
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for b in branches.iter().filter(|b| !b.is_remote) {
+        if let Some((top, _)) = b.name.split_once('/') {
+            *counts.entry(top).or_default() += 1;
+        }
+    }
+    counts.into_iter().filter(|(_, n)| *n >= AT_LEAST).map(|(k, n)| (k.to_string(), n)).collect()
+}
+
 struct Lists {
     /// What the positions below are positions in. Kept, and compared by identity, since not
     /// every change to it bumps `refs_gen`: adding a remote doesn't.
@@ -50,7 +66,7 @@ struct Lists {
 
 impl Default for Sidebar {
     fn default() -> Self {
-        Self { filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None }
+        Self { closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None }
     }
 }
 
@@ -147,7 +163,7 @@ impl Sidebar {
         let needle = self.filter.to_lowercase();
         let hit = |s: &str| needle.is_empty() || s.to_lowercase().contains(&needle);
         let opened = |of: &[usize]| -> Vec<usize> { of.iter().enumerate().filter(|(_, i)| self.is_open(&refs.branches[**i])).map(|(at, _)| at).collect() };
-        let branches: Vec<usize> = refs.branches.iter().enumerate().filter(|(_, b)| !b.is_remote && hit(&b.name)).map(|(i, _)| i).collect();
+        let branches: Vec<usize> = refs.branches.iter().enumerate().filter(|(_, b)| !b.is_remote && hit(&b.name) && !b.name.split_once('/').is_some_and(|(top, _)| self.closed_folders.contains(top))).map(|(i, _)| i).collect();
         let open_branches = opened(&branches);
         let remotes = refs.remotes.iter().map(|r| {
             let prefix = format!("{}/", r.name);
@@ -218,6 +234,23 @@ impl Sidebar {
         let Some(lists) = self.lists.take() else { return };
         let refs = lists.refs.clone();
         let action = section(ui, "sb-branches", crate::chrome::icon::GIT_BRANCH, p.series[0], "Branches", &lists.branches.len().to_string(), true, &[(crate::chrome::icon::PLUS, "New branch")], &p, |ui| {
+            // Hundreds of `team/...` branches mustn't push everything else out of reach.
+            let folders = branch_folders(&refs.branches);
+            if !folders.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 2.0);
+                    for (name, n) in folders {
+                        let open = !self.closed_folders.contains(&name);
+                        let caret = if open { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
+                        if ui.small_button(format!("{caret} {name}/ {n}")).on_hover_text(if open { "Hide the branches in this folder" } else { "Show the branches in this folder" }).clicked() {
+                            if !self.closed_folders.remove(&name) {
+                                self.closed_folders.insert(name);
+                            }
+                            self.expanded_gen += 1;
+                        }
+                    }
+                });
+            }
             self.branch_list(ui, cx, &refs, &lists.branches, &lists.open_branches, "");
         });
         self.lists = Some(lists);
@@ -234,12 +267,12 @@ impl Sidebar {
         // Any branch opens to its commits. Ones with something incoming start open.
         let open = self.is_open(b);
         {
-            let hit = egui::Rect::from_min_size(rect.min, vec2(16.0, ROW));
+            let hit = egui::Rect::from_min_size(rect.min, vec2(24.0, ROW));
             let caret = ui.interact(hit, resp.id.with("expand"), Sense::click());
             let name = format!("{} {}", if open { "Collapse" } else { "Expand" }, b.name);
             caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
             let glyph = if open { crate::chrome::icon::CARET_DOWN } else { crate::chrome::icon::CARET_RIGHT };
-            ui.painter().text(hit.center(), egui::Align2::CENTER_CENTER, glyph, prop(11.0), if caret.hovered() { p.text } else { p.faint });
+            ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::CENTER_CENTER, glyph, prop(11.0), if caret.hovered() { p.text } else { p.faint });
             if caret.clicked() {
                 self.expanded.insert(b.name.clone(), !open);
                 self.expanded_gen += 1;
@@ -249,10 +282,10 @@ impl Sidebar {
         let mut right = rect.right() - 4.0;
         // Incoming comes last, at the edge, so it's the easiest to spot.
         if b.behind > 0 {
-            right = count_pill(ui, right, rect.center().y, &format!("↓{}", b.behind), p.incoming());
+            right = count_pill(ui, right, rect.center().y, &format!("\u{E03E}{}", b.behind), p.incoming());
         }
         if b.ahead > 0 {
-            right = count_pill(ui, right, rect.center().y, &format!("↑{}", b.ahead), p.outgoing());
+            right = count_pill(ui, right, rect.center().y, &format!("\u{E08E}{}", b.ahead), p.outgoing());
         }
         if b.upstream_gone {
             let g = ui.painter().layout_no_wrap("gone".to_string(), prop(10.5), p.warn);
@@ -261,9 +294,9 @@ impl Sidebar {
             right -= 4.0;
         }
         if b.worktree.is_some() && !b.is_current {
-            let g = ui.painter().layout_no_wrap("wt".to_string(), prop(10.5), p.series[6]);
+            let g = ui.painter().layout_no_wrap("wt".to_string(), prop(10.5), p.series_text(6));
             right -= g.size().x;
-            ui.painter().galley(pos2(right, rect.center().y - g.size().y / 2.0), g, p.series[6]);
+            ui.painter().galley(pos2(right, rect.center().y - g.size().y / 2.0), g, p.series_text(6));
             right -= 4.0;
         }
         paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), pos2(right, rect.bottom())), label, prop(12.5), text_color);

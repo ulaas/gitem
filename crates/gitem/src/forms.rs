@@ -633,7 +633,19 @@ pub fn clone_form() -> FormDialog {
 }
 
 pub fn init_form() -> FormDialog {
-    FormDialog::new("Initialize repository", "Initialize").path("path", "Folder", "", true).text("branch", "Initial branch", "main").on_submit(|v| {
+    init_form_at("")
+}
+
+/// Git's name and email, for every repository on this machine.
+pub fn identity_form() -> FormDialog {
+    FormDialog::new("Your name and email", "Save").info("Git puts these on every commit, and they're public once pushed. This sets them for all your repositories.").text("name", "Name", "").text("email", "Email", "").on_submit(|v| {
+        let (name, email) = (required(v, "name", "A name")?, required(v, "email", "An email")?);
+        Ok(vec![Action::Run(ops::config_set("user.name", &name, "global")), Action::Run(ops::config_set("user.email", &email, "global"))])
+    })
+}
+
+pub fn init_form_at(folder: &str) -> FormDialog {
+    FormDialog::new("Initialize repository", "Initialize").path("path", "Folder", folder, true).text("branch", "Initial branch", "main").on_submit(|v| {
         let p = required(v, "path", "A folder")?;
         Ok(vec![Action::RunGlobal { op: ops::init_repo(&p, v.opt("branch").as_deref()), open_after: Some(p.into()) }])
     })

@@ -157,6 +157,14 @@ pub fn merge_plan(generated: &str, plan: &str) -> String {
     out
 }
 
+/// The commit and subject in a raw `fixup -C` or `fixup -c` line, which is what an `amend!`
+/// commit is in a plan.
+pub fn parse_amend(text: &str) -> Option<(String, String)> {
+    let rest = text.strip_prefix("fixup -C ").or_else(|| text.strip_prefix("fixup -c "))?;
+    let (sha, subject) = rest.split_once(' ').unwrap_or((rest, ""));
+    Some((sha.to_string(), subject.to_string()))
+}
+
 /// Which commit a `fixup!`, `squash!` or `amend!` subject means, among the ones before it.
 /// In git's order: the exact subject, then a commit id, and only then a subject that starts
 /// the same way, so `fix parser` isn't lost to an earlier `fix parser bug in lexer`.

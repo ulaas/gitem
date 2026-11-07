@@ -745,11 +745,11 @@ impl ChangesView {
             ui.checkbox(&mut self.signoff, "Sign-off");
             ui.checkbox(&mut self.sign, "GPG/SSH sign");
             ui.checkbox(&mut self.no_verify, "Skip hooks");
-            ui.menu_button("Author ▾", |ui| {
+            ui.menu_button("Author \u{E136}", |ui| {
                 ui.label("Override author (Name <email>)");
                 ui.add(crate::widgets::input(&mut self.author));
             });
-            ui.menu_button("Co-authors ▾", |ui| {
+            ui.menu_button("Co-authors \u{E136}", |ui| {
                 ui.set_max_height(280.0);
                 self.people.poll();
                 // Walks the whole history, so never on a frame, and only when it can have changed.

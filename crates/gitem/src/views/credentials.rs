@@ -22,6 +22,7 @@ enum Page {
 
 #[derive(Default)]
 pub struct CredentialsView {
+    show_names: bool,
     page: Page,
     entries: Vec<(String, String)>,
     revealed: Option<(String, String)>,
@@ -92,7 +93,18 @@ fn generate_key_form(helper: Option<std::path::PathBuf>) -> FormDialog {
         })
 }
 
+/// Enough to tell two names apart.
+fn mask_name(name: &str) -> String {
+    let first = name.chars().next().unwrap_or('?');
+    format!("{first}\u{2026}")
+}
+
 impl CredentialsView {
+    /// On its commit signing page, for screenshots.
+    pub fn on_signing() -> Self {
+        Self { page: Page::Signing, ..Self::default() }
+    }
+
     pub fn key(&self) -> String {
         "credentials".into()
     }
@@ -165,6 +177,7 @@ impl CredentialsView {
             if ui.button("Refresh").clicked() {
                 self.loaded = false;
             }
+            toggle(ui, &mut self.show_names, "Show usernames", "They're partly hidden until asked for, in case this screen is being shared");
         });
         ui.add_space(6.0);
         let groups: [(&str, &str, &str); 4] = [("API tokens", PREFIX_FORGE, "Tokens for hosts and issue trackers"), ("Git HTTPS credentials", PREFIX_GIT, "Served by gitem's credential helper"), ("AI keys", cred::PREFIX_AI, "Set these in Settings > AI"), ("Git Credential Manager", "git:", "Stored by another helper; shown so you can remove stale entries")];
@@ -179,7 +192,8 @@ impl CredentialsView {
                     let name = target.strip_prefix(prefix).unwrap_or(target);
                     ui.add(egui::Label::new(RichText::new(name).monospace()).truncate());
                     if !user.is_empty() {
-                        ui.label(RichText::new(user).small().color(p.dim));
+                        // Screen shares happen. A name shows when asked for.
+                        ui.label(RichText::new(if self.show_names { user.clone() } else { mask_name(user) }).small().color(p.dim));
                     }
                     let is_rev = self.revealed.as_ref().is_some_and(|(t, _)| t == target);
                     if is_rev {
@@ -412,7 +426,7 @@ impl CredentialsView {
                 }));
             }
         });
-        ui.label(RichText::new("Signing status appears on each commit in the Inspect panel.").small().color(p.faint));
+        ui.label(RichText::new("Signing status appears on each commit in the Details panel.").small().color(p.faint));
         section(ui, "SSH allowed signers", &p);
         ui.label(RichText::new("Whose SSH signatures to trust, one per line: email, then the public key.").small().color(p.faint));
         let path = configured.clone().map(std::path::PathBuf::from).unwrap_or_else(|| cred::ssh_dir().join("allowed_signers"));

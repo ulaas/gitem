@@ -115,6 +115,10 @@ pub struct Settings {
     pub rail_full: bool,
     /// No moving spinners or animated transitions.
     pub reduce_motion: bool,
+    /// Blue and orange diffs in place of green and red.
+    pub colorblind_diff: bool,
+    /// Settings that aren't finished, such as the language.
+    pub show_experimental: bool,
     /// A named accent, "#rrggbb", or empty for the theme's own.
     pub accent: String,
     pub ui_scale: f32,
@@ -227,6 +231,8 @@ impl Default for Settings {
             details_on_open: true,
             rail_full: false,
             reduce_motion: false,
+            colorblind_diff: false,
+            show_experimental: false,
             accent: String::new(),
             ui_scale: 1.0,
             editor_font_size: 13.0,

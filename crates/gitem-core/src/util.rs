@@ -119,6 +119,49 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
 }
 
 /// At most `n` bytes of `s`, cut on a character boundary (names can be non-ASCII).
+/// A commit message's paragraphs on one line each, as they were before being wrapped for a
+/// terminal. Lists, indented text and trailers keep their lines.
+pub fn unwrap_paragraphs(text: &str) -> String {
+    let keeps_its_line = |l: &str| {
+        let t = l.trim_start();
+        l.starts_with([' ', '\t']) || t.starts_with(['-', '*', '+', '#', '>', '|']) || t.chars().next().is_some_and(|c| c.is_ascii_digit()) || (t.split_once(':').is_some_and(|(k, _)| !k.contains(' ') && !k.is_empty()) && t.contains(": "))
+    };
+    let mut out = String::new();
+    let mut previous_joins = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            out.push_str("\n\n");
+            previous_joins = false;
+            continue;
+        }
+        if keeps_its_line(line) {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(line);
+            out.push('\n');
+            previous_joins = false;
+            continue;
+        }
+        if previous_joins {
+            out.push(' ');
+        }
+        out.push_str(line.trim_end());
+        previous_joins = true;
+    }
+    let tidy = out.replace("\n\n\n", "\n\n");
+    tidy.trim_end().to_string()
+}
+
+#[cfg(test)]
+#[test]
+fn a_wrapped_paragraph_joins_and_a_list_does_not() {
+    assert_eq!(unwrap_paragraphs("one\ntwo\n\nthree"), "one two\n\nthree");
+    assert_eq!(unwrap_paragraphs("intro\n- a\n- b"), "intro\n- a\n- b");
+    assert_eq!(unwrap_paragraphs("text\n\nSigned-off-by: X <x@y>\nCo-authored-by: Y <y@z>"), "text\n\nSigned-off-by: X <x@y>\nCo-authored-by: Y <y@z>");
+    assert_eq!(unwrap_paragraphs("code:\n    keep\n    this"), "code:\n    keep\n    this");
+}
+
 /// "1 file", "2 files", for a word that takes an s.
 pub fn count_of(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })

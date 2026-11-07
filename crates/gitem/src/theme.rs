@@ -246,6 +246,22 @@ impl Palette {
         }
     }
 
+    /// A series colour for text and icons on a panel, where it has to be read and not just seen.
+    pub fn series_text(&self, i: usize) -> Color32 {
+        readable(self.series[i % self.series.len()], self.text, self.panel, 4.5)
+    }
+
+    /// Blue and orange in place of green and red in diffs, for anyone who can't tell those
+    /// apart. Red-green is the common kind, and these stay distinct under it.
+    pub fn colorblind(self, on: bool) -> Self {
+        if !on {
+            return self;
+        }
+        let (add, del) = if self.dark { (hex(0x5aa9e6), hex(0xf0a13c)) } else { (hex(0x1b6fb8), hex(0xb35f00)) };
+        let tint = |c: Color32, a: u8| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
+        Self { add_fg: add, add_bg: tint(add, 40), add_word: tint(add, 110), del_fg: del, del_bg: tint(del, 40), del_word: tint(del, 110), ..self }
+    }
+
     /// Commits to pull: the same green wherever they appear.
     pub fn incoming(&self) -> Color32 {
         self.series[2]
@@ -282,7 +298,7 @@ impl Palette {
 /// names in commits and paths render. Missing files are skipped.
 pub fn install_fonts(ctx: &egui::Context) {
     #[cfg(windows)]
-    const CANDIDATES: &[&str] = &["C:/Windows/Fonts/seguisym.ttf", "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/malgun.ttf"];
+    const CANDIDATES: &[&str] = &["C:/Windows/Fonts/seguisym.ttf", "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/YuGothM.ttc", "C:/Windows/Fonts/malgun.ttf"];
     #[cfg(target_os = "macos")]
     const CANDIDATES: &[&str] = &["/System/Library/Fonts/Apple Symbols.ttf", "/System/Library/Fonts/Helvetica.ttc", "/System/Library/Fonts/PingFang.ttc"];
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -298,6 +314,14 @@ pub fn install_fonts(ctx: &egui::Context) {
                 fonts.families.entry(family).or_default().push(name.clone());
             }
         }
+    }
+    // The bundled face is a light weight, thin at these sizes. The system's reads better.
+    #[cfg(windows)]
+    if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional)
+        && let Some(at) = list.iter().position(|f| f == "system:C:/Windows/Fonts/segoeui.ttf")
+    {
+        let face = list.remove(at);
+        list.insert(0, face);
     }
     ctx.set_fonts(fonts);
 }
@@ -359,7 +383,7 @@ pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
     s
 }
 
-pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
+pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32, reduce_motion: bool) {
     let mut v = if p.dark { Visuals::dark() } else { Visuals::light() };
     v.panel_fill = p.panel;
     v.window_fill = p.panel;
@@ -408,6 +432,11 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(7.0, 3.0);
     style.spacing.interact_size.y = 22.0;
+    // Small things are fiddly with a mouse. Their targets reach further than they show.
+    style.interaction.interact_radius = 6.0;
+    if reduce_motion {
+        style.animation_time = 0.0;
+    }
     style.spacing.scroll.bar_width = 8.0;
     style.spacing.scroll.floating = true;
     style.text_styles = [
@@ -426,6 +455,28 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn series_colours_used_as_text_can_be_read_in_every_theme() {
+        for t in ThemeChoice::ALL {
+            let p = Palette::get(t);
+            for i in 0..p.series.len() {
+                let c = contrast(p.series_text(i), p.panel);
+                assert!(c >= 4.5, "{} series {i}: {c:.2}", t.name());
+            }
+        }
+    }
+
+    #[test]
+    fn the_colour_blind_palette_is_readable_and_has_no_red_or_green() {
+        for t in ThemeChoice::ALL {
+            let p = Palette::get(t).colorblind(true);
+            assert!(contrast(p.add_fg, p.panel) >= 3.0, "{} add", t.name());
+            assert!(contrast(p.del_fg, p.panel) >= 3.0, "{} del", t.name());
+            assert!(p.add_fg.b() > p.add_fg.g() && p.add_fg.g() > p.add_fg.r(), "{} add is blue", t.name());
+            assert!(p.del_fg.r() > p.del_fg.g() && p.del_fg.g() > p.del_fg.b(), "{} del is orange", t.name());
+        }
+    }
 
     #[test]
     fn the_operation_banner_is_opaque_and_readable_in_every_theme() {

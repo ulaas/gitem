@@ -77,7 +77,7 @@ impl ConsoleView {
                     ui.label(RichText::new(&e.cwd).small().color(p.faint));
                 }
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(if e.code == 0 { "✔" } else { "✖" }).color(if e.code == 0 { p.good } else { p.danger }));
+                    ui.label(RichText::new(if e.code == 0 { "\u{E182}" } else { "\u{E4F6}" }).color(if e.code == 0 { p.good } else { p.danger }));
                     ui.add(egui::Label::new(RichText::new(&e.command).monospace().color(if e.is_write { p.text } else { p.dim })).wrap());
                     ui.label(RichText::new(format!("{} ms", e.millis)).small().color(p.faint));
                 });

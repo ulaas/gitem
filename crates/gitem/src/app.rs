@@ -482,6 +482,10 @@ pub enum ErrorFix {
     Stash,
     AddRemote,
     Credentials,
+    /// No key for the AI provider.
+    AiSettings,
+    /// Git doesn't know who's committing.
+    Identity,
 }
 
 impl ErrorFix {
@@ -493,6 +497,8 @@ impl ErrorFix {
             ErrorFix::Stash => "Stash…",
             ErrorFix::AddRemote => "Add a remote…",
             ErrorFix::Credentials => "Open Credentials",
+            ErrorFix::AiSettings => "Open AI settings",
+            ErrorFix::Identity => "Set name and email…",
         }
     }
 }
@@ -501,6 +507,12 @@ impl ErrorFix {
 /// behind this. Based on git's C-locale messages, which is what gitem makes it print.
 pub fn explain_error(text: &str) -> Option<(&'static str, ErrorFix)> {
     let has = |s: &str| text.contains(s);
+    if has("No API key for") {
+        return Some(("This needs an AI provider with a key, which isn't set up yet.", ErrorFix::AiSettings));
+    }
+    if has("Please tell me who you are") || has("Author identity unknown") || has("empty ident name") {
+        return Some(("Git needs a name and an email to put on commits, and hasn't got them.", ErrorFix::Identity));
+    }
     if has("no tracking information") || has("has no upstream branch") {
         Some(("This branch isn't linked to a branch on a remote yet.", ErrorFix::SetUpstream))
     } else if has("would be overwritten by") || has("Please commit your changes or stash them") {
@@ -516,6 +528,14 @@ pub fn explain_error(text: &str) -> Option<(&'static str, ErrorFix)> {
     } else {
         None
     }
+}
+
+/// The folder an "isn't a repository" message is about, if making one there would make sense:
+/// it's missing or empty. A folder with files in it may be someone's project in the wrong place.
+pub fn folder_to_create(error: &str) -> Option<String> {
+    let path = error.strip_suffix(" doesn't exist. It may have been moved, renamed or deleted.").or_else(|| error.split_once(" isn't a git repository:").map(|(p, _)| p))?;
+    let empty = std::fs::read_dir(path).map_or(true, |mut d| d.next().is_none());
+    empty.then(|| path.to_string())
 }
 
 /// The window's title and the text under it, from `Title failed:\ndetails`.
@@ -629,7 +649,11 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
-        tab.title().into()
+        // Slanted, as a diff is reused for the next one unless it's been kept.
+        match tab {
+            Tab::Diff(d) if !d.pinned => RichText::new(tab.title()).italics().into(),
+            _ => tab.title().into(),
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Tab) {
@@ -1374,11 +1398,11 @@ impl GitemApp {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        let want = (self.settings.theme, (self.settings.ui_scale * 100.0) as u32, self.settings.accent.clone());
+        let want = (self.settings.theme, (self.settings.ui_scale * 100.0) as u32, format!("{}:{}:{}", self.settings.accent, self.settings.colorblind_diff, self.settings.reduce_motion));
         if self.applied.as_ref() != Some(&want) {
             self.applied = Some(want);
-            self.pal = Palette::for_settings(self.settings.theme, &self.settings.accent);
-            theme::apply(ctx, &self.pal, self.settings.ui_scale);
+            self.pal = Palette::for_settings(self.settings.theme, &self.settings.accent).colorblind(self.settings.colorblind_diff);
+            theme::apply(ctx, &self.pal, self.settings.ui_scale, self.settings.reduce_motion);
         }
         crate::i18n::set_language(&self.settings.language);
     }
@@ -1920,7 +1944,7 @@ impl GitemApp {
                         out.push(Action::OpenRepo(r.into()));
                         ui.close();
                     }
-                    if ui.small_button("✖").on_hover_text("Remove from this list. The folder isn't touched.").clicked() {
+                    if ui.small_button("\u{E4F6}").on_hover_text("Remove from this list. The folder isn't touched.").clicked() {
                         out.push(forget_recent(r));
                     }
                 });
@@ -1936,7 +1960,7 @@ impl GitemApp {
             chrome::paint_logo(ui.painter(), rect);
             ui.add_space(4.0);
             ui.label(RichText::new("gitem").size(30.0).strong());
-            ui.label(RichText::new("See your repository's history and everything around it").color(p.dim));
+            ui.label(RichText::new("A Git client. Open a repository, clone one, or start a new one.").color(p.dim));
             ui.add_space(14.0);
             if let Err(e) = &self.git {
                 error_box(ui, e, &p);
@@ -1954,11 +1978,11 @@ impl GitemApp {
             }
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 300.0).max(0.0) / 2.0);
+                if ui.add(egui::Button::new(RichText::new("Clone…").color(p.on_accent)).fill(p.accent)).clicked() {
+                    out.push(Action::Form(forms::clone_form()));
+                }
                 if ui.button("Open folder…").clicked() {
                     crate::widgets::pick(&mut self.folder_pick, ui.ctx(), rfd::FileDialog::new(), true);
-                }
-                if ui.button("Clone…").clicked() {
-                    out.push(Action::Form(forms::clone_form()));
                 }
                 if ui.button("Initialize…").clicked() {
                     out.push(Action::Form(forms::init_form()));
@@ -1967,7 +1991,7 @@ impl GitemApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 500.0).max(0.0) / 2.0);
-                let r = ui.add(crate::widgets::input(&mut self.open_path).hint_text("Or type a path and press Enter").desired_width(500.0));
+                let r = ui.add(crate::widgets::input(&mut self.open_path).hint_text("Or type a path and press Enter, or drop a folder here").desired_width(500.0));
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.open_path.trim().is_empty() {
                     out.push(Action::OpenRepo(self.open_path.trim().into()));
                 }
@@ -2313,6 +2337,8 @@ impl GitemApp {
             let (title, details) = error_parts(&e);
             let help = explain_error(details);
             let mut fix = None;
+            let make_here = folder_to_create(&e);
+            let mut create_here = None;
             // Not behind a backdrop: this can come from something in the background, and it
             // mustn't take the keyboard from someone typing. It's above any that's there.
             dialog_window(title, self.errors_settled).anchor(Align2::CENTER_BOTTOM, [0.0, -40.0]).show(ctx, |ui| {
@@ -2344,8 +2370,17 @@ impl GitemApp {
                     {
                         fix = Some(f);
                     }
+                    if let Some(folder) = &make_here
+                        && ui.button("Create repository here…").on_hover_text(folder.as_str()).clicked()
+                    {
+                        create_here = Some(folder.clone());
+                    }
                 });
             });
+            if let Some(folder) = create_here {
+                close = true;
+                out.push(Action::Form(forms::init_form_at(&folder)));
+            }
             if let Some(f) = fix {
                 close = true;
                 let repo = self.repos.get(self.active);
@@ -2360,6 +2395,8 @@ impl GitemApp {
                     ErrorFix::Stash => Action::Form(forms::stash_form(Vec::new())),
                     ErrorFix::AddRemote => Action::Form(forms::add_remote()),
                     ErrorFix::Credentials => Action::OpenTab(Tab::Credentials(Box::default())),
+                    ErrorFix::AiSettings => Action::OpenTab(Tab::Settings(Box::new(crate::views::settings::SettingsView::on_page("AI")))),
+                    ErrorFix::Identity => Action::Form(forms::identity_form()),
                 });
             }
             if close {
@@ -2370,13 +2407,18 @@ impl GitemApp {
         self.toasts.retain(|(_, t)| t.elapsed() < Duration::from_secs(4));
         if !self.toasts.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
-            egui::Area::new("toasts".into()).anchor(Align2::RIGHT_BOTTOM, [-14.0, -34.0]).interactable(false).show(ctx, |ui| {
+            let shown = egui::Area::new("toasts".into()).anchor(Align2::RIGHT_BOTTOM, [-14.0, -34.0]).order(egui::Order::Foreground).show(ctx, |ui| {
                 for (t, _) in &self.toasts {
                     egui::Frame::new().fill(p.panel2).stroke(egui::Stroke::new(1.0, p.border)).inner_margin(egui::Margin::symmetric(10, 5)).corner_radius(4.0).show(ui, |ui| {
-                        ui.label(t);
+                        ui.add(egui::Label::new(t.as_str()).selectable(true));
                     });
                 }
             });
+            // Being read, or copied from.
+            if ctx.input(|i| i.pointer.hover_pos()).is_some_and(|at| shown.response.rect.contains(at)) {
+                let now = Instant::now();
+                self.toasts.iter_mut().for_each(|(_, t)| *t = now);
+            }
         }
     }
 
@@ -2686,6 +2728,13 @@ impl GitemApp {
             }
         }
         self.shortcuts(&ctx, &mut out);
+        // A folder dropped anywhere on the window. A file means the repository it's in.
+        for dropped in ctx.input(|i| i.raw.dropped_files.clone()) {
+            let path = dropped.path().to_path_buf();
+            if !path.as_os_str().is_empty() {
+                out.push(Action::OpenRepo(if path.is_dir() { path } else { path.parent().map(Path::to_path_buf).unwrap_or(path) }));
+            }
+        }
 
         let bar_frame = egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::symmetric(8, 4));
         egui::Panel::top("title-bar").frame(egui::Frame::new().fill(self.pal.bg)).resizable(false).exact_size(chrome::TITLE_BAR_HEIGHT).show_separator_line(false).show(ui, |ui| self.title_bar(ui, &mut out));

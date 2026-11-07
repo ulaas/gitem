@@ -455,12 +455,12 @@ impl MergeView {
         // Wraps, as a narrow panel can't hold all these on one row.
         ui.horizontal_wrapped(|ui| {
             let indices = Self::conflict_indices(doc);
-            if ui.small_button(crate::chrome::icon::CARET_UP).on_hover_text("Previous conflict").clicked() && !indices.is_empty() {
+            if small_icon_button(ui, crate::chrome::icon::CARET_UP, "Previous conflict", "").clicked() && !indices.is_empty() {
                 let at = self.current.map_or(indices.len() - 1, |c| (c + indices.len() - 1) % indices.len());
                 self.current = Some(at);
                 self.scroll_to = Some(indices[at]);
             }
-            if ui.small_button(crate::chrome::icon::CARET_DOWN).on_hover_text("Next conflict").clicked() && !indices.is_empty() {
+            if small_icon_button(ui, crate::chrome::icon::CARET_DOWN, "Next conflict", "").clicked() && !indices.is_empty() {
                 // The first press goes to the first conflict: nothing has been visited yet.
                 let at = self.current.map_or(0, |c| (c + 1) % indices.len());
                 self.current = Some(at);
@@ -517,7 +517,7 @@ impl MergeView {
                 cx.toast(format!("Resolved {} that differed only in whitespace", plural(n, "conflict", "conflicts")));
             }
             toggle(ui, &mut self.show_base, "Base", "Also show the common ancestor: the file as it was before either side changed it");
-            if ui.selectable_label(self.raw_mode, "Edit text").on_hover_text("Edit the merged result as plain text").clicked() {
+            if ui.add(egui::Button::new("Edit text").selected(self.raw_mode)).on_hover_text("Edit the merged result as plain text").clicked() {
                 self.toggle_raw(cx, doc);
             }
         });

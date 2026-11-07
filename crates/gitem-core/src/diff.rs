@@ -90,6 +90,60 @@ fn parse_hunk_header(l: &str) -> Option<Hunk> {
 }
 
 /// Parse the output of `git diff` / `git show`. Tolerates any leading text.
+/// The `(old start, old count, new start, new count)` of each hunk in a `-U0` diff.
+pub fn zero_context_hunks(text: &str) -> Vec<(u32, u32, u32, u32)> {
+    text.lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("@@ -")?;
+            let (old, rest) = rest.split_once(" +")?;
+            let (new, _) = rest.split_once(" @@")?;
+            let part = |s: &str| -> Option<(u32, u32)> {
+                match s.split_once(',') {
+                    Some((a, b)) => Some((a.parse().ok()?, b.parse().ok()?)),
+                    None => Some((s.parse().ok()?, 1)),
+                }
+            };
+            let (a, b) = (part(old)?, part(new)?);
+            Some((a.0, a.1, b.0, b.1))
+        })
+        .collect()
+}
+
+/// Which line of the old file a line of the new one was, given a file's `-U0` hunks. `None` for
+/// a line those changes added.
+pub fn line_before_changes(hunks: &[(u32, u32, u32, u32)], line: u32) -> Option<u32> {
+    let mut shift: i64 = 0;
+    for (old_start, old_count, new_start, new_count) in hunks {
+        // With no lines in it, a hunk's start is the line before where it goes.
+        let new_first = if *new_count == 0 { new_start + 1 } else { *new_start };
+        if line < new_first {
+            break;
+        }
+        if line < new_first + new_count {
+            return None;
+        }
+        shift = *old_start as i64 + *old_count as i64 - if *old_count == 0 { -1 } else { 0 } - (new_first as i64 + *new_count as i64);
+    }
+    u32::try_from(line as i64 + shift).ok()
+}
+
+#[cfg(test)]
+#[test]
+fn a_line_is_followed_back_through_uncommitted_edits() {
+    // Line 2 replaced, and two lines put in after line 5.
+    let hunks = zero_context_hunks("@@ -2 +2 @@\n-a\n+b\n@@ -5,0 +6,2 @@\n+c\n+d\n");
+    assert_eq!(hunks, [(2, 1, 2, 1), (5, 0, 6, 2)]);
+    assert_eq!(line_before_changes(&hunks, 1), Some(1));
+    assert_eq!(line_before_changes(&hunks, 2), None);
+    assert_eq!(line_before_changes(&hunks, 5), Some(5));
+    assert_eq!(line_before_changes(&hunks, 6), None);
+    assert_eq!(line_before_changes(&hunks, 8), Some(6));
+    // A line taken out moves what's after it down by one.
+    let gone = zero_context_hunks("@@ -3 +2,0 @@\n-x\n");
+    assert_eq!(line_before_changes(&gone, 2), Some(2));
+    assert_eq!(line_before_changes(&gone, 3), Some(4));
+}
+
 pub fn parse_unified(input: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut cur: Option<FileDiff> = None;

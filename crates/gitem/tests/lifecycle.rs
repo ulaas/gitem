@@ -466,3 +466,32 @@ fn a_commit_message_being_written_survives_a_crash() {
     assert_eq!(text, "half written");
     let _ = std::fs::remove_dir_all(&drafts);
 }
+
+/// The dialog says closing loses the message, so it mustn't turn up again next time.
+#[test]
+fn a_draft_thrown_away_with_close_anyway_stays_gone() {
+    let _turn = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let a = repo(d.path(), "a");
+    let mut h = run_app(std::slice::from_ref(&a));
+    settled(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    steps(&mut h, 10);
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
+    steps(&mut h, 3);
+    h.event(egui::Event::Text("a thought".into()));
+    let drafts = Settings::path().parent().unwrap().join("drafts");
+    let t = Instant::now();
+    while std::fs::read_dir(&drafts).map_or(true, |mut e| e.next().is_none()) {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(60), "no draft written");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.state_mut().request_close_repo(0);
+    steps(&mut h, 3);
+    h.get_by_label("Close anyway").click();
+    steps(&mut h, 3);
+    assert!(h.state().repos.is_empty());
+    assert!(std::fs::read_dir(&drafts).map_or(true, |mut e| e.next().is_none()), "the draft stayed behind");
+    let _ = std::fs::remove_dir_all(&drafts);
+}

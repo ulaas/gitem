@@ -1224,6 +1224,15 @@ impl Repo {
         st.op
     }
 
+    /// Where lines of the working file are in HEAD's version, from its uncommitted changes.
+    /// `None` if none of them is there.
+    pub fn lines_in_head(&self, path: &str, first: u32, last: u32) -> Result<Option<(u32, u32)>> {
+        let o = self.run_literal(&["diff".to_string(), "-U0".to_string(), "--no-color".to_string(), "--no-ext-diff".to_string(), "HEAD".to_string(), "--".to_string(), path.to_string()])?;
+        let hunks = crate::diff::zero_context_hunks(&o.text());
+        let mapped: Vec<u32> = (first..=last).filter_map(|n| crate::diff::line_before_changes(&hunks, n)).collect();
+        Ok(mapped.first().copied().zip(mapped.last().copied()))
+    }
+
     pub fn ignore_path(&self) -> PathBuf {
         self.root.join(".gitignore")
     }

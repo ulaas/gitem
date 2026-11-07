@@ -219,20 +219,18 @@ impl LaunchpadView {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.page, Page::Prs, "Pull requests");
             ui.selectable_value(&mut self.page, Page::Issues, "Issues");
-            ui.selectable_value(&mut self.page, Page::Create, "Create pull request");
+            // Issues can come from a tracker, but pull requests need a host.
+            let hosted = cx.forge().is_some();
+            ui.add_enabled_ui(hosted, |ui| ui.selectable_value(&mut self.page, Page::Create, "Create pull request")).inner.on_disabled_hover_text("None of this repository's remotes is on a supported host.");
             ui.separator();
-            if ui.small_button("Refresh").clicked() {
+            if ui.add_enabled(hosted, egui::Button::new("Refresh").small()).on_disabled_hover_text("There's no host to ask.").clicked() {
                 self.refresh(&ctx, cx);
             }
-            match cx.forge().cloned() {
-                Some(r) => {
-                    chip(ui, &format!("{} · {}", r.kind.label(), r.path), p.series[6]);
-                    if ui.small_button("Connect…").clicked() {
-                        cx.form(token_form(&r));
-                    }
-                }
-                None => {
-                    ui.label(RichText::new("No supported hosting provider among the remotes").color(p.dim));
+            // With none, the page below says so, and what to do about it.
+            if let Some(r) = cx.forge().cloned() {
+                chip(ui, &format!("{} · {}", r.kind.label(), r.path), p.series_text(6));
+                if ui.small_button("Connect…").clicked() {
+                    cx.form(token_form(&r));
                 }
             }
             if self.prs.busy() || self.issues.busy() || self.action.busy() {
@@ -328,13 +326,13 @@ impl LaunchpadView {
                     ui.label(RichText::new(format!("-{}", pr.deletions)).small().color(p.del_fg));
                 }
                 match pr.checks.as_str() {
-                    "SUCCESS" => chip(ui, "✔ Checks pass", p.good),
-                    "FAILURE" | "ERROR" => chip(ui, "✖ Checks failing", p.danger),
+                    "SUCCESS" => chip(ui, "\u{E182} Checks pass", p.good),
+                    "FAILURE" | "ERROR" => chip(ui, "\u{E4F6} Checks failing", p.danger),
                     "PENDING" | "EXPECTED" => chip(ui, "Checks running", p.warn),
                     _ => {}
                 }
                 match pr.review_decision.as_str() {
-                    "APPROVED" => chip(ui, "✔ Approved", p.good),
+                    "APPROVED" => chip(ui, "\u{E182} Approved", p.good),
                     "CHANGES_REQUESTED" => chip(ui, "Changes requested", p.warn),
                     _ => {}
                 }

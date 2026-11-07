@@ -434,24 +434,33 @@ impl ConfigView {
             return;
         };
         let q = self.filter.to_lowercase();
+        // The last place a key is set is the one git uses.
+        let winner: std::collections::HashMap<&str, usize> = list.iter().enumerate().map(|(i, e)| (e.key.as_str(), i)).collect();
         egui::ScrollArea::vertical().id_salt("config").auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("cfg-grid").striped(true).num_columns(4).show(ui, |ui| {
-                for e in &list {
-                    if e.scope == "system" && !self.show_system {
-                        continue;
-                    }
-                    if !q.is_empty() && !e.key.to_lowercase().contains(&q) && !e.value.to_lowercase().contains(&q) {
-                        continue;
-                    }
-                    ui.label(RichText::new(&e.scope).small().color(p.dim));
-                    ui.label(RichText::new(&e.key).monospace());
-                    let editable = matches!(e.scope.as_str(), "local" | "global" | "worktree");
+            for scope in ["command", "worktree", "local", "global", "system"] {
+                let rows: Vec<(usize, &gitem_core::model::ConfigEntry)> = list.iter().enumerate().filter(|(_, e)| e.scope == scope && (scope != "system" || self.show_system) && (q.is_empty() || e.key.to_lowercase().contains(&q) || e.value.to_lowercase().contains(&q))).collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                section(ui, scope, &p);
+                if scope == "command" {
+                    ui.label(RichText::new("gitem sets these for its own commands. They aren't in any config file.").small().color(p.dim));
+                }
+                for (i, e) in rows {
                     let is_editing = self.editing.as_ref().is_some_and(|(s, k, _)| *s == e.scope && *k == e.key);
-                    if is_editing {
-                        if let Some((_, _, v)) = &mut self.editing {
-                            ui.add(crate::widgets::input(v));
-                        }
-                        ui.horizontal(|ui| {
+                    let editable = matches!(e.scope.as_str(), "local" | "global" | "worktree");
+                    let hit = ui.available_rect_before_wrap().with_max_y(ui.cursor().top() + 24.0);
+                    let hovered = ui.rect_contains_pointer(hit);
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(22.0);
+                        let key_w = 260.0_f32.min(ui.available_width() * 0.4);
+                        let (key_rect, key) = ui.allocate_exact_size(egui::vec2(key_w, 22.0), egui::Sense::hover());
+                        key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, e.key.as_str()));
+                        crate::widgets::paint_text(ui, key_rect, &e.key, crate::widgets::mono(12.0), p.text);
+                        if is_editing {
+                            if let Some((_, _, v)) = &mut self.editing {
+                                ui.add(crate::widgets::input(v).desired_width((ui.available_width() - 130.0).max(80.0)));
+                            }
                             if ui.small_button("Save").clicked()
                                 && let Some((s, k, v)) = self.editing.take() {
                                     cx.run(ops::config_set(&k, &v, &s));
@@ -459,25 +468,30 @@ impl ConfigView {
                             if ui.small_button("Cancel").clicked() {
                                 self.editing = None;
                             }
-                        });
-                    } else {
-                        // Tokens, passwords in URLs and auth headers shouldn't show at a glance.
-                        let shown = gitem_core::util::mask_config_value(&e.key, &e.value);
-                        ui.add(egui::Label::new(shown).truncate());
-                        ui.horizontal(|ui| {
-                            if editable {
-                                if ui.small_button("Edit").clicked() {
-                                    self.editing = Some((e.scope.clone(), e.key.clone(), e.value.clone()));
-                                }
+                            return;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Always there, not only on hover, on the row the keyboard's on.
+                            if editable && hovered {
                                 if ui.small_button("Unset…").clicked() {
                                     cx.confirm("Unset config value", &format!("Remove {} from {} config?", e.key, e.scope), "Unset", ops::config_unset(&e.key, &e.scope));
                                 }
+                                if ui.small_button("Edit").clicked() {
+                                    self.editing = Some((e.scope.clone(), e.key.clone(), e.value.clone()));
+                                }
                             }
+                            if winner.get(e.key.as_str()).is_some_and(|w| *w != i) {
+                                ui.label(RichText::new("overridden").small().color(p.warn)).on_hover_text("Set again further down the order git reads these in, so this value isn't the one in use.");
+                            }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                // Tokens, passwords in URLs and auth headers shouldn't show at a glance.
+                                let shown = gitem_core::util::mask_config_value(&e.key, &e.value);
+                                ui.add(egui::Label::new(shown).truncate());
+                            });
                         });
-                    }
-                    ui.end_row();
+                    });
                 }
-            });
+            }
         });
         self.entries.value = Some(list);
     }

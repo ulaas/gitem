@@ -51,16 +51,16 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Config" => (icon::SLIDERS_HORIZONTAL, "Git's configuration values", None),
         "Credentials" => (icon::KEY, "Tokens and SSH keys", None),
         "Console" => (icon::TERMINAL_WINDOW, "Every git command gitem has run", None),
-        "Settings" => (icon::GEAR_SIX, "Preferences", None),
+        "Settings" => (icon::GEAR_SIX, "Preferences", Some("Ctrl+,")),
         "Visual History" => (icon::CHART_SCATTER, "History of the repository, a folder, or a file", None),
         "Treemap" => (icon::SQUARES_FOUR, "Files by size or recent activity", None),
         "Health" => (icon::HEARTBEAT, "How well this repository is tuned", None),
         "Agent Sessions" => (icon::ROBOT, "Coding agents in these worktrees", None),
         "Review Changes" => (icon::LIST_CHECKS, "A checklist and notes for a change", None),
         "About gitem" => (icon::INFO, "Version and build", None),
-        "Fetch…" => (icon::CLOUD_ARROW_DOWN, "Download commits from a remote", None),
-        "Pull…" => (icon::ARROW_LINE_DOWN, "Bring upstream commits into this branch", None),
-        "Push…" => (icon::ARROW_LINE_UP, "Send this branch's commits to a remote", None),
+        "Fetch…" => (icon::CLOUD_ARROW_DOWN, "Download commits from a remote", Some("Ctrl+Shift+F")),
+        "Pull…" => (icon::ARROW_LINE_DOWN, "Bring upstream commits into this branch", Some("Ctrl+Shift+L")),
+        "Push…" => (icon::ARROW_LINE_UP, "Send this branch's commits to a remote", Some("Ctrl+Shift+K")),
         "Create Branch…" => (icon::GIT_BRANCH, "", None),
         "Create Tag…" => (icon::TAG, "", None),
         "Stash…" => (icon::ARCHIVE, "Set your changes aside", None),
@@ -523,9 +523,9 @@ impl PaletteState {
                     let n = b.name.clone();
                     let track = match (b.ahead, b.behind) {
                         (0, 0) => String::new(),
-                        (a, 0) => format!("↑{a}  "),
-                        (0, x) => format!("↓{x}  "),
-                        (a, x) => format!("↑{a} ↓{x}  "),
+                        (a, 0) => format!("\u{E08E}{a}  "),
+                        (0, x) => format!("\u{E03E}{x}  "),
+                        (a, x) => format!("\u{E08E}{a} \u{E03E}{x}  "),
                     };
                     let mut it = item("Switch to", b.name.clone(), move |cx| cx.run(ops::checkout(&n)));
                     (it.glyph, it.detail, it.record) = (icon::GIT_BRANCH, format!("{track}{}", b.subject), false);
@@ -817,7 +817,7 @@ impl PaletteState {
         ui.painter().rect_filled(rect, egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 }, p.panel2);
         let y = rect.center().y;
         let mut x = rect.left() + 16.0;
-        for (keys, label) in [("↑+↓", "Move"), ("Enter", "Run")] {
+        for (keys, label) in [("\u{E08E}+\u{E03E}", "Move"), ("Enter", "Run")] {
             let w = keys_width(ui, keys);
             paint_keys(ui, keys, x + w, y, p);
             x += w + 3.0;

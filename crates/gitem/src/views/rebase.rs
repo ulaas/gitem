@@ -141,7 +141,7 @@ impl RebaseView {
                     self.load(&ui.ctx().clone(), cx);
                 }
                 let refs = cx.data.ref_names();
-                ui.menu_button("▾", |ui| {
+                ui.menu_button("\u{E136}", |ui| {
                     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                         for r in &refs {
                             if ui.button(r.as_str()).clicked() {
@@ -182,6 +182,10 @@ impl RebaseView {
             error_box(ui, e, &p);
         }
         ui.horizontal(|ui| {
+            // With nothing in the plan, these have nothing to work on.
+            if self.items.is_empty() {
+                ui.disable();
+            }
             if ui.small_button("Squash all into first").clicked() {
                 rebase::squash_all_into_first(&mut self.items);
             }
@@ -203,7 +207,7 @@ impl RebaseView {
                 let at = (self.selected + 1).min(self.items.len());
                 self.items.insert(at, TodoItem { action: RebaseAction::Break, sha: String::new(), text: String::new() });
             }
-            ui.label(RichText::new("Keys: p pick · r reword · e edit · s squash · f fixup · d drop · Alt+↑/↓ move").small().color(p.faint));
+            ui.label(RichText::new("Keys: p pick · r reword · e edit · s squash · f fixup · d drop · Alt+\u{E08E}/\u{E03E} move").small().color(p.faint));
         });
         ui.separator();
 
@@ -216,8 +220,9 @@ impl RebaseView {
             }
             ui.horizontal(|ui| {
                 let ok = errs.is_empty() && !self.items.is_empty() && !self.stale && !self.head_now.busy();
-                let b = egui::Button::new(RichText::new(if self.todo_file.is_some() { "Start rebase".to_string() } else { format!("Rebase {}", plural(self.items.len(), "commit", "commits")) }).color(if ok { p.on_accent } else { p.faint })).fill(if ok { p.accent } else { p.panel2 });
-                if ui.add_enabled(ok, b).clicked() {
+                let b = egui::Button::new(RichText::new(if self.todo_file.is_some() { "Start rebase".to_string() } else { if self.items.is_empty() { "Rebase".to_string() } else { format!("Rebase {}", plural(self.items.len(), "commit", "commits")) } }).color(if ok { p.on_accent } else { p.faint })).fill(if ok { p.accent } else { p.panel2 });
+                let why = if self.items.is_empty() { "Pick a base with commits between it and HEAD." } else if self.stale { "HEAD has moved. Rebuild the plan first." } else if !errs.is_empty() { "Fix what's listed above first." } else { "Checking that HEAD hasn't moved." };
+                if ui.add_enabled(ok, b).on_disabled_hover_text(why).clicked() {
                     self.start(ui.ctx(), cx);
                 }
                 if let Some(path) = &self.todo_file
@@ -292,6 +297,23 @@ impl RebaseView {
                                 ui.label(RichText::new("exec").color(action_color(item.action, p)));
                                 ui.add(crate::widgets::input(&mut item.text).hint_text("shell command").desired_width(f32::INFINITY));
                             }
+                            // An `amend!` commit is a raw line, and each choice here makes it plain.
+                            RebaseAction::Other if rebase::parse_amend(&item.text).is_some() => {
+                                let (sha, subject) = rebase::parse_amend(&item.text).unwrap_or_default();
+                                let mut changed = None;
+                                egui::ComboBox::from_id_salt(("action", i)).selected_text(RichText::new("amend").color(p.series_text(4))).width(74.0).show_ui(ui, |ui| {
+                                    for a in RebaseAction::CHOICES {
+                                        if ui.selectable_label(false, RichText::new(a.keyword()).color(action_color(a, p))).clicked() {
+                                            changed = Some(a);
+                                        }
+                                    }
+                                }).response.on_hover_text("Replaces the commit before it, message and all, as git does for an amend! commit");
+                                ui.label(RichText::new(gitem_core::util::prefix(&sha, 8)).monospace().color(p.faint));
+                                ui.add(egui::Label::new(RichText::new(&subject)).truncate());
+                                if let Some(action) = changed {
+                                    *item = TodoItem { action, sha, text: subject };
+                                }
+                            }
                             RebaseAction::Break | RebaseAction::Other => {
                                 ui.label(RichText::new(if item.action == RebaseAction::Break { "break" } else { item.text.as_str() }).color(p.dim).monospace());
                             }
@@ -317,7 +339,7 @@ impl RebaseView {
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if !RebaseAction::CHOICES.contains(&self.items[i].action) && ui.small_button("✖").clicked() {
+                            if !RebaseAction::CHOICES.contains(&self.items[i].action) && ui.small_button("\u{E4F6}").clicked() {
                                 remove = Some(i);
                             }
                         });
@@ -394,12 +416,12 @@ impl RebaseView {
 fn action_color(a: RebaseAction, p: &Palette) -> egui::Color32 {
     match a {
         RebaseAction::Pick => p.text,
-        RebaseAction::Reword => p.series[0],
-        RebaseAction::Edit => p.series[6],
-        RebaseAction::Squash => p.series[3],
-        RebaseAction::Fixup => p.series[4],
+        RebaseAction::Reword => p.series_text(0),
+        RebaseAction::Edit => p.series_text(6),
+        RebaseAction::Squash => p.series_text(3),
+        RebaseAction::Fixup => p.series_text(4),
         RebaseAction::Drop => p.del_fg,
-        RebaseAction::Exec => p.series[2],
+        RebaseAction::Exec => p.series_text(2),
         _ => p.dim,
     }
 }
