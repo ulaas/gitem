@@ -815,7 +815,7 @@ fn publish_repository_adds_the_remote_pushes_and_tracks() {
     f.run(ops::publish_repository("origin", &path_str(&bare), "main"));
     assert_eq!(f.q(&["remote", "get-url", "origin"]), path_str(&bare));
     assert_eq!(f.q(&["rev-parse", "--abbrev-ref", "main@{u}"]), "origin/main");
-    assert_eq!(f.git.run(Some(&bare), &["rev-parse", "main"]).unwrap().text().trim(), head);
+    assert_eq!(f.git.run(Some(&bare), &["--git-dir=.", "rev-parse", "main"]).unwrap().text().trim(), head);
 }
 
 #[test]

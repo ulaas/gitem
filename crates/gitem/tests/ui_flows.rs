@@ -1572,7 +1572,7 @@ fn deep_links_open_the_commit_and_file() {
     let mut h = harness(&f);
     settle(&mut h);
     let ctx = h.ctx.clone();
-    let root = f.root.to_string_lossy().replace('\\', "/");
+    let root = h.state().repos[0].repo.root.to_string_lossy().replace('\\', "/");
     let link = gitem_core::forge::DeepLink::parse(&gitem_core::forge::DeepLink { repo: root, commit: Some(sha), file: Some("a.txt".into()), line: Some(2) }.to_url()).unwrap();
     h.state_mut().apply_action(&ctx, Action::DeepLink(link));
     h.step();
@@ -1642,7 +1642,7 @@ impl Remote {
         g.run(Some(&self.other), &["push", "-q"]).unwrap();
     }
     fn remote_tip(&self) -> String {
-        self.f.git.run(Some(&self.bare), &["rev-parse", "main"]).unwrap().text().trim().to_string()
+        self.f.git.run(Some(&self.bare), &["--git-dir=.", "rev-parse", "main"]).unwrap().text().trim().to_string()
     }
 }
 

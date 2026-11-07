@@ -995,14 +995,36 @@ impl DeepLink {
             let v = percent_decode(v);
             match k {
                 "repo" => d.repo = v,
-                "commit" => d.commit = Some(v),
-                "file" => d.file = Some(v),
+                // A link is anyone's to write, and this goes on to git's command line.
+                "commit" if is_commit_id(&v) => d.commit = Some(v),
+                "commit" => return None,
+                "file" if is_repo_relative(&v) => d.file = Some(v),
+                "file" => return None,
                 "line" => d.line = v.parse().ok(),
                 _ => {}
             }
         }
         (!d.repo.is_empty()).then_some(d)
     }
+}
+
+/// A whole or abbreviated commit id. It's what gitem's own links contain, and nothing else
+/// is needed to link to a commit.
+fn is_commit_id(s: &str) -> bool {
+    (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A path inside a repository, not one that climbs out of it or starts somewhere else.
+fn is_repo_relative(s: &str) -> bool {
+    let parts: Vec<&str> = s.split(['/', '\\']).collect();
+    !s.is_empty() && !parts[0].is_empty() && !parts[0].contains(':') && !parts.contains(&"..")
+}
+
+/// A path on another computer: `\\\\host\\share`, `//host/share`, or one of Windows's
+/// `\\\\?\\` forms. Just touching one can send the user's password hash to that computer.
+pub fn is_network_path(p: &str) -> bool {
+    let mut c = p.trim_start().chars();
+    matches!((c.next(), c.next()), (Some('/' | '\\'), Some('/' | '\\')))
 }
 
 pub fn parse_github_prs(v: &Value) -> Vec<PullRequest> {
@@ -1460,10 +1482,30 @@ mod tests {
 
     #[test]
     fn deep_links_round_trip() {
-        let d = DeepLink { repo: "C:/my repo".into(), commit: Some("abc".into()), file: Some("a b.rs".into()), line: Some(4) };
+        let d = DeepLink { repo: "C:/my repo".into(), commit: Some("abcd".into()), file: Some("a b.rs".into()), line: Some(4) };
         assert_eq!(DeepLink::parse(&d.to_url()), Some(d));
         assert_eq!(DeepLink::parse("https://x"), None);
         assert_eq!(DeepLink::parse("gitem://open?commit=abc"), None, "a repo is required");
+        for bad in ["--output=C:/x", "HEAD", "abc", "abcd --all", "abcg", "main", "%2D%2Doutput%3Dx"] {
+            assert_eq!(DeepLink::parse(&format!("gitem://open?repo=r&commit={bad}")), None, "commit {bad}");
+        }
+        for good in ["abcd", "ABCD1234", "0123456789012345678901234567890123456789"] {
+            assert_eq!(DeepLink::parse(&format!("gitem://open?repo=r&commit={good}")).and_then(|d| d.commit).as_deref(), Some(good));
+        }
+        for bad in ["../secret", "a/../../b", "/etc/passwd", "C:/x", "%5Cx", "a%5C..%5C..%5Cb"] {
+            assert_eq!(DeepLink::parse(&format!("gitem://open?repo=r&file={bad}")), None, "file {bad}");
+        }
+        assert_eq!(DeepLink::parse("gitem://open?repo=r&file=src/a.rs").and_then(|d| d.file).as_deref(), Some("src/a.rs"));
+    }
+
+    #[test]
+    fn network_paths_are_told_from_local_ones() {
+        for p in ["\\\\evil\\share\\repo", "//evil/share/repo", "\\/evil/x", "/\\evil", "\\\\?\\UNC\\evil\\x", " \\\\evil\\x"] {
+            assert!(is_network_path(p), "{p}");
+        }
+        for p in ["C:/repo", "C:\\repo", "/home/me/repo", "repo", "./repo", "\\repo"] {
+            assert!(!is_network_path(p), "{p}");
+        }
     }
 
     #[test]

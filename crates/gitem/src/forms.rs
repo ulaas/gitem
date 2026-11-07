@@ -838,8 +838,8 @@ mod tests {
         check("note", note_form(s("abc"), s("")), &[("note", "hello")], "notes add -f -F - abc <<< hello");
         check("emptying a note removes it", note_form(s("abc"), s("old")), &[("note", "  ")], "notes remove abc");
         check("bisect", bisect_start_form(s("bad1"), vec![]), &[("good", "good1")], "bisect start bad1 good1");
-        check("config", raw_config_form("local"), &[("key", "a.b"), ("value", "c d")], "config --local a.b 'c d'");
-        check("global config", raw_config_form("global"), &[("key", "a.b"), ("value", "")], "config --global a.b ''");
+        check("config", raw_config_form("local"), &[("key", "a.b"), ("value", "c d")], "config --local --replace-all -- a.b 'c d'");
+        check("global config", raw_config_form("global"), &[("key", "a.b"), ("value", "")], "config --global --replace-all -- a.b ''");
         check("lfs", lfs_track_form(), &[("pattern", "*.psd")], "lfs track *.psd && add .gitattributes");
     }
 

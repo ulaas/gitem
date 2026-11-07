@@ -204,6 +204,13 @@ impl HomeView {
         ui.horizontal(|ui| {
             if ui.small_button("Fetch all").clicked() {
                 for r in &w.repos {
+                    // One of these may never have been opened here, and a fetch can start
+                    // what its config names. So the same check as opening it, and no fetch
+                    // until that's decided.
+                    if Repo::open(cx.repo.git.clone(), std::path::Path::new(r)).is_ok_and(|x| x.trust.restricted()) {
+                        cx.error(format!("Not fetching {r}: its config names programs that you haven't said can run. Open it to decide."));
+                        continue;
+                    }
                     let op = ops::fetch(&ops::FetchOpts { all: true, prune: cx.settings.prune_on_fetch, ..Default::default() });
                     let mut wrapped = ops::GitOp::new(format!("Fetch {r}")).net();
                     for s in op.steps {

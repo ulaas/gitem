@@ -26,6 +26,7 @@ pub mod repo;
 pub mod runner;
 pub mod settings;
 pub mod treemap;
+pub mod trust;
 pub mod util;
 
 pub use model::*;

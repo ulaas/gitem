@@ -55,6 +55,8 @@ pub enum Action {
     OpenPalette,
     /// Open a `gitem://` link.
     DeepLink(gitem_core::forge::DeepLink),
+    /// Show again the question about what this repository's config may run.
+    ReviewTrust,
     /// Show only this ref in the commit graph.
     GraphFocus(String),
     /// Hide this ref from the commit graph.

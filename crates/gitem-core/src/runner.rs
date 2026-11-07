@@ -30,14 +30,57 @@ const LOG_OUTPUT_CAP: usize = 8192;
 /// measured under heavy load), and cutting it off reports an empty answer as if git had
 /// said nothing.
 ///
-/// Reads run no hooks and their output is the answer, so they wait a long time. Writes
-/// are what run hooks, and their output is only informational, so they don't. A
-/// successful command's stderr is only progress and warnings.
+/// Reads have hooks turned off (see [`READ_FLAGS`]) and their output is the answer, so
+/// they wait a long time. Writes are what run hooks, and their output is only
+/// informational, so they don't. A successful command's stderr is only progress and
+/// warnings.
 const STDERR_QUIET_OK: Duration = Duration::from_secs(2);
 const STDERR_QUIET_FAILED: Duration = Duration::from_secs(10);
 const STDOUT_QUIET_READ: Duration = Duration::from_secs(30);
 const STDOUT_QUIET_WRITE: Duration = Duration::from_secs(3);
 const STDOUT_QUIET_CANCELLED: Duration = Duration::from_millis(200);
+
+/// Reads start without anyone asking, just by opening or looking at a repository, so they
+/// never run its file system monitor, and with [`NO_HOOKS`] its hooks: `git diff` would
+/// otherwise fire `post-index-change`, since it refreshes the index even with optional
+/// locks off. A folder shaped like a git directory, such as one tracked inside a clone, is
+/// refused as a repository unless named outright. And a read can start a lazy fetch in a
+/// partial clone, which mustn't be able to run a command through an `ext::` remote.
+///
+/// These can't stop a filter, a textconv or a gpg program, because turning those off for
+/// everyone would break Git LFS: see [`crate::trust`], and [`Neutral`] below.
+const READ_FLAGS: [&str; 6] = ["-c", "core.fsmonitor=false", "-c", "safe.bareRepository=explicit", "-c", "protocol.ext.allow=never"];
+
+/// A path no hook can be found under. Not a real folder on any system.
+const NO_HOOKS: &str = if cfg!(windows) { "core.hooksPath=NUL" } else { "core.hooksPath=/dev/null" };
+
+/// Variables that point git at some other repository, or change what it reads. A hook or
+/// a terminal can leave them set, and gitem would then show and change that repository
+/// instead of the one on screen. This is `git rev-parse --local-env-vars`, plus the ones
+/// that change how paths or diffs are understood.
+const FOREIGN_ENV: [&str; 21] = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_GRAFT_FILE",
+    "GIT_ICASE_PATHSPECS",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+];
 
 #[derive(Debug, Clone)]
 pub struct GitOutput {
@@ -126,6 +169,20 @@ pub struct GitExe {
     pub log: CommandLog,
     /// This executable; used as askpass / editor / sequence-editor helper.
     pub helper: Option<PathBuf>,
+    /// What to override for the repository this belongs to. Empty until [`crate::Repo::open`]
+    /// has looked at its config.
+    pub neutral: Arc<Neutral>,
+}
+
+/// Overrides that keep a repository's own programs from running until it's trusted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Neutral {
+    /// Passed as `GIT_CONFIG_KEY_n`, not `-c`, which can't name a driver with `=` in it.
+    /// Submodules inherit them, and they have to.
+    pub config: Vec<(String, String)>,
+    pub env: Vec<(String, String)>,
+    /// An empty `textconv` is a fatal error, so that one takes a flag.
+    pub no_textconv: bool,
 }
 
 /// The oldest git gitem works with. 2.38 brought `merge-tree --write-tree` and
@@ -145,6 +202,8 @@ pub struct RunOpts {
     pub env: Vec<(String, String)>,
     pub is_write: bool,
     pub cancel: Option<Arc<AtomicBool>>,
+    /// A write nobody asked for just now, such as a scheduled fetch, so no hooks either.
+    pub no_hooks: bool,
 }
 
 impl GitExe {
@@ -153,7 +212,7 @@ impl GitExe {
     pub fn discover(configured: Option<&Path>) -> Result<Self> {
         let helper = std::env::current_exe().ok();
         let log: CommandLog = Arc::new(Mutex::new(VecDeque::new()));
-        let make = |path: PathBuf, source| GitExe { path, source, log: log.clone(), helper: helper.clone() };
+        let make = |path: PathBuf, source| GitExe { path, source, log: log.clone(), helper: helper.clone(), neutral: Arc::default() };
         if let Some(p) = configured.filter(|p| !p.as_os_str().is_empty())
             && works(p) {
                 return Ok(make(p.to_path_buf(), GitSource::Configured));
@@ -221,19 +280,35 @@ impl GitExe {
         // Stable, parseable output regardless of the user's configuration.
         cmd.args(["-c", "core.quotepath=off", "-c", "color.ui=false", "-c", "core.pager=cat"]);
         cmd.args(["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "log.showSignature=false", "-c", "i18n.logOutputEncoding=UTF-8"]);
-        if !opts.is_write {
-            // Background reads run just by opening a repository. Its config could
-            // otherwise name a program to execute here, so that hook is disabled.
-            cmd.args(["-c", "core.fsmonitor=false"]);
+        // `git config` runs nothing, and has to report what the repository really says.
+        let is_config = args.first().is_some_and(|a| a == "config");
+        if !opts.is_write && !is_config {
+            cmd.args(READ_FLAGS);
+            cmd.args(["-c", NO_HOOKS]);
+        } else if opts.no_hooks {
+            cmd.args(["-c", NO_HOOKS]);
         }
-        cmd.args(args);
+        cmd.args(guarded_args(args, !opts.is_write, !is_config && self.neutral.no_textconv));
         if let Some(c) = cwd {
             cmd.current_dir(c);
+        } else if !opts.is_write {
+            // Whatever folder gitem was started in isn't a repository anyone asked it to read.
+            cmd.current_dir(std::env::temp_dir());
+        }
+        for name in FOREIGN_ENV {
+            cmd.env_remove(name);
         }
         cmd.stdin(if opts.stdin.is_some() { Stdio::piped() } else { Stdio::null() });
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        cmd.env("LC_ALL", "C");
+        // gitem reads git's messages, so they have to be in English. Reads run nothing of
+        // the user's, so they can simply use the C locale. Writes run hooks, which should
+        // see the user's own locale: a C locale breaks scripts handling non-ASCII text.
+        if opts.is_write {
+            cmd.env("LANGUAGE", "C");
+        } else {
+            cmd.env("LC_ALL", "C");
+        }
         cmd.env("GIT_PAGER", "cat");
         cmd.env("GIT_TERMINAL_PROMPT", "0");
         if !opts.is_write {
@@ -249,6 +324,18 @@ impl GitExe {
             cmd.env("SSH_ASKPASS_REQUIRE", "prefer");
             cmd.env("GIT_EDITOR", format!("\"{h_str}\" --edit-file"));
             cmd.env("GIT_SEQUENCE_EDITOR", format!("\"{h_str}\" --rebase-editor"));
+        }
+        if !is_config && !self.neutral.config.is_empty() {
+            cmd.env("GIT_CONFIG_COUNT", self.neutral.config.len().to_string());
+            for (i, (k, v)) in self.neutral.config.iter().enumerate() {
+                cmd.env(format!("GIT_CONFIG_KEY_{i}"), k);
+                cmd.env(format!("GIT_CONFIG_VALUE_{i}"), v);
+            }
+        }
+        if !is_config {
+            for (k, v) in &self.neutral.env {
+                cmd.env(k, v);
+            }
         }
         for (k, v) in &opts.env {
             cmd.env(k, v);
@@ -405,6 +492,20 @@ impl GitExe {
     }
 }
 
+/// The command line after git's own options. Reads never use an external diff: gitem has to
+/// parse the result, and `git diff`, unlike `show` and `log`, would run one by default.
+fn guarded_args(args: &[String], is_read: bool, no_textconv: bool) -> Vec<String> {
+    let mut out = args.to_vec();
+    let sub = args.first().map(String::as_str);
+    if no_textconv && matches!(sub, Some("diff" | "show" | "log" | "blame")) {
+        out.insert(1, "--no-textconv".to_string());
+    }
+    if is_read && sub == Some("diff") {
+        out.insert(1, "--no-ext-diff".to_string());
+    }
+    out
+}
+
 fn works(p: &Path) -> bool {
     let mut c = Command::new(p);
     c.arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
@@ -443,6 +544,16 @@ mod tests {
         assert!(is_lock_failure("fatal: Unable to create 'C:/r/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository"));
         assert!(!is_lock_failure("fatal: not a git repository"));
         assert!(!is_lock_failure("error: Your local changes would be overwritten by merge"));
+    }
+
+    #[test]
+    fn reads_never_use_an_external_diff_and_only_guarded_repos_lose_textconv() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(guarded_args(&v(&["diff", "HEAD"]), true, false), v(&["diff", "--no-ext-diff", "HEAD"]));
+        assert_eq!(guarded_args(&v(&["diff", "HEAD"]), false, false), v(&["diff", "HEAD"]));
+        assert_eq!(guarded_args(&v(&["show", "HEAD"]), true, true), v(&["show", "--no-textconv", "HEAD"]));
+        assert_eq!(guarded_args(&v(&["blame", "--", "a"]), true, true), v(&["blame", "--no-textconv", "--", "a"]));
+        assert_eq!(guarded_args(&v(&["status"]), true, true), v(&["status"]));
     }
 
     #[test]

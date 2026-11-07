@@ -1,5 +1,11 @@
 //! A small Model Context Protocol server over stdio, so coding agents can query a
-//! repository through gitem. `gitem --mcp [path]`. Every tool is read-only.
+//! repository through gitem. `gitem --mcp [path]`.
+//!
+//! Every tool is read-only: nothing an agent sends can make git write a file it names,
+//! since revisions go through [`crate::repo::rev_arg`]. The one write underneath is git's
+//! own, as for any read: `git diff` can refresh the file times it keeps in `.git/index`.
+//! There's nobody here to ask about a repository's config, so its programs stay off
+//! unless the user has already trusted it in gitem.
 use std::io::{BufRead, Write};
 use std::path::Path;
 
@@ -9,7 +15,13 @@ use crate::model::LogQuery;
 use crate::repo::{BlameOpts, DiffSource};
 use crate::{GitExe, Repo};
 
-const DEFAULT_PROTOCOL: &str = "2025-06-18";
+/// The versions this server speaks, newest first. A client asking for another gets the
+/// newest, which is how the protocol says to answer, and decides for itself.
+const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+fn protocol_for(asked: Option<&str>) -> &'static str {
+    PROTOCOLS.iter().find(|p| Some(**p) == asked).copied().unwrap_or(PROTOCOLS[0])
+}
 
 fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value {
     json!({"name": name, "description": description, "inputSchema": {"type": "object", "properties": props, "required": required}})
@@ -61,6 +73,10 @@ fn call(repo: &Repo, name: &str, a: &Value) -> crate::Result<String> {
         }
         "git_blame" => {
             let p = s("path").ok_or_else(|| crate::Error::Other("path is required".into()))?;
+            // Diffs leave out what the AI ignore rules say to. Blame would show the whole file.
+            if repo.ai_ignored(p) {
+                return Err(crate::Error::Other(format!("{p} is excluded by this repository's AI ignore rules.")));
+            }
             Ok(repo.blame(p, None, BlameOpts::default())?.iter().map(|b| format!("{} {}: {}\n", crate::util::prefix(&b.sha, 8), b.author, b.text)).collect())
         }
         "git_branches" => Ok(repo.branches()?.iter().map(|b| format!("{}{} +{} -{} {}\n", if b.is_current { "* " } else { "" }, b.name, b.ahead, b.behind, b.subject)).collect()),
@@ -74,7 +90,7 @@ pub fn handle(repo: &Repo, msg: &Value) -> Option<Value> {
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let result = match method {
         "initialize" => {
-            let v = msg.pointer("/params/protocolVersion").and_then(Value::as_str).unwrap_or(DEFAULT_PROTOCOL);
+            let v = protocol_for(msg.pointer("/params/protocolVersion").and_then(Value::as_str));
             json!({"protocolVersion": v, "capabilities": {"tools": {}}, "serverInfo": {"name": "gitem", "version": env!("CARGO_PKG_VERSION")}})
         }
         "ping" => json!({}),
@@ -104,6 +120,9 @@ pub fn serve(path: &Path) -> i32 {
             return 1;
         }
     };
+    if repo.trust.restricted() {
+        eprintln!("gitem --mcp: this repository's config names programs, which aren't being run. Open it in gitem to decide about them.");
+    }
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     for line in stdin.lock().lines() {

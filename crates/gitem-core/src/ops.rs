@@ -40,6 +40,12 @@ pub struct GitOp {
     pub guards: Vec<Guard>,
     /// Said when a step marked `only_after_failure` was needed and worked.
     pub fallback_note: Option<String>,
+    /// A revision or name that would be read as an option. The op refuses to run.
+    pub bad_arg: Option<String>,
+    /// Nobody asked for this just now, as with a scheduled fetch, so it runs no hooks.
+    pub background: bool,
+    /// This changes the repository's config by the user's own hand in gitem.
+    pub own_config: bool,
 }
 
 impl GitOp {
@@ -105,6 +111,22 @@ impl GitOp {
         self.network = true;
         self
     }
+    pub fn background(mut self) -> Self {
+        self.background = true;
+        self
+    }
+    fn own_config(mut self) -> Self {
+        self.own_config = true;
+        self
+    }
+    /// These go on the command line where git looks for options. One starting with a dash
+    /// stops the op: a tag called `--hard` must not turn a reset into a hard one.
+    fn names(mut self, args: &[&str]) -> Self {
+        if let Some(bad) = args.iter().find(|a| a.starts_with('-')) {
+            self.bad_arg.get_or_insert_with(|| bad.to_string());
+        }
+        self
+    }
 
     /// Plain-text summary of the commands, shown in confirmation dialogs.
     pub fn preview(&self) -> String {
@@ -115,7 +137,7 @@ impl GitOp {
     /// this all the time, and their lock is usually gone in a moment. A command that fails
     /// on a lock hasn't started changing anything, so it's safe to run again.
     fn run_step(&self, git: &GitExe, cwd: Option<&Path>, s: &Step, cancel: &Option<Arc<AtomicBool>>, on_line: &mut dyn FnMut(&str)) -> Result<GitOutput> {
-        let opts = RunOpts { stdin: s.stdin.clone(), env: s.env.clone(), is_write: true, cancel: cancel.clone() };
+        let opts = RunOpts { stdin: s.stdin.clone(), env: s.env.clone(), is_write: true, cancel: cancel.clone(), no_hooks: self.background };
         let started = std::time::Instant::now();
         loop {
             let o = git.run_opts(cwd, &s.args, &opts, on_line)?;
@@ -130,6 +152,9 @@ impl GitOp {
 
     /// Run all steps in order, stopping on the first hard failure.
     pub fn run(&self, git: &GitExe, cwd: Option<&Path>, cancel: Option<Arc<AtomicBool>>, on_line: &mut dyn FnMut(&str)) -> Result<Vec<GitOutput>> {
+        if let Some(bad) = &self.bad_arg {
+            return Err(crate::Error::Git(format!("\"{bad}\" can't be used here: it starts with a dash, so git would read it as an option. Nothing was done.")));
+        }
         for g in &self.guards {
             if !rev_is_at(git, cwd, &g.rev, &g.sha) {
                 return Err(crate::Error::Git(g.why.clone()));
@@ -309,19 +334,24 @@ pub fn commit(o: &CommitOpts) -> GitOp {
 pub fn compose_commits(plan: &[(String, Vec<String>)]) -> GitOp {
     let mut op = GitOp::new(format!("Create {} commit(s)", plan.len()));
     for (message, files) in plan {
-        let mut names = Vec::new();
+        let (mut names, mut literal) = (Vec::new(), Vec::new());
         for f in files {
             names.extend_from_slice(f.as_bytes());
             names.push(0);
+            literal.extend_from_slice(b":(literal)");
+            literal.extend_from_slice(f.as_bytes());
+            literal.push(0);
         }
-        op = op.step(&["add", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(names.clone());
-        op = op.step(&["commit", "--cleanup=whitespace", "-m", message, "--only", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(names);
+        op = op.step(&["add", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(names).env("GIT_LITERAL_PATHSPECS", "1");
+        // Marked name by name, not with the variable, which a hook would inherit: a
+        // `pre-commit` that runs git with a glob would find its pattern taken literally.
+        op = op.step(&["commit", "--cleanup=whitespace", "-m", message, "--only", "--pathspec-from-file=-", "--pathspec-file-nul"]).stdin(literal);
     }
-    op.literal()
+    op
 }
 
 pub fn fixup_commit(sha: &str) -> GitOp {
-    GitOp::new(format!("Fixup {}", short(sha))).step(&["commit", "--fixup", sha])
+    GitOp::new(format!("Fixup {}", short(sha))).names(&[sha]).step(&["commit", "--fixup", sha])
 }
 
 fn short(s: &str) -> &str {
@@ -331,17 +361,17 @@ fn short(s: &str) -> &str {
 // ---- branches ----------------------------------------------------------------
 
 pub fn checkout(target: &str) -> GitOp {
-    GitOp::new(format!("Switch to {target}")).step(&["switch", target])
+    GitOp::new(format!("Switch to {target}")).names(&[target]).step(&["switch", target])
 }
 
 pub fn checkout_detached(rev: &str) -> GitOp {
-    GitOp::new(format!("Checkout {} (detached)", short(rev))).step(&["switch", "--detach", rev])
+    GitOp::new(format!("Checkout {} (detached)", short(rev))).names(&[rev]).step(&["switch", "--detach", rev])
 }
 
 /// Track a remote branch with a new local branch of the short name.
 pub fn checkout_remote(remote_branch: &str) -> GitOp {
     let local = remote_branch.split_once('/').map(|x| x.1).unwrap_or(remote_branch);
-    GitOp::new(format!("Check out {remote_branch}")).step(&["switch", "-c", local, "--track", remote_branch])
+    GitOp::new(format!("Check out {remote_branch}")).names(&[local, remote_branch]).step(&["switch", "-c", local, "--track", remote_branch])
 }
 
 pub fn branch_create(name: &str, start: Option<&str>, switch: bool) -> GitOp {
@@ -349,15 +379,20 @@ pub fn branch_create(name: &str, start: Option<&str>, switch: bool) -> GitOp {
     if let Some(s) = start {
         a.push(s.to_string());
     }
-    GitOp::new(format!("Create branch {name}")).step_v(a)
+    GitOp::new(format!("Create branch {name}")).names(&[name, start.unwrap_or_default()]).step_v(a)
 }
 
 pub fn branch_rename(old: &str, new: &str) -> GitOp {
-    GitOp::new(format!("Rename {old} to {new}")).step(&["branch", "-m", old, new])
+    GitOp::new(format!("Rename {old} to {new}")).names(&[old, new]).step(&["branch", "-m", old, new])
 }
 
 pub fn branch_delete(name: &str, force: bool) -> GitOp {
-    GitOp::new(format!("Delete branch {name}")).step(&["branch", if force { "-D" } else { "-d" }, name])
+    let flag = if force { "-D" } else { "-d" };
+    // A name a server delivered, shown in full. Getting rid of it has to work.
+    if let Some(short) = name.strip_prefix("refs/heads/") {
+        return GitOp::new(format!("Delete branch {name}")).step(&["branch", flag, "--", short]);
+    }
+    GitOp::new(format!("Delete branch {name}")).names(&[name]).step(&["branch", flag, name])
 }
 
 pub fn branch_delete_remote(remote_branch: &str) -> GitOp {
@@ -366,16 +401,16 @@ pub fn branch_delete_remote(remote_branch: &str) -> GitOp {
 }
 
 pub fn branch_set_upstream(branch: &str, upstream: &str) -> GitOp {
-    GitOp::new(format!("Set upstream of {branch}")).step(&["branch", &format!("--set-upstream-to={upstream}"), branch])
+    GitOp::new(format!("Set upstream of {branch}")).names(&[branch]).step(&["branch", &format!("--set-upstream-to={upstream}"), branch])
 }
 
 pub fn branch_unset_upstream(branch: &str) -> GitOp {
-    GitOp::new(format!("Unset upstream of {branch}")).step(&["branch", "--unset-upstream", branch])
+    GitOp::new(format!("Unset upstream of {branch}")).names(&[branch]).step(&["branch", "--unset-upstream", branch])
 }
 
 /// Move a branch that is not checked out to another commit.
 pub fn branch_force_move(name: &str, target: &str) -> GitOp {
-    GitOp::new(format!("Move {name} to {}", short(target))).step(&["branch", "-f", name, target])
+    GitOp::new(format!("Move {name} to {}", short(target))).names(&[name, target]).step(&["branch", "-f", name, target])
 }
 
 // ---- merge / rebase / pick / revert / reset ------------------------------------
@@ -400,7 +435,7 @@ pub fn merge(rev: &str, mode: MergeMode) -> GitOp {
         MergeMode::NoCommit => a.push("--no-commit".into()),
     }
     a.push(rev.to_string());
-    GitOp::new(format!("Merge {rev}")).step_v(a)
+    GitOp::new(format!("Merge {rev}")).names(&[rev]).step_v(a)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -432,7 +467,7 @@ pub fn rebase(o: &RebaseOpts) -> GitOp {
     let mut a = v(&["rebase"]);
     rebase_flags(o, &mut a);
     a.push(o.onto.clone());
-    GitOp::new(format!("Rebase onto {}", o.onto)).step_v(a)
+    GitOp::new(format!("Rebase onto {}", o.onto)).names(&[&o.onto]).step_v(a)
 }
 
 /// Interactive rebase with a todo list already decided in the UI: our own
@@ -450,7 +485,7 @@ pub fn rebase_interactive(o: &RebaseOpts, root: bool, todo_file: &Path, helper: 
     }
     let helper = helper.to_string_lossy().replace('\\', "/");
     let todo = todo_file.to_string_lossy().replace('\\', "/");
-    GitOp::new("Interactive rebase").step_v(a).env("GIT_SEQUENCE_EDITOR", format!("\"{helper}\" --apply-todo \"{todo}\""))
+    GitOp::new("Interactive rebase").names(&[if root { "" } else { &o.onto }]).step_v(a).env("GIT_SEQUENCE_EDITOR", format!("\"{helper}\" --apply-todo \"{todo}\""))
 }
 
 pub fn op_continue(cmd: &str) -> GitOp {
@@ -481,7 +516,8 @@ pub fn cherry_pick(shas: &[String], no_commit: bool, x_trailer: bool) -> GitOp {
         a.push("-x".into());
     }
     a.extend_from_slice(shas);
-    GitOp::new(format!("Cherry-pick {} commit(s)", shas.len())).step_v(a)
+    let names: Vec<&str> = shas.iter().map(String::as_str).collect();
+    GitOp::new(format!("Cherry-pick {} commit(s)", shas.len())).names(&names).step_v(a)
 }
 
 pub fn revert(sha: &str, no_commit: bool, mainline: Option<u32>) -> GitOp {
@@ -494,7 +530,7 @@ pub fn revert(sha: &str, no_commit: bool, mainline: Option<u32>) -> GitOp {
         a.push(m.to_string());
     }
     a.push(sha.to_string());
-    GitOp::new(format!("Revert {}", short(sha))).step_v(a)
+    GitOp::new(format!("Revert {}", short(sha))).names(&[sha]).step_v(a)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,11 +548,11 @@ pub fn reset(rev: &str, mode: ResetMode) -> GitOp {
         ResetMode::Hard => "--hard",
         ResetMode::Keep => "--keep",
     };
-    GitOp::new(format!("Reset {flag} to {}", short(rev))).step(&["reset", flag, rev])
+    GitOp::new(format!("Reset {flag} to {}", short(rev))).names(&[rev]).step(&["reset", flag, rev])
 }
 
 pub fn restore_file_from(rev: &str, path: &str) -> GitOp {
-    GitOp::new(format!("Restore {path} from {}", short(rev))).step(&["restore", "--source", rev, "--staged", "--worktree", "--", path]).literal()
+    GitOp::new(format!("Restore {path} from {}", short(rev))).names(&[rev]).step(&["restore", "--source", rev, "--staged", "--worktree", "--", path]).literal()
 }
 
 /// Resolve an unmerged path by taking one side outright.
@@ -555,19 +591,28 @@ pub fn tag_create(name: &str, rev: Option<&str>, message: Option<&str>, sign: bo
     if let Some(r) = rev {
         a.push(r.to_string());
     }
-    GitOp::new(format!("Create tag {name}")).step_v(a)
+    GitOp::new(format!("Create tag {name}")).names(&[name, rev.unwrap_or_default()]).step_v(a)
 }
 
 pub fn tag_delete(name: &str) -> GitOp {
-    GitOp::new(format!("Delete tag {name}")).step(&["tag", "-d", name])
+    // A name a server delivered, shown in full. `tag -d` won't take it, and getting rid
+    // of it has to work. This is what `tag -d` does underneath.
+    if name.starts_with("refs/tags/") {
+        return GitOp::new(format!("Delete tag {name}")).step(&["update-ref", "-d", name]);
+    }
+    GitOp::new(format!("Delete tag {name}")).names(&[name]).step(&["tag", "-d", name])
 }
 
 pub fn tag_delete_remote(remote: &str, name: &str) -> GitOp {
-    GitOp::new(format!("Delete tag {name} on {remote}")).step(&["push", "--delete", "--", remote, &format!("refs/tags/{name}")]).net()
+    GitOp::new(format!("Delete tag {name} on {remote}")).step(&["push", "--delete", "--", remote, &tag_ref(name)]).net()
 }
 
 pub fn tag_push(remote: &str, name: &str) -> GitOp {
-    GitOp::new(format!("Push tag {name}")).step(&["push", "--", remote, &format!("refs/tags/{name}")]).net()
+    GitOp::new(format!("Push tag {name}")).step(&["push", "--", remote, &tag_ref(name)]).net()
+}
+
+fn tag_ref(name: &str) -> String {
+    if name.starts_with("refs/tags/") { name.to_string() } else { format!("refs/tags/{name}") }
 }
 
 // ---- stash -------------------------------------------------------------------
@@ -611,11 +656,11 @@ pub fn stash_apply(sel: &str, pop: bool, index: bool) -> GitOp {
         a.push("--index".into());
     }
     a.push(sel.to_string());
-    GitOp::new(format!("{} {sel}", if pop { "Pop" } else { "Apply" })).step_v(a)
+    GitOp::new(format!("{} {sel}", if pop { "Pop" } else { "Apply" })).names(&[sel]).step_v(a)
 }
 
 pub fn stash_drop(sel: &str) -> GitOp {
-    GitOp::new(format!("Drop {sel}")).step(&["stash", "drop", sel])
+    GitOp::new(format!("Drop {sel}")).names(&[sel]).step(&["stash", "drop", sel])
 }
 
 /// `stash@{N}` means whatever is Nth by the time it runs, and anything pushing a stash,
@@ -629,7 +674,7 @@ pub fn stash_clear() -> GitOp {
 }
 
 pub fn stash_branch(name: &str, sel: &str) -> GitOp {
-    GitOp::new(format!("Branch {name} from {sel}")).step(&["stash", "branch", name, sel])
+    GitOp::new(format!("Branch {name} from {sel}")).names(&[name, sel]).step(&["stash", "branch", name, sel])
 }
 
 /// Rename by re-storing the same stash commit under a new message. Stored first where that
@@ -676,7 +721,7 @@ pub fn worktree_add(path: &str, branch: Option<&str>, new_branch: Option<&str>, 
     } else if let Some(s) = start {
         a.push(s.to_string());
     }
-    GitOp::new(format!("Add worktree {path}")).step_v(a)
+    GitOp::new(format!("Add worktree {path}")).names(&[path, branch.unwrap_or_default(), new_branch.unwrap_or_default(), start.unwrap_or_default()]).step_v(a)
 }
 
 pub fn worktree_remove(path: &str, force: bool) -> GitOp {
@@ -912,7 +957,7 @@ pub fn submodule_remove(path: &str) -> GitOp {
 // ---- bisect ------------------------------------------------------------------
 
 pub fn bisect_start(bad: &str, good: &str) -> GitOp {
-    GitOp::new("Start bisect").step(&["bisect", "start", bad, good])
+    GitOp::new("Start bisect").names(&[bad, good]).step(&["bisect", "start", bad, good])
 }
 
 pub fn bisect_mark(verdict: &str) -> GitOp {
@@ -920,7 +965,7 @@ pub fn bisect_mark(verdict: &str) -> GitOp {
 }
 
 pub fn bisect_mark_commit(verdict: &str, sha: &str) -> GitOp {
-    GitOp::new(format!("Bisect: {verdict}")).step(&["bisect", verdict, sha])
+    GitOp::new(format!("Bisect: {verdict}")).names(&[sha]).step(&["bisect", verdict, sha])
 }
 
 pub fn bisect_reset() -> GitOp {
@@ -934,11 +979,11 @@ pub fn bisect_run(cmd: &str) -> GitOp {
 // ---- notes, maintenance, misc -------------------------------------------------
 
 pub fn note_set(sha: &str, text: &str) -> GitOp {
-    GitOp::new(format!("Set note on {}", short(sha))).step(&["notes", "add", "-f", "-F", "-", sha]).stdin(text.as_bytes().to_vec())
+    GitOp::new(format!("Set note on {}", short(sha))).names(&[sha]).step(&["notes", "add", "-f", "-F", "-", sha]).stdin(text.as_bytes().to_vec())
 }
 
 pub fn note_remove(sha: &str) -> GitOp {
-    GitOp::new(format!("Remove note on {}", short(sha))).step(&["notes", "remove", sha])
+    GitOp::new(format!("Remove note on {}", short(sha))).names(&[sha]).step(&["notes", "remove", sha])
 }
 
 pub fn clean(include_dirs: bool, include_ignored: bool) -> GitOp {
@@ -972,19 +1017,21 @@ pub fn fsck() -> GitOp {
 }
 
 pub fn config_set(key: &str, value: &str, scope: &str) -> GitOp {
-    GitOp::new(format!("Set {key}")).step(&["config", &format!("--{scope}"), key, value])
+    // `--replace-all` because a plain set refuses a key with several values, and `--` so a
+    // key or value starting with a dash isn't an option.
+    GitOp::new(format!("Set {key}")).step(&["config", &format!("--{scope}"), "--replace-all", "--", key, value]).own_config()
 }
 
 pub fn config_unset(key: &str, scope: &str) -> GitOp {
-    GitOp::new(format!("Unset {key}")).step(&["config", &format!("--{scope}"), "--unset", key])
+    GitOp::new(format!("Unset {key}")).step(&["config", &format!("--{scope}"), "--unset-all", "--", key]).own_config()
 }
 
 pub fn archive(rev: &str, output: &str, format: &str) -> GitOp {
-    GitOp::new(format!("Archive {}", short(rev))).step(&["archive", &format!("--format={format}"), "-o", output, rev])
+    GitOp::new(format!("Archive {}", short(rev))).names(&[rev]).step(&["archive", &format!("--format={format}"), "-o", output, rev])
 }
 
 pub fn format_patch(range: &str, out_dir: &str) -> GitOp {
-    GitOp::new("Create patches").step(&["format-patch", "-o", out_dir, range])
+    GitOp::new("Create patches").names(&[range]).step(&["format-patch", "-o", out_dir, range])
 }
 
 pub fn sparse_set(patterns: &[String], cone: bool) -> GitOp {
@@ -999,7 +1046,7 @@ pub fn sparse_disable() -> GitOp {
 }
 
 pub fn lfs_install() -> GitOp {
-    GitOp::new("Install Git LFS").step(&["lfs", "install", "--local"])
+    GitOp::new("Install Git LFS").step(&["lfs", "install", "--local"]).own_config()
 }
 
 pub fn lfs_track(pattern: &str) -> GitOp {

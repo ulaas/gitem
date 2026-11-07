@@ -51,7 +51,7 @@ fn repo_here() -> Option<Repo> {
     let git = GitExe::discover(None).ok()?;
     let cwd = std::env::current_dir().ok()?;
     let found = Repo::open(git.clone(), &cwd).ok();
-    found.or(Some(Repo { git, root: cwd.clone(), git_dir: cwd.join(".git"), common_dir: cwd.join(".git") }))
+    found.or_else(|| Some(Repo::outside_any(git, cwd.clone(), cwd.join(".git"))))
 }
 
 /// Reads a switch that only tests and visual checks use. Release builds ignore

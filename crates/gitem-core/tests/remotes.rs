@@ -113,7 +113,7 @@ impl Net {
         path_str(&self.bare)
     }
     fn remote_sha(&self, r: &str) -> Option<String> {
-        let o = git().run_raw(Some(&self.bare), &["rev-parse", "--verify", "-q", r]).unwrap();
+        let o = git().run_raw(Some(&self.bare), &["--git-dir=.", "rev-parse", "--verify", "-q", r]).unwrap();
         o.ok().then(|| o.text().trim().to_string())
     }
 }

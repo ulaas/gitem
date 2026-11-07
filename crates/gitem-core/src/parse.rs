@@ -34,22 +34,30 @@ pub fn parse_log(out: &str) -> Vec<Commit> {
 }
 
 /// Parse `%D`: `HEAD -> main, origin/main, tag: v1, refs/stash`.
+/// `git tag` and `git branch` refuse a name starting with a dash, but `update-ref` and
+/// fetch don't, so a server can deliver one, and it would then be an option wherever it's
+/// used as a revision. These are named in full, like `refs/tags/--output=x`, which is what
+/// they really are and works anywhere a revision does.
+pub fn safe_ref_name(prefix: &str, short: &str) -> String {
+    if short.starts_with('-') { format!("{prefix}{short}") } else { short.to_string() }
+}
+
 pub fn parse_decoration(d: &str) -> Vec<RefLabel> {
     let mut v = Vec::new();
     for part in d.split(", ").filter(|p| !p.is_empty()) {
         if let Some(b) = part.strip_prefix("HEAD -> ") {
-            v.push(RefLabel { kind: RefKind::Branch, name: b.to_string(), current: true });
+            v.push(RefLabel { kind: RefKind::Branch, name: safe_ref_name("refs/heads/", b), current: true });
         } else if part == "HEAD" {
             v.push(RefLabel { kind: RefKind::Head, name: "HEAD".into(), current: true });
         } else if let Some(t) = part.strip_prefix("tag: ") {
-            v.push(RefLabel { kind: RefKind::Tag, name: t.to_string(), current: false });
+            v.push(RefLabel { kind: RefKind::Tag, name: safe_ref_name("refs/tags/", t), current: false });
         } else if part == "refs/stash" {
             v.push(RefLabel { kind: RefKind::Stash, name: "stash".into(), current: false });
         } else if part.contains('/') && !part.starts_with("refs/heads/") {
             // Slash-named local branches are disambiguated by `mark_remote_refs`.
-            v.push(RefLabel { kind: RefKind::Remote, name: part.to_string(), current: false });
+            v.push(RefLabel { kind: RefKind::Remote, name: safe_ref_name("refs/remotes/", part), current: false });
         } else {
-            v.push(RefLabel { kind: RefKind::Branch, name: part.to_string(), current: false });
+            v.push(RefLabel { kind: RefKind::Branch, name: safe_ref_name("refs/heads/", part), current: false });
         }
     }
     v
@@ -77,9 +85,9 @@ pub fn parse_branches(out: &str) -> Vec<Branch> {
             continue;
         }
         let (name, is_remote) = if let Some(n) = f[0].strip_prefix("refs/heads/") {
-            (n, false)
+            (safe_ref_name("refs/heads/", n), false)
         } else if let Some(n) = f[0].strip_prefix("refs/remotes/") {
-            (n, true)
+            (safe_ref_name("refs/remotes/", n), true)
         } else {
             continue;
         };
@@ -88,11 +96,11 @@ pub fn parse_branches(out: &str) -> Vec<Branch> {
         }
         let (ahead, behind, gone) = parse_track(f[4]);
         v.push(Branch {
-            name: name.to_string(),
+            name,
             sha: f[1].to_string(),
             is_current: f[2] == "*",
             is_remote,
-            upstream: (!f[3].is_empty()).then(|| f[3].to_string()),
+            upstream: (!f[3].is_empty()).then(|| safe_ref_name("refs/remotes/", f[3])),
             upstream_gone: gone,
             ahead,
             behind,
@@ -129,7 +137,7 @@ pub fn parse_tags(out: &str) -> Vec<Tag> {
         }
         let annotated = f[2] == "tag";
         v.push(Tag {
-            name: f[0].to_string(),
+            name: safe_ref_name("refs/tags/", f[0]),
             sha: if annotated && !f[6].is_empty() { f[6].to_string() } else { f[1].to_string() },
             annotated,
             date: f[3].parse().unwrap_or(0),
@@ -195,7 +203,7 @@ pub fn parse_worktrees(out: &str, current_root: &str) -> Vec<Worktree> {
             match k {
                 "worktree" => w.path = val.to_string(),
                 "HEAD" => w.head = val.to_string(),
-                "branch" => w.branch = Some(val.strip_prefix("refs/heads/").unwrap_or(val).to_string()),
+                "branch" => w.branch = Some(val.strip_prefix("refs/heads/").map_or_else(|| val.to_string(), |n| safe_ref_name("refs/heads/", n))),
                 "detached" => w.detached = true,
                 "bare" => w.bare = true,
                 "locked" => w.locked = Some(val.to_string()),
@@ -249,10 +257,10 @@ pub fn parse_status(out: &str) -> RepoStatus {
                     Some("branch.head") => {
                         let h = p.next().unwrap_or("");
                         if h != "(detached)" {
-                            st.branch = Some(h.to_string());
+                            st.branch = Some(safe_ref_name("refs/heads/", h));
                         }
                     }
-                    Some("branch.upstream") => st.upstream = p.next().map(String::from),
+                    Some("branch.upstream") => st.upstream = p.next().map(|u| safe_ref_name("refs/remotes/", u)),
                     Some("branch.ab") => {
                         st.ahead = p.next().and_then(|x| x.trim_start_matches('+').parse().ok()).unwrap_or(0);
                         st.behind = p.next().and_then(|x| x.trim_start_matches('-').parse().ok()).unwrap_or(0);

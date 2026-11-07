@@ -40,6 +40,10 @@ struct Running {
     open_after: Option<PathBuf>,
     /// Stopping it loses nothing, so it's no reason to ask before closing.
     harmless: bool,
+    /// It changes the repository's config by the user's own hand in gitem.
+    own_config: bool,
+    /// It clones, so the folder it leaves behind is gitem's own work.
+    is_clone: bool,
 }
 
 /// A fetch only updates remote-tracking refs, and can simply be done again.
@@ -48,6 +52,8 @@ fn is_harmless(op: &GitOp) -> bool {
 }
 
 fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, open_after: Option<PathBuf>) -> Running {
+    let own_config = op.own_config;
+    let is_clone = op.steps.first().and_then(|s| s.args.first()).is_some_and(|a| a == "clone");
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let c2 = cancel.clone();
@@ -64,7 +70,7 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
         let _ = tx.send(OpMsg::Done(res));
         ctx2.request_repaint();
     });
-    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless }
+    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, own_config, is_clone }
 }
 
 pub struct RepoTab {
@@ -81,6 +87,8 @@ pub struct RepoTab {
     running: Option<Running>,
     last_auto_fetch: Instant,
     background: Vec<crate::task::Task<String>>,
+    /// The user asked to see the question about this repository's config again.
+    review_trust: bool,
 }
 
 impl RepoTab {
@@ -113,6 +121,7 @@ impl RepoTab {
             running: None,
             last_auto_fetch: Instant::now(),
             background: Vec::new(),
+            review_trust: false,
         }
     }
 
@@ -176,7 +185,12 @@ impl RepoTab {
             if let Some(res) = done {
                 let title = r.title.clone();
                 let open_after = r.open_after.clone();
+                let own_config = r.own_config;
                 self.running = None;
+                // A pull can bring in config through a tracked `include.path`.
+                if let Err(e) = self.repo.recheck_trust(own_config) {
+                    out.push(Action::Error(format!("Could not read this repository's config:\n{e}")));
+                }
                 self.data.refresh(ctx, &self.repo);
                 self.data.mark_changed();
                 match res {
@@ -211,7 +225,12 @@ impl RepoTab {
     }
 }
 
+use gitem_core::trust::TrustState;
+
 const DOCK_ID: &str = "gitem-dock";
+
+/// What to expect while a repository's programs are off.
+const RESTRICTED_NOTE: &str = "While they're off, files that use a filter can look modified when they aren't, diffs and blame show the raw text, signatures aren't checked, and staging skips those filters.";
 
 /// The id egui_dock gives a tab's title in a pane. It's internal to that crate, so if
 /// an upgrade changes it the markers simply disappear; a test watches for that.
@@ -382,6 +401,8 @@ pub struct GitemApp {
     /// Which of those couldn't be reopened and haven't been asked about yet.
     reopen_failed: Vec<String>,
     lock_prompt: Option<LockPrompt>,
+    /// A link to a folder gitem doesn't know, waiting for the user to say yes.
+    link_prompt: Option<gitem_core::forge::DeepLink>,
     /// Whether git is running anywhere, before removing a lock. Tests replace it, because
     /// tests running side by side always have git running somewhere.
     pub git_running: fn() -> bool,
@@ -475,6 +496,7 @@ impl GitemApp {
             session_kept: Vec::new(),
             reopen_failed: Vec::new(),
             lock_prompt: None,
+            link_prompt: None,
             git_running: gitem_core::runner::git_processes_running,
             close_guard: None,
             closing: false,
@@ -549,8 +571,10 @@ impl GitemApp {
                 self.session_kept.retain(|k| *k != root);
                 self.settings.touch_recent(&root);
                 let mut tab = RepoTab::new(ctx, repo, &self.settings);
-                if self.settings.auto_maintenance {
-                    tab.queue.push_back((ops::maintenance_run(), None));
+                // Not until the repository has been decided about. It's a write with
+                // nobody asking for it, so it runs no hooks either.
+                if self.settings.auto_maintenance && !tab.repo.trust.restricted() {
+                    tab.queue.push_back((ops::maintenance_run().background(), None));
                 }
                 self.repos.push(tab);
                 self.active = self.repos.len() - 1;
@@ -563,6 +587,105 @@ impl GitemApp {
                 }
                 false
             }
+        }
+    }
+
+    /// Whether the user has opened this folder before. Anything else gets asked about.
+    fn knows_path(&self, path: &str) -> bool {
+        let norm = |p: &str| {
+            let p = p.replace('\\', "/");
+            let p = p.trim_end_matches('/');
+            if cfg!(windows) { p.to_lowercase() } else { p.to_string() }
+        };
+        let want = norm(path);
+        self.settings.recent_repos.iter().chain(&self.settings.open_repos).any(|r| norm(r) == want) || self.repos.iter().any(|r| norm(&r.repo.root.to_string_lossy()) == want)
+    }
+
+    /// The rest of a link only makes sense in its own repository. If that didn't open, the
+    /// one on screen is some other repository and has nothing to do with it.
+    fn follow_link(&mut self, ctx: &egui::Context, d: gitem_core::forge::DeepLink) {
+        if !self.open_repo(ctx, std::path::Path::new(&d.repo), false) {
+            return;
+        }
+        if let Some(c) = &d.commit {
+            self.apply_action(ctx, Action::Inspect(c.clone()));
+        }
+        if let Some(f) = &d.file {
+            self.apply_action(ctx, Action::OpenTab(Tab::file(f, d.commit.clone(), d.line)));
+        }
+    }
+
+    fn link_dialog(&mut self, ctx: &egui::Context) {
+        let Some(link) = self.link_prompt.clone() else { return };
+        let (mut open, mut cancel) = (false, false);
+        egui::Window::new("Open this repository?").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            ui.set_max_width(560.0);
+            ui.label("A link is asking gitem to open this folder, which you haven't opened in gitem before:");
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new(&link.repo).monospace()).selectable(true));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                open = ui.button("Open it").clicked();
+                cancel = ui.button("Don't open").clicked();
+            });
+        });
+        if open {
+            self.link_prompt = None;
+            self.follow_link(ctx, link);
+        } else if cancel {
+            self.link_prompt = None;
+        }
+    }
+
+    /// Whether the active repository needs an answer about what its config may run.
+    fn trust_question_open(&self) -> bool {
+        self.repos.get(self.active).is_some_and(|r| r.repo.trust.state == TrustState::Undecided || (r.review_trust && r.repo.trust.restricted()))
+    }
+
+    /// Its programs stay off until there's a yes. Nothing here depends on an answer coming.
+    fn trust_dialog(&mut self, ctx: &egui::Context) {
+        if !self.trust_question_open() {
+            return;
+        }
+        let Some(tab) = self.repos.get_mut(self.active) else { return };
+        let (mut allow, mut keep_off) = (false, false);
+        let warn = self.pal.warn;
+        let dim = self.pal.dim;
+        egui::Window::new("This repository's config can run programs").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            ui.set_max_width(640.0);
+            ui.add(egui::Label::new(RichText::new(tab.repo.root.display().to_string()).monospace()).selectable(true));
+            ui.add_space(4.0);
+            ui.label("These settings came with this folder, not from your own git config. Git would run them just to read the repository, so gitem hasn't. Only let them run if you trust where this folder came from.");
+            ui.add_space(6.0);
+            const SHOWN: usize = 100;
+            egui::ScrollArea::vertical().id_salt("trust-keys").max_height(220.0).show(ui, |ui| {
+                for r in tab.repo.trust.risky.iter().take(SHOWN) {
+                    ui.add(egui::Label::new(RichText::new(r.describe()).monospace().color(warn)).selectable(true));
+                }
+                let more = tab.repo.trust.risky.len().saturating_sub(SHOWN);
+                if more > 0 {
+                    ui.label(format!("And {more} more."));
+                }
+            });
+            if let Some(h) = &tab.repo.trust.hooks_path {
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("For information: core.hooksPath = {h}. Reading never runs hooks. Commits and other changes you start do, as in git, whatever you answer here.")).small().color(dim));
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new(RESTRICTED_NOTE).small().color(dim));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                keep_off = ui.button("Keep them off").clicked();
+                allow = ui.button("Let them run").clicked();
+            });
+        });
+        if allow || keep_off {
+            tab.review_trust = false;
+            if let Err(e) = tab.repo.set_trusted(allow) {
+                self.errors.push(format!("Could not save that answer: {e}"));
+            }
+            tab.data.refresh(ctx, &tab.repo);
+            tab.data.mark_changed();
         }
     }
 
@@ -865,12 +988,17 @@ impl GitemApp {
                 self.open_repo(ctx, &p, false);
             }
             Action::DeepLink(d) => {
-                self.open_repo(ctx, std::path::Path::new(&d.repo), false);
-                if let Some(c) = &d.commit {
-                    self.apply_action(ctx, Action::Inspect(c.clone()));
+                if gitem_core::forge::is_network_path(&d.repo) {
+                    self.errors.push(format!("Not opening a link to a network path: {}", d.repo));
+                } else if self.knows_path(&d.repo) {
+                    self.follow_link(ctx, d);
+                } else {
+                    self.link_prompt = Some(d);
                 }
-                if let Some(f) = &d.file {
-                    self.apply_action(ctx, Action::OpenTab(Tab::file(f, d.commit.clone(), d.line)));
+            }
+            Action::ReviewTrust => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    r.review_trust = true;
                 }
             }
             Action::About => self.about_open = true,
@@ -990,9 +1118,9 @@ impl GitemApp {
         if self.no_repo_settings.take().is_some() {
             return;
         }
-        let git = self.git.clone().unwrap_or_else(|_| GitExe { path: "git not found".into(), source: gitem_core::runner::GitSource::System, log: Default::default(), helper: None });
+        let git = self.git.clone().unwrap_or_else(|_| GitExe { path: "git not found".into(), source: gitem_core::runner::GitSource::System, log: Default::default(), helper: None, neutral: Default::default() });
         let root = PathBuf::from(".");
-        self.no_repo_settings = Some(Box::new(NoRepoSettings { repo: Repo { git, git_dir: root.clone(), common_dir: root.clone(), root }, data: RepoData::default(), view: Default::default() }));
+        self.no_repo_settings = Some(Box::new(NoRepoSettings { repo: Repo::outside_any(git, root.clone(), root), data: RepoData::default(), view: Default::default() }));
     }
 
     fn about(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
@@ -1316,7 +1444,7 @@ impl GitemApp {
     }
 
     fn dialog_open(&self) -> bool {
-        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some() || self.lock_prompt.is_some()
+        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some() || self.lock_prompt.is_some() || self.link_prompt.is_some() || self.trust_question_open()
     }
 
     /// Old git still does most things, so this warns and lets the user carry on.
@@ -1493,12 +1621,16 @@ impl GitemApp {
                 }
             }
             if let Some(res) = done {
-                let (title, open) = (g.title.clone(), g.open_after.clone());
+                let (title, open, is_clone) = (g.title.clone(), g.open_after.clone(), g.is_clone);
                 self.global_running = None;
                 match res {
                     Ok(_) => {
                         out.push(Action::Toast(format!("{title}: done")));
                         if let Some(p) = open {
+                            // Only a clone. `git init` can run in a folder that's already a repository.
+                            if let (true, Ok(git)) = (is_clone, &self.git) {
+                                let _ = gitem_core::trust::adopt_new_repo(git, &p);
+                            }
                             out.push(Action::OpenRepo(p));
                         }
                     }
@@ -1569,8 +1701,10 @@ impl GitemApp {
             let mins = self.settings.auto_fetch_minutes;
             if mins > 0 && r.last_auto_fetch.elapsed() > Duration::from_secs(mins as u64 * 60) {
                 r.last_auto_fetch = Instant::now();
-                if !r.data.remotes().is_empty() {
-                    r.queue.push_back((ops::fetch(&ops::FetchOpts { all: true, prune: self.settings.prune_on_fetch, ..Default::default() }), None));
+                // Nobody asked for this one, so it waits for the repository to be decided
+                // about, and runs no hooks.
+                if !r.data.remotes().is_empty() && !r.repo.trust.restricted() {
+                    r.queue.push_back((ops::fetch(&ops::FetchOpts { all: true, prune: self.settings.prune_on_fetch, ..Default::default() }).background(), None));
                 }
             }
             let _ = i;
@@ -1624,6 +1758,18 @@ impl GitemApp {
                     let s = s.clone();
                     egui::Panel::top("op-banner").frame(frame).show(ui, |ui| Self::op_banner(ui, &s, &mut out, &pal));
                 }
+            if repo.trust.restricted() {
+                let frame = egui::Frame::new().fill(pal.banner_fill()).inner_margin(egui::Margin::symmetric(8, 4));
+                egui::Panel::top("trust-banner").frame(frame).show_separator_line(false).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(pal.warn, "Programs from this repository's config are turned off.");
+                        ui.label(RichText::new(RESTRICTED_NOTE).small().color(pal.dim));
+                        if ui.small_button("Review…").clicked() {
+                            out.push(Action::ReviewTrust);
+                        }
+                    });
+                });
+            }
             if *show_sidebar {
                 egui::Panel::left("sidebar").resizable(true).default_size(270.0).size_range(180.0..=600.0).show(ui, |ui| {
                     let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
@@ -1674,6 +1820,8 @@ impl GitemApp {
         self.reopen_dialog(&ctx);
         self.close_dialog(&ctx);
         self.lock_dialog(&ctx);
+        self.trust_dialog(&ctx);
+        self.link_dialog(&ctx);
         self.about(&ctx, &mut out);
         chrome::window_edges(&ctx, &pal);
         for a in out {
