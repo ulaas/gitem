@@ -9,7 +9,7 @@ cargo build --release
 target/release/gitem [path-to-repository ...]
 ```
 
-With no path, gitem restores the repositories from your last session.
+With no path, gitem restores the repositories from your last session. With a path, it opens that repository and leaves the saved session in place for next time.
 
 ### Which git is used
 
@@ -56,7 +56,7 @@ gitem looks for git in this order:
 | Commit signatures | Verification status per commit, signing setup, SSH allowed signers editor |
 | Agents | A board of Claude Code and Codex sessions in this repository's worktrees, with resume, archive, and a file activity treemap; start a session in any worktree |
 | Review | Sessions with a file checklist, comment threads, AI findings, a reading-order suggestion, and handing open notes to an agent |
-| Auto-rebase | Rebase with AI conflict resolution that pauses when the model is unsure, with one-click undo |
+| Auto-rebase | Rebase with AI conflict resolution that pauses when the model is unsure, with an undo that keeps uncommitted changes, and stops without changing anything if they're in a file it has to change |
 | Files view | A sidebar view of the working tree: folders first, change marks on files and the folders holding them, a filter, and a changed-only mode |
 | Changes list | Staged, unstaged, and conflicted files as a flat list or a tree, with folders you can close, and stage or unstage as one |
 | Themes | Seven dark and five light themes, with nineteen named accent colors or any custom color; named accents are tuned for dark and light, and tests check their contrast in every theme |
@@ -68,7 +68,7 @@ gitem looks for git in this order:
 ### Beyond GitLens
 
 - **Visual diff tool:** side-by-side and unified, syntax highlighting, word-level changes, stage or discard by hunk or line, whitespace and algorithm options, image comparison. Works as git's `difftool`.
-- **Visual merge tool:** Ours, Result, Theirs (optionally Base) with synchronised scrolling, per-conflict resolution, inline editing, and auto-resolved regions shown in context. Works as git's `mergetool`.
+- **Visual merge tool:** Ours, Result, Theirs (optionally Base) with synchronised scrolling, per-conflict resolution, inline editing, and auto-resolved regions shown in context. It starts from the file on disk, so hand edits and earlier partial saves are kept, and it asks before saving over a file changed since it was read. Works as git's `mergetool`.
 - **Credential manager:** API tokens and git HTTPS credentials in Windows Credential Manager, a git credential helper, removal of stale Git Credential Manager entries, SSH key generation and agent management, connection tests, commit-signing setup, and dialogs for git's password and passphrase prompts.
 - **Repository tools:** reflog recovery, guided bisect (including automated runs), submodules, hooks, `.gitignore` editing with path testing, clean with preview, Git LFS, sparse checkout, maintenance, and a config editor.
 - **Docking:** drag tabs to split or rearrange the workspace.
@@ -94,7 +94,7 @@ gitem isn't an editor plugin, so the following differ by design.
 - Code lens finds symbols with a regex rather than a language server, so it can miss some declarations.
 - Bare repositories can't be opened, because gitem works from a working tree.
 - The in-app rebase editor works on linear history: merge commits in the range aren't kept, and the view says so. It refuses to start if HEAD has moved since the plan was made. For `--rebase-merges`, use **Rebase onto…**, which has that option, or run the rebase from the command line with gitem as `sequence.editor`.
-- Hunk and line staging need UTF-8 text. For other encodings, stage the whole file. The merge tool offers a choice of versions for such files rather than rewriting them.
+- Hunk and line staging need UTF-8 text. For other encodings, stage the whole file. The merge tool offers a choice of versions for such files rather than rewriting them. A valid file that really contains U+FFFD is treated the same way.
 
 ## Using gitem from the command line
 
@@ -132,7 +132,13 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 ## Safety
 
 - Destructive commands ask first and show the exact git command, including a plain force push from the push form. You can turn this off in Settings. Deleting a stored secret asks too, and a revealed secret hides itself after 30 seconds or when you leave its page.
-- Unstaging during a merge, cherry-pick or rebase keeps the operation and its conflicts. The Commit Composer waits until the operation is finished.
+- Unstaging during a merge, cherry-pick or rebase keeps the operation and its conflicts. The Commit Composer waits until the operation is finished, except while a rebase is stopped at an edit step, where splitting a commit is the point.
+- The Commit Composer keeps its plan until each commit has landed, leaves other staged files staged, and asks before committing a partly staged file whole.
+- Closing a tab, a repository or the window asks first if that would lose unsaved merge resolutions, a written commit message, a Composer plan, typing in an open dialog, or a running or queued git command. A fetch doesn't count. Not yet covered: rebase plans, Launchpad's pull request form, and review notes being typed.
+- Force with lease also uses `--force-if-includes`, so a push after a fetch is refused until you've taken in what the fetch brought.
+- Writes wait up to four seconds for another program's `index.lock`. A lock that stays gets a dialog offering to remove it, only when you ask and no git process is running on the computer. It's never removed automatically. Cancelling a pull can leave one behind, along with half-updated files.
+- Saved patches keep binary files, other encodings and, for all changes, untracked files. Applying tries a plain `git apply` first, which stages nothing, and falls back to a three-way merge and says so. A patch with text that isn't UTF-8 can't go on the clipboard or in a gist, so those are refused.
+- A settings file gitem can't fully read is kept beside it as `settings.json.bad-<time>`, and you're told. Unknown fields are kept when saving, and two copies of gitem merge their changes by setting rather than overwriting each other.
 - A command gitem starts in a terminal, such as an agent or a worktree task, comes from `PATH` on Windows, never from the repository folder. For a tool in the repository, give its path in the setting: `.\gradlew test`. "Open Terminal" itself is unchanged.
 - Passwords and tokens inside remote URLs are masked in titles, the Console and tooltips. Git still gets the real URL, and Copy URL copies it.
 - Very long lines are cut on screen at 5,000 bytes, with a note saying so, because drawing a whole line of a few megabytes would crash the GPU buffer. Staging, saving, copying and Find still use the whole line.
@@ -168,7 +174,7 @@ Write operations are data (`ops.rs`), so every mutation can be logged, confirmed
 - **Performance tests** that fail if parsing stops scaling linearly (`crates/gitem-core/tests/perf.rs`), if a frame gets slow, or if an idle window starts running git, with very large histories, diffs, files, ref lists and statuses. The harness doesn't paint, so these don't measure drawing.
 - **Lifecycle tests** (`crates/gitem/tests/lifecycle.rs`) of real startup, exit, the saved session, and old, new and broken settings files.
 
-Tests ignored with a bug's ID, such as `#[ignore = "VC-6, Phase 3"]`, show a known bug and fail until it's fixed.
+Tests ignored with a bug's ID, such as `#[ignore = "PF-5, Phase 5"]`, show a known bug and fail until it's fixed.
 
 Opt-in tests have real git open the real windows, including the password prompt, which answer by themselves through `GITEM_TEST_ACCEPT`: `cargo test -p gitem --test real_git_windows --test http_auth --test helper_modes -- --ignored --test-threads=1`. Debug builds read that variable and `GITEM_SHOT`; release builds ignore them.
 

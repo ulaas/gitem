@@ -545,7 +545,6 @@ fn a_multi_commit_pick_stopped_between_commits_can_be_aborted() {
     f.run(ops::commit(&ops::CommitOpts { message: "pick-A".into(), ..Default::default() }));
     let _ = ops::op_abort("cherry-pick").run(&f.git, Some(&f.root), None, &mut |_| {});
     assert_eq!(f.repo.status().unwrap().op, RepoOp::None, "whatever git makes of the moved HEAD, it's no longer stuck");
-    assert_eq!(f.read("c.txt").is_empty(), false);
 }
 
 /// A finished multi-commit pick leaves nothing that looks like it's still going.

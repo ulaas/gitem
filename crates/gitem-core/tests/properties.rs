@@ -2,7 +2,6 @@
 //!
 //! Case counts are small so the normal run stays quick. For a longer hunt, set
 //! `PROPTEST_CASES`, for example `PROPTEST_CASES=2000 cargo test --test properties`.
-//! Tests marked with a bug's ID fail until that bug is fixed: run them with `--ignored`.
 gitem_testenv::isolate!();
 
 use std::path::PathBuf;
