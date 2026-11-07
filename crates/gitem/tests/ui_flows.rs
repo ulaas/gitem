@@ -1817,7 +1817,8 @@ fn a_pasted_patch_ending_in_a_blank_context_line_applies() {
     h.step();
     h.step();
     click(&mut h, "Apply");
-    wait_for(&mut h, "the patch to apply", || std::fs::read_to_string(f.root.join("f.txt")).unwrap() == "ONE\ntwo\n\n");
+    // `git apply` removes the file before writing it, so it can be missing for a moment.
+    wait_for(&mut h, "the patch to apply", || std::fs::read_to_string(f.root.join("f.txt")).is_ok_and(|t| t == "ONE\ntwo\n\n"));
     wait_until_quiet(&mut h);
     no_errors(&h);
 }
