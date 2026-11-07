@@ -10,16 +10,25 @@ Added:
 - Find in a diff, search of file contents, a conflict check in the rebase editor, and a push of a whole stack.
 - The commit template and recent messages in the commit box, resetting author or date on amend.
 - Choices of remote, replacing and all-at-once for tags. Merge favouring a side, with your own message. Cherry-pick of a merge commit or a range. Revert of a graph selection. Partial clones, and unshallow.
+- Replies within a review thread on GitHub, GitLab, Bitbucket, Bitbucket Server and Azure DevOps, with the conversation shown in threads. Gitea says it can't.
+- A line in the status bar across open repositories, with a row for each that goes to it.
 - Your own diff and merge tools and terminal. Pull all and open all in a workspace. Changeable keys. One window. Open in gitem in Explorer. Settings export and import. An installer script and an opt-in update check.
 
 Changed:
 
 - Launchpad doesn't offer Approve on your own pull request, or Merge on a draft or one with conflicts.
 - A force push of the default branch asks first, even with a lease.
+- Everything I'm in asks every host your recent repositories use that has a saved token, not just this repository's, and only when you click. Each host's failure shows beside what the others found.
+- A restored Search or Compare tab keeps its query, and waits for you to run it.
+- Undoing a rebase puts back the other branches it moved with `--update-refs`, unless they've moved since.
+- Check for conflicts says plainly that it needs git 2.40, on an older one.
 
 Fixed:
 
 - A remote branch whose name is taken goes to the local branch rather than failing.
 - A pull request with no date from its host no longer says `56 years ago`.
+- Rebase stack goes onto what the bottom of the stack sits on. It used to go onto the branch just below, which moved nothing else.
+- Replies on Bitbucket Server, which the conversation left out, are shown.
+- Tag, stash, worktree and submodule rows in the sidebar have names for a screen reader.
 
 Earlier work isn't listed here. `git log` has it.

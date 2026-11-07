@@ -13,11 +13,11 @@ target/release/gitem [path-to-repository ...]
 
 `packaging/windows/build.ps1` builds that and a per-user Windows installer, with Inno Setup. See `packaging/README.md`: neither has been run, and nothing is signed, so SmartScreen warns about the result. About has Check for updates, and Settings > Workflow can ask once a day. Either only tells you and links to the release's page: nothing is downloaded or run. It's off, and has nowhere to ask, until you give it the address of a releases/latest API.
 
-With no path, gitem restores the repositories from your last session. With a path, it opens that repository and leaves the saved session in place for next time.
+With no path, gitem restores the repositories from your last session, with each Search or Compare tab's query filled in and waiting for you to run it. With a path, it opens that repository and leaves the saved session in place for next time.
 
 ### Which git is used
 
-gitem needs **git 2.38 or newer**, and warns at startup if it finds an older one. Most things still work below that, but merge conflict checks (`merge-tree --write-tree`) and updating dependent branches in a rebase (`rebase --update-refs`) need 2.38.
+gitem needs **git 2.38 or newer**, and warns at startup if it finds an older one. Most things still work below that, but merge conflict checks (`merge-tree --write-tree`) and updating dependent branches in a rebase (`rebase --update-refs`) need 2.38. The rebase editor's Check for conflicts needs 2.40, and says so below that.
 
 gitem looks for git in this order:
 
@@ -40,7 +40,7 @@ gitem looks for git in this order:
 | Commit actions | Reword, squash, drop, revert a selection, Undo Commit, Push to Commit, fixup and Squash Fixups, recompose, copy as patch, compare with common base, conflict prediction |
 | Inspect / Commit Details | Metadata, signatures, autolinks, notes, containing refs, files with stats |
 | Commits, Branches, Remotes, Tags, Stashes, Contributors views | Sidebar trees, plus full views where useful. Local and remote branches open to their latest commits, and long lists have Load more |
-| Repositories, Workspaces | Tabs for several open repositories; named local workspaces with a status overview that follows what they do, and fetch all, pull all (fast-forward only) and open all, reporting failures together |
+| Repositories, Workspaces | Tabs for several open repositories; a line in the status bar saying which need you, from what each last read; named local workspaces with a status overview that follows what they do, and fetch all, pull all (fast-forward only) and open all, reporting failures together |
 | Worktrees | Add, open, move, lock, remove, prune, repair; per-worktree change counts; copy changes or apply a stash into another worktree; open a terminal, run a task, or start an agent CLI there |
 | File History, Line History | Commit lists for a file or a line range |
 | Visual History | Time and author bubble chart with churn bars, zoom, and pan, for a file, a folder, a branch, or the whole repository |
@@ -49,8 +49,8 @@ gitem looks for git in this order:
 | Search & Compare | The same search syntax (`message:`, `-message:`, `re:`, `author:`, `committer:`, `@me`, `commit:`, `file:`, `change:`, `after:`, `before:`, `is:merge`, `type:merge`), and compare of any two refs. Words are plain text and all must match, as with `fix(auth):` or `C++`. `re:` takes a regular expression, such as `re:fix\|feat` |
 | Rebase | Drag to reorder; pick, reword, edit, squash, fixup, drop, exec, break. Check for conflicts tries the plan out without touching anything, and names the commit it would stop at. Needs git 2.40. Also works as git's own `sequence.editor` |
 | Git Command Palette | `Ctrl+P`: every branch and file, and the commands from gitem's menus that apply to the repository, with guided forms. Commands that need a row to act on, such as those for a graph selection, stay on that row's menu |
-| Launchpad | Pull requests grouped by what they need from you, with checks, review, and conflict state; pin, snooze for an hour, a day or a week, stacked-PR labels, a rebase that moves the stack's branches and a push of them all together; the current branch's PR in the status bar, from Launchpad or, if turned on in Settings, without it. Everything you're involved in across the host is one click away, up to 200 per query. It needs a repository open, on that host |
-| Pull requests | A tab for each one: description, changed files with their diffs where the host gives them, each check with a link to its log, the conversation and inline comments, Approve, Request changes and Comment, a comment on a line, and Merge with a choice of merge, squash or rebase where the host takes one. Details shows which pull request a commit came in by, when asked |
+| Launchpad | Pull requests grouped by what they need from you, with checks, review, and conflict state; pin, snooze for an hour, a day or a week, stacked-PR labels, a rebase that moves the stack's branches and a push of them all together; the current branch's PR in the status bar, from Launchpad or, if turned on in Settings, without it. Everything you're involved in is one click away, up to 200 per query, from this repository's host and every host your recent repositories use that has a saved token, with each host's failure beside what the others found. It asks only when you click, one or more requests per host. It needs a repository open, though not one on a host |
+| Pull requests | A tab for each one: description, changed files with their diffs where the host gives them, each check with a link to its log, the conversation with inline comments in their threads, a reply within a thread (not on Gitea, which says so), Approve, Request changes and Comment, a comment on a line, and Merge with a choice of merge, squash or rebase where the host takes one. Details shows which pull request a commit came in by, when asked |
 | Start Work, Start Review | Branch or worktree from an issue; check out a PR, or open it in a worktree; start your agent command there, in a new terminal |
 | Remote provider integrations | GitHub, GitLab, Bitbucket, Bitbucket Server/Data Center, Azure DevOps (and Server), and Gitea/Forgejo, including self-hosted: links, PRs and their details, issues, create, merge, approve, request changes, comment. GitLab has no request for changes, Bitbucket Server merges by its own setting, and Azure's file lists come with no diff. Gerrit and Google Source: links only |
 | Issue tracker integrations | Jira Cloud, Jira Data Center/Server, Linear, and Trello |
@@ -84,7 +84,7 @@ gitem looks for git in this order:
 - **Docking:** drag tabs to split or rearrange the workspace.
 - **Your own tools:** a file's menu opens it in your diff tool, by the name git knows or git's own setting, and Settings > Agents and integrations chooses the terminal: cmd, PowerShell, Windows Terminal, Git Bash, or a program of your own.
 - **Cleaning up:** Clean up branches lists those merged or gone from the remote, and a branch you aren't on can be fast-forwarded from its menu.
-- **Undo:** after a merge, rebase, pull, reset, cherry-pick, revert, branch delete, stash drop, discard, or delete of untracked files, the toolbar's Undo says what it will take back, and Redo follows one that moved HEAD. Only the last thing done is on offer, and it says so if things have moved since. `Ctrl+Alt+Z` does the same. Clean, and deleting a branch on a remote, can't be undone.
+- **Undo:** after a merge, rebase, pull, reset, cherry-pick, revert, branch delete, stash drop, discard, or delete of untracked files, the toolbar's Undo says what it will take back, and Redo follows one that moved HEAD. Undoing a rebase also puts back other branches it moved with `--update-refs`, except one that has moved since or is now checked out in another worktree, which stays and is named. Only the last thing done is on offer, and it says so if things have moved since. `Ctrl+Alt+Z` does the same. Clean, and deleting a branch on a remote, can't be undone.
 - **One window:** with Use one window on, opening a folder or a link from a terminal goes to the window already open. Settings can also add Open in gitem to Explorer, and take it away.
 - **Keys:** Settings > Workflow changes the keys for the main commands, and says if two collide.
 
