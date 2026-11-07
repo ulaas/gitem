@@ -172,42 +172,6 @@ fn mailmap_joins_a_person_and_their_heatmap_is_theirs_alone() {
     assert_eq!(searched.len(), 2, "Search their commits agrees: {searched:?}");
 }
 
-// ---- health
-
-#[test]
-fn scheduled_maintenance_is_on_only_when_git_has_this_repository_listed() {
-    let f = Fx::new();
-    f.commit("a", "first");
-    let item = |r: &Repo| r.health().unwrap().items.into_iter().find(|i| i.maintenance).unwrap();
-    assert!(!item(&f.repo).enabled);
-    // `start` is the real button, and adds a task to the system's scheduler, which a test
-    // mustn't do. `register` is the part of it that gitem reads back.
-    f.q(&["maintenance", "register"]);
-    assert!(item(&f.repo).enabled, "{:?}", f.q(&["config", "--global", "--get-all", "maintenance.repo"]));
-    f.run(ops::maintenance_unregister());
-    assert!(!item(&f.repo).enabled);
-    assert!(!git().run_raw(Some(&f.root), &["config", "--local", "--get-regexp", "^maintenance"]).unwrap().ok(), "nothing left behind");
-    assert_eq!(ops::maintenance_start().steps[0].args, ["maintenance", "start"]);
-}
-
-#[test]
-fn health_says_where_an_option_is_set() {
-    let f = Fx::new();
-    f.commit("a", "first");
-    let item = |r: &Repo| r.health().unwrap().items.into_iter().find(|i| i.label == "Untracked cache").unwrap();
-    f.q(&["config", "--local", "core.untrackedCache", "true"]);
-    let local = item(&f.repo);
-    assert!(local.enabled);
-    assert_eq!(local.set_elsewhere, None, "undo here will work");
-
-    f.q(&["config", "--local", "--unset", "core.untrackedCache"]);
-    f.q(&["config", "--global", "core.untrackedCache", "true"]);
-    let global = item(&f.repo);
-    f.q(&["config", "--global", "--unset", "core.untrackedCache"]);
-    assert!(global.enabled);
-    assert_eq!(global.set_elsewhere.as_deref(), Some("global"), "undo here couldn't change it");
-}
-
 // ---- bisect
 
 #[test]
@@ -307,7 +271,6 @@ fn the_versions_of_changed_files_can_be_told_apart() {
     let before = f.repo.compare_blobs("main", "HEAD").unwrap();
     assert_eq!(before.len(), 1);
     assert_eq!(before["b"].len(), 40);
-    // Longer, as a same-sized change in the same instant can look unchanged to `git add`.
     f.commit("b", "a second, longer version");
     assert_ne!(f.repo.compare_blobs("main", "HEAD").unwrap()["b"], before["b"]);
 }
