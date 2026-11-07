@@ -205,7 +205,10 @@ fn holding_an_arrow_key_loads_only_the_commit_it_stops_on() {
     pump(&mut h, 300);
     quiet(&mut h);
     let _ = std::fs::remove_file(&f.log);
+    // For the message below: this has failed now and then with 3, cause not known yet.
+    let mut stamps = Vec::new();
     for sha in shas.iter().take(15) {
+        stamps.push(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
         h.state_mut().repos[0].inspect.set(sha);
         h.step();
         // Whatever is shown belongs to this commit: never the one before.
@@ -217,7 +220,8 @@ fn holding_an_arrow_key_loads_only_the_commit_it_stops_on() {
     pump(&mut h, 300);
     quiet(&mut h);
     let (started, peak) = f.report();
-    assert!(started <= 2, "{started} show commands for 15 selections");
+    assert!(started <= 2, "{started} show commands for 15 selections. Selected {:?} at {:?}
+{}", &shas[..15], stamps, std::fs::read_to_string(&f.log).unwrap_or_default());
     assert!(peak <= 1, "{peak} at once");
     let t = Instant::now();
     while h.state().repos[0].inspect.showing() != Some(shas[14]) {

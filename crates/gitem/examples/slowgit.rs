@@ -21,7 +21,7 @@ fn main() {
     let ms: u64 = std::env::var("SLOWGIT_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let hit = args.iter().find(|a| names.split(',').any(|n| !n.is_empty() && n == a.as_str())).cloned();
     if let Some(h) = &hit {
-        log(format!("S {} {} {h}", now(), std::process::id()));
+        log(format!("S {} {} {h} {}", now(), std::process::id(), args.join(" ")));
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     let st = std::process::Command::new(real).args(&args).status().expect("run git");
