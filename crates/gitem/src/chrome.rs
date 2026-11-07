@@ -505,73 +505,163 @@ fn rail_button(ui: &mut Ui, item: &RailItem, tint: Color32, active: bool, labels
     tooltip(resp, name, item.tip, p)
 }
 
-/// Names for the groups in the More list, in `rail_top`'s order after the first.
-const MORE_GROUPS: [&str; 3] = ["Together", "History", "Insight"];
-
-/// The views that sit behind the More button, with what's left of the rail's bottom.
-fn more_list(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, p: &Palette) -> Option<&'static RailItem> {
-    let mut clicked = None;
-    let mut entry = |ui: &mut Ui, item: &'static RailItem, tint: Color32| {
-        let name = crate::i18n::t(item.name);
-        let r = ui.add(egui::Button::new((RichText::new(item.glyph).color(tint), RichText::new(name))).selected(is_focused(item)).frame_when_inactive(false));
-        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
-        if r.on_hover_text(item.tip).clicked() {
-            clicked = Some(item);
-            ui.close();
-        }
-    };
-    for (i, group) in rail_top().into_iter().enumerate().skip(1) {
-        ui.label(RichText::new(MORE_GROUPS[i - 1]).small().color(p.dim));
-        for item in group {
-            entry(ui, item, group_tint(i, p));
-        }
-        ui.separator();
-    }
-    ui.label(RichText::new("Repository").small().color(p.dim));
-    for item in rail_bottom().iter().filter(|i| !KEPT_ON_RAIL.contains(&i.name)) {
-        entry(ui, item, p.dim);
-    }
-    clicked
-}
+/// Names for the groups in the More list, in `rail_top`'s order.
+const MORE_GROUPS: [&str; 4] = ["Work", "Together", "History", "Insight"];
 
 /// From the bottom of the rail, what stays when the rest go in More.
 const KEPT_ON_RAIL: [&str; 2] = ["Console", "Settings"];
 
-/// The views rail. `is_focused` lights up the icon of the tab in front; a click returns
-/// the view to open, and whether it came from the More list. With `full`, every view has
-/// its own icon, and the top part scrolls if the window is too short for them. With `labels`,
-/// each has its name beside it.
-pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, labels: bool, p: &Palette) -> Option<(Tab, bool)> {
-    let mut clicked = None;
-    let mut from_more = false;
+/// Where each view goes: on the rail, or behind More. Built from the settings each frame.
+pub struct RailPlaces<'a> {
+    /// Every view on the rail, rather than the first group and a More list.
+    pub full: bool,
+    /// Taken from More and given a place on the rail.
+    pub pinned: &'a [String],
+    /// Taken off the rail, so in More.
+    pub hidden: &'a [String],
+}
+
+impl RailPlaces<'_> {
+    /// Whether this view is on the rail before anyone pins or removes anything.
+    fn by_default(&self, item: &RailItem) -> bool {
+        self.full || rail_top()[0].iter().any(|i| i.name == item.name) || KEPT_ON_RAIL.contains(&item.name)
+    }
+
+    pub fn on_rail(&self, item: &RailItem) -> bool {
+        // Settings can't go: it's where the rest are brought back from when More is empty.
+        let named = |list: &[String]| list.iter().any(|n| n == item.name);
+        item.name == "Settings" || ((self.by_default(item) || named(self.pinned)) && !named(self.hidden))
+    }
+
+    /// Changes the settings to put a view on the rail or take it off. Only one of the two
+    /// lists ever names a view: pinned for one that isn't there by default, hidden for one
+    /// that is. So switching "All views" on and off keeps what was chosen for each.
+    pub fn set(name: &str, on: bool, pinned: &mut Vec<String>, hidden: &mut Vec<String>) {
+        let Some(item) = rail_top().into_iter().flatten().chain(rail_bottom()).find(|i| i.name == name) else { return };
+        let default = rail_top()[0].iter().any(|i| i.name == item.name) || KEPT_ON_RAIL.contains(&item.name);
+        pinned.retain(|n| n != name);
+        hidden.retain(|n| n != name);
+        if on && !default {
+            pinned.push(name.to_string());
+        } else if !on {
+            hidden.push(name.to_string());
+        }
+    }
+}
+
+/// What a click on the rail asks for.
+pub enum RailEvent {
+    /// Open this view; `true` when it came from the More list.
+    Open(Tab, bool),
+    /// Put this view on the rail, or take it off.
+    Place(&'static str, bool),
+}
+
+/// The views that sit behind the More button, grouped as on the rail, each with a pin.
+fn more_list(ui: &mut Ui, places: &RailPlaces, is_focused: &dyn Fn(&RailItem) -> bool, p: &Palette) -> Option<RailEvent> {
+    let mut event = None;
+    let pin = crate::i18n::t("Pin to rail");
+    let mut entry = |ui: &mut Ui, item: &'static RailItem, tint: Color32| {
+        let name = crate::i18n::t(item.name);
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::Button::new((RichText::new(item.glyph).color(tint), RichText::new(name))).selected(is_focused(item)).frame_when_inactive(false).min_size(vec2(150.0, 0.0)));
+            r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+            let r = r.on_hover_text(item.tip);
+            r.context_menu(|ui| {
+                if ui.button(pin).clicked() {
+                    event = Some(RailEvent::Place(item.name, true));
+                }
+            });
+            if r.clicked() {
+                event = Some(RailEvent::Open((item.make)(), true));
+                ui.close();
+            }
+            let b = ui.add(egui::Button::new(RichText::new(icon::PUSH_PIN).color(p.dim)).frame_when_inactive(false));
+            b.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("{pin}: {name}")));
+            if b.on_hover_text(pin).clicked() {
+                event = Some(RailEvent::Place(item.name, true));
+            }
+        });
+    };
+    let mut first = true;
+    let mut heading = |ui: &mut Ui, title: &str| {
+        if !std::mem::take(&mut first) {
+            ui.separator();
+        }
+        ui.label(RichText::new(crate::i18n::t(title)).small().color(p.dim));
+    };
+    for (i, group) in rail_top().into_iter().enumerate() {
+        let off: Vec<&'static RailItem> = group.iter().filter(|it| !places.on_rail(it)).collect();
+        if off.is_empty() {
+            continue;
+        }
+        heading(ui, MORE_GROUPS[i]);
+        for item in off {
+            entry(ui, item, group_tint(i, p));
+        }
+    }
+    let off: Vec<&'static RailItem> = rail_bottom().iter().filter(|it| !places.on_rail(it)).collect();
+    if !off.is_empty() {
+        heading(ui, "Repository");
+        for item in off {
+            entry(ui, item, p.dim);
+        }
+    }
+    event
+}
+
+/// A rail icon's right-click menu, for taking it off the rail.
+fn rail_menu(resp: &Response, item: &'static RailItem, event: &mut Option<RailEvent>) {
+    if item.name == "Settings" {
+        return;
+    }
+    resp.context_menu(|ui| {
+        if ui.button(crate::i18n::t("Remove from rail")).clicked() {
+            *event = Some(RailEvent::Place(item.name, false));
+        }
+    });
+}
+
+/// One icon on the rail, with its menu.
+fn rail_entry(ui: &mut Ui, item: &'static RailItem, tint: Color32, is_focused: &dyn Fn(&RailItem) -> bool, labels: bool, p: &Palette, event: &mut Option<RailEvent>) {
+    let resp = rail_button(ui, item, tint, is_focused(item), labels, p);
+    rail_menu(&resp, item, event);
+    if resp.clicked() {
+        *event = Some(RailEvent::Open((item.make)(), false));
+    }
+}
+
+/// The views rail. `is_focused` lights up the icon of the tab in front. Views not on it are
+/// in the More list, where each can be pinned; a right-click takes one off again. The top
+/// part scrolls if the window is too short. With `labels`, each has its name beside it.
+pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, places: &RailPlaces, labels: bool, p: &Palette) -> Option<RailEvent> {
+    let mut event = None;
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-    let bottom: Vec<&'static RailItem> = rail_bottom().iter().filter(|i| full || KEPT_ON_RAIL.contains(&i.name)).collect();
+    let bottom: Vec<&'static RailItem> = rail_bottom().iter().filter(|i| places.on_rail(i)).collect();
     let pinned = bottom.len() as f32 * RAIL_ITEM + 9.0;
     let height = (ui.available_height() - pinned).max(RAIL_ITEM);
+    let groups: Vec<(usize, Vec<&'static RailItem>)> = rail_top().into_iter().enumerate().map(|(i, g)| (i, g.iter().filter(|it| places.on_rail(it)).collect::<Vec<_>>())).filter(|(_, g)| !g.is_empty()).collect();
+    let off: Vec<&'static RailItem> = rail_top().into_iter().flatten().chain(rail_bottom()).filter(|i| !places.on_rail(i)).collect();
+    let show_more = !off.is_empty();
     ui.allocate_ui_with_layout(vec2(rail_width(labels), height), egui::Layout::top_down(egui::Align::Min), |ui| {
-        let groups = rail_top();
-        let shown: &[&'static [RailItem]] = if full { &groups } else { &groups[..1] };
-        let content = shown.iter().map(|g| g.len() as f32 * RAIL_ITEM + 9.0).sum::<f32>() + if full { 0.0 } else { RAIL_ITEM };
+        let content = groups.iter().map(|(_, g)| g.len() as f32 * RAIL_ITEM + 9.0).sum::<f32>() + if show_more { RAIL_ITEM } else { 0.0 };
         let area = egui::ScrollArea::vertical().id_salt("rail").max_height(height).auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
             ui.add_space(4.0);
-            for (i, group) in shown.iter().enumerate() {
-                if i > 0 {
+            for (n, (i, group)) in groups.iter().enumerate() {
+                if n > 0 {
                     separator(ui, labels, p);
                 }
-                for item in group.iter() {
-                    if rail_button(ui, item, group_tint(i, p), is_focused(item), labels, p).clicked() {
-                        clicked = Some(item);
-                    }
+                for item in group {
+                    rail_entry(ui, item, group_tint(*i, p), is_focused, labels, p, &mut event);
                 }
             }
-            if !full {
-                let hidden_on = rail_top().into_iter().skip(1).flatten().chain(rail_bottom().iter().filter(|i| !KEPT_ON_RAIL.contains(&i.name))).any(is_focused);
-                let more = RailItem { glyph: icon::DOTS_THREE_CIRCLE, name: "More", tip: "Every other view", make: Tab::home, is: |_| false };
+            if show_more {
+                let hidden_on = off.iter().any(|i| is_focused(i));
+                let more = RailItem { glyph: icon::DOTS_THREE_CIRCLE, name: "More", tip: "Every other view. Pin one to keep it on the rail.", make: Tab::home, is: |_| false };
                 let resp = rail_button(ui, &more, p.dim, hidden_on, labels, p);
                 egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).show(|ui| {
-                    if let Some(item) = more_list(ui, is_focused, p) {
-                        clicked = Some(item);
-                        from_more = true;
+                    if let Some(e) = more_list(ui, places, is_focused, p) {
+                        event = Some(e);
                     }
                 });
             }
@@ -587,12 +677,10 @@ pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, lab
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.add_space(4.0);
         for item in bottom.iter().rev() {
-            if rail_button(ui, item, p.dim, is_focused(item), labels, p).clicked() {
-                clicked = Some(item);
-            }
+            rail_entry(ui, item, p.dim, is_focused, labels, p, &mut event);
         }
     });
-    clicked.map(|i| ((i.make)(), from_more))
+    event
 }
 
 fn separator(ui: &mut Ui, labels: bool, p: &Palette) {
@@ -637,6 +725,42 @@ mod tests {
                 assert!(c >= 3.0, "{} group {group}: {c:.2}", t.name());
             }
         }
+    }
+
+    fn on(full: bool, pinned: &[String], hidden: &[String]) -> Vec<&'static str> {
+        let places = RailPlaces { full, pinned, hidden };
+        rail_top().into_iter().flatten().chain(rail_bottom()).filter(|i| places.on_rail(i)).map(|i| i.name).collect()
+    }
+
+    #[test]
+    fn pinning_and_removing_rail_views() {
+        let (mut pinned, mut hidden) = (Vec::new(), Vec::new());
+        let start = on(false, &pinned, &hidden);
+        assert!(start.contains(&"Graph") && start.contains(&"Console") && !start.contains(&"Reflog"));
+
+        RailPlaces::set("Reflog", true, &mut pinned, &mut hidden);
+        RailPlaces::set("Graph", false, &mut pinned, &mut hidden);
+        RailPlaces::set("Console", false, &mut pinned, &mut hidden);
+        let now = on(false, &pinned, &hidden);
+        assert!(now.contains(&"Reflog") && !now.contains(&"Graph") && !now.contains(&"Console"), "{now:?}");
+        assert_eq!((pinned.clone(), hidden.clone()), (vec!["Reflog".to_string()], vec!["Graph".to_string(), "Console".to_string()]));
+
+        // Back where it started, with nothing left in either list.
+        RailPlaces::set("Reflog", false, &mut pinned, &mut hidden);
+        RailPlaces::set("Graph", true, &mut pinned, &mut hidden);
+        RailPlaces::set("Console", true, &mut pinned, &mut hidden);
+        RailPlaces::set("Reflog", true, &mut pinned, &mut hidden);
+        RailPlaces::set("Reflog", false, &mut pinned, &mut hidden);
+        assert_eq!(on(false, &pinned, &hidden).len(), start.len(), "{pinned:?} {hidden:?}");
+        assert!(pinned.is_empty());
+    }
+
+    #[test]
+    fn a_view_removed_with_every_view_on_still_goes_and_settings_never_does() {
+        let hidden = vec!["Reflog".to_string(), "Settings".to_string()];
+        let now = on(true, &[], &hidden);
+        assert!(!now.contains(&"Reflog") && now.contains(&"Settings") && now.contains(&"Health"));
+        RailPlaces::set("nothing by that name", true, &mut Vec::new(), &mut Vec::new());
     }
 
     #[test]

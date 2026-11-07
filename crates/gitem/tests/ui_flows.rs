@@ -7138,6 +7138,35 @@ fn the_rail_keeps_a_few_views_and_the_more_list_doesnt_pile_up_tabs() {
 }
 
 #[test]
+fn a_view_from_more_can_be_pinned_to_the_rail_and_taken_off_again() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert!(h.query_by_label("Reflog").is_none());
+    click(&mut h, "More");
+    click(&mut h, "Pin to rail: Reflog");
+    for _ in 0..3 {
+        h.step();
+    }
+    assert_eq!(h.state().settings.rail_pinned, vec!["Reflog"]);
+    assert!(h.query_by_label("Pin to rail: Reflog").is_none(), "the menu closed");
+    assert!(h.query_by_label("Reflog").is_some(), "it's on the rail");
+
+    // Right-click takes it off, and a default view too.
+    for name in ["Reflog", "Graph"] {
+        h.get_by_label(name).click_secondary();
+        h.step();
+        click(&mut h, "Remove from rail");
+        h.step();
+    }
+    assert!(h.state().settings.rail_pinned.is_empty());
+    assert!(h.query_by_label("Reflog").is_none() && h.query_by_label("Graph").is_none());
+    click(&mut h, "More");
+    assert!(h.query_by_label("Pin to rail: Graph").is_some(), "a removed view is in More, ready to pin back");
+}
+
+#[test]
 fn the_commit_menu_fits_a_short_window() {
     let f = Fx::new();
     sample_history(&f);

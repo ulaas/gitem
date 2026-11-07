@@ -120,6 +120,10 @@ pub struct Settings {
     /// A wider rail with each view's name beside its icon.
     #[serde(default)]
     pub rail_labels: bool,
+    /// Views from the More list given a place on the rail, by name.
+    pub rail_pinned: Vec<String>,
+    /// Views that would be on the rail but were taken off it, by name. They're in More.
+    pub rail_hidden: Vec<String>,
     /// No moving spinners or animated transitions.
     pub reduce_motion: bool,
     /// Blue and orange diffs in place of green and red.
@@ -284,6 +288,8 @@ impl Default for Settings {
             details_on_open: true,
             rail_full: false,
             rail_labels: false,
+            rail_pinned: Vec::new(),
+            rail_hidden: Vec::new(),
             reduce_motion: false,
             colorblind_diff: false,
             show_experimental: false,

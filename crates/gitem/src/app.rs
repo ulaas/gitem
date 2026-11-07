@@ -3266,9 +3266,13 @@ impl GitemApp {
                 None => tab.dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).and_then(name_of),
             };
             egui::Panel::left("rail").frame(egui::Frame::new().fill(pal.bg)).resizable(false).exact_size(chrome::rail_width(self.settings.rail_labels)).show(ui, |ui| {
-                match chrome::rail(ui, &|i| focused == Some(i.name), self.settings.rail_full, self.settings.rail_labels, &pal) {
-                    Some((t, true)) => out.push(Action::OpenFromMore(t)),
-                    Some((t, false)) => out.push(Action::OpenTab(t)),
+                let places = chrome::RailPlaces { full: self.settings.rail_full, pinned: &self.settings.rail_pinned, hidden: &self.settings.rail_hidden };
+                match chrome::rail(ui, &|i| focused == Some(i.name), &places, self.settings.rail_labels, &pal) {
+                    Some(chrome::RailEvent::Open(t, true)) => out.push(Action::OpenFromMore(t)),
+                    Some(chrome::RailEvent::Open(t, false)) => out.push(Action::OpenTab(t)),
+                    Some(chrome::RailEvent::Place(name, on)) => out.push(Action::Settings(Box::new(move |s| {
+                        chrome::RailPlaces::set(name, on, &mut s.rail_pinned, &mut s.rail_hidden);
+                    }))),
                     None => {}
                 }
             });
