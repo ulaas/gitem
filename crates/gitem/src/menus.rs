@@ -224,20 +224,21 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         }
         if item(ui, "Auto-rebase current onto this with AI…") {
             let (n, r, cfg) = (name.clone(), cx.repo.clone(), cx.settings.ai.clone());
-            let undo = crate::views::textview::UndoSlot::default();
-            let slot = undo.clone();
-            let job: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(move || {
-                let key = gitem_core::cred::ai_key(cfg.provider.key_name());
-                let done = gitem_core::autorebase::run(&r, &n, &cfg.custom_instructions, &|s, u| gitem_core::ai::complete(&cfg, key.as_deref(), s, u)).map_err(|e| e.to_string())?;
-                if let Ok(mut u) = slot.lock() {
-                    *u = Some(gitem_core::autorebase::undo_op(&done));
-                }
-                Ok(done.describe(&n))
-            });
-            let tab = Tab::Text(Box::new(crate::views::textview::TextView::with_undo(&format!("Auto-rebase onto {name}"), job, undo)));
-            cx.form(forms::FormDialog::new(format!("Auto-rebase onto {name}"), "Start").info("Rebases the current branch, sending each conflict to your AI provider. It stops and leaves the rebase to you if the model is unsure. You can undo it afterwards, unless your uncommitted changes are in a file the undo has to change: then it stops and changes nothing.").on_submit({
-                let mut tab = Some(tab);
-                move |_| Ok(tab.take().map(Action::OpenTab).into_iter().collect())
+            let title = format!("Auto-rebase onto {name}");
+            cx.form(forms::FormDialog::new(title.clone(), "Start").info("Rebases the current branch, sending each conflict to your AI provider. It stops and leaves the rebase to you if the model is unsure, and also once it has resolved a commit's conflicts, so you can read the result before anything is committed from it. You can undo it afterwards, unless your uncommitted changes are in a file the undo has to change: then it stops and changes nothing.").check("unattended", "Don't stop for review: commit the model's answers and carry on", false).on_submit(move |v| {
+                let (n, r, cfg) = (n.clone(), r.clone(), cfg.clone());
+                let review = !v.on("unattended");
+                let undo = crate::views::textview::UndoSlot::default();
+                let slot = undo.clone();
+                let job: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(move || {
+                    let key = gitem_core::cred::ai_key(cfg.provider.key_name());
+                    let done = gitem_core::autorebase::run(&r, &n, &cfg.custom_instructions, review, &|s, u| gitem_core::ai::complete(&cfg, key.as_deref(), s, u)).map_err(|e| e.to_string())?;
+                    if let Ok(mut u) = slot.lock() {
+                        *u = Some(gitem_core::autorebase::undo_op(&done));
+                    }
+                    Ok(done.describe(&n))
+                });
+                Ok(vec![Action::OpenTab(Tab::Text(Box::new(crate::views::textview::TextView::with_undo(&title, job, undo))))])
             }));
         }
         if item(ui, "Check for conflicts with current") {

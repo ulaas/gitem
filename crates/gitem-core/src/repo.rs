@@ -752,6 +752,11 @@ impl Repo {
         v
     }
 
+    /// Whether `.aiignore` and its like keep this file out of AI requests.
+    pub fn ai_ignored(&self, path: &str) -> bool {
+        crate::ai::is_ignored(&self.ai_ignore_patterns(), path)
+    }
+
     /// A diff prepared for an AI request, honouring ignore rules.
     pub fn diff_for_ai(&self, src: &DiffSource) -> Result<String> {
         Ok(crate::ai::filter_diff(&self.diff_text(src)?, &self.ai_ignore_patterns()))

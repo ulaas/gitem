@@ -1022,7 +1022,7 @@ fn auto_rebase_resolves_with_the_model_then_can_be_undone() {
     use gitem_core::autorebase;
     let f = Fx::new();
     stacked_conflict(&f);
-    let sum = autorebase::run(&f.repo, "main", "", &|_s, u| {
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_s, u| {
         assert!(u.contains("Ours:") && u.contains("Theirs:") && u.contains("mine"), "{u}");
         Ok("merged line".to_string())
     })
@@ -1039,6 +1039,61 @@ fn auto_rebase_resolves_with_the_model_then_can_be_undone() {
     assert_eq!(f.read("c.txt"), "mine\nmiddle\n");
 }
 
+/// The model's answer came partly from text on someone's branch. It's staged for reading,
+/// and nothing has been committed from it until the user continues.
+#[test]
+fn auto_rebase_stops_for_review_after_the_model_resolves_a_commit() {
+    use gitem_core::autorebase;
+    let f = Fx::new();
+    stacked_conflict(&f);
+    let sum = autorebase::run(&f.repo, "main", "", true, &|_, _| Ok("merged line".to_string())).unwrap();
+    let why = sum.paused.as_deref().expect("it stopped");
+    assert!(why.contains("c.txt") && why.contains("nothing has been committed"), "{why}");
+    assert_eq!(sum.resolved, vec!["c.txt"]);
+    let st = f.repo.status().unwrap();
+    assert!(matches!(st.op, RepoOp::Rebase | RepoOp::RebaseInteractive), "still in the rebase, for the user to finish");
+    assert_eq!(f.read("c.txt"), "merged line
+middle
+", "the answer is there to read");
+    assert_eq!(f.subjects(), vec!["upstream change", "base"], "and not committed");
+    f.run(ops::op_continue("rebase").env("GIT_EDITOR", "true"));
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
+    assert_eq!(f.subjects(), vec!["another", "my change", "upstream change", "base"]);
+}
+
+/// No conflict means no answer from a model, so there's nothing to read.
+#[test]
+fn auto_rebase_with_nothing_to_resolve_does_not_stop() {
+    use gitem_core::autorebase;
+    let f = Fx::new();
+    f.write("a.txt", "a
+");
+    f.commit_all("base");
+    f.run(ops::branch_create("work", None, true));
+    f.write("b.txt", "b
+");
+    f.commit_all("mine");
+    f.run(ops::checkout("main"));
+    f.write("c.txt", "c
+");
+    f.commit_all("theirs");
+    f.run(ops::checkout("work"));
+    let sum = autorebase::run(&f.repo, "main", "", true, &|_, _| panic!("no conflict, so no model")).unwrap();
+    assert_eq!(sum.paused, None);
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
+}
+
+#[test]
+fn auto_rebase_keeps_ignored_files_from_the_model() {
+    use gitem_core::autorebase;
+    let f = Fx::new();
+    f.write(".aiignore", "c.TXT
+");
+    stacked_conflict(&f);
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| panic!("this file must not be sent")).unwrap();
+    assert!(sum.paused.as_deref().unwrap().contains("ignore rules"), "{:?}", sum.paused);
+}
+
 /// The rebase autostashes and restores this work, and `reset --hard` then destroyed it.
 #[test]
 fn undoing_a_finished_auto_rebase_keeps_uncommitted_work() {
@@ -1049,7 +1104,7 @@ fn undoing_a_finished_auto_rebase_keeps_uncommitted_work() {
     f.commit_all("add dirty");
     f.write("dirty.txt", "UNCOMMITTED WORK\n");
     f.write("new-untracked.txt", "also mine\n");
-    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("merged line".to_string())).unwrap();
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| Ok("merged line".to_string())).unwrap();
     assert_eq!(sum.paused, None);
     assert_eq!(f.read("dirty.txt"), "UNCOMMITTED WORK\n", "the rebase restored it");
 
@@ -1068,7 +1123,7 @@ fn undoing_a_paused_auto_rebase_keeps_uncommitted_work() {
     f.write("dirty.txt", "committed\n");
     f.commit_all("add dirty");
     f.write("dirty.txt", "UNCOMMITTED WORK\n");
-    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("UNSURE".to_string())).unwrap();
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| Ok("UNSURE".to_string())).unwrap();
     assert!(sum.paused.is_some());
 
     f.run(autorebase::undo_op(&sum));
@@ -1086,7 +1141,7 @@ fn undoing_a_paused_auto_rebase_with_staged_work_finishes_cleanly() {
     stacked_conflict(&f);
     f.write("new-staged.txt", "staged work\n");
     f.run(ops::stage_paths(&["new-staged.txt".to_string()]));
-    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("UNSURE".to_string())).unwrap();
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| Ok("UNSURE".to_string())).unwrap();
     assert!(sum.paused.is_some());
     f.run(autorebase::undo_op(&sum));
     assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
@@ -1099,7 +1154,7 @@ fn undo_refuses_when_uncommitted_work_is_in_a_file_it_would_change() {
     use gitem_core::autorebase;
     let f = Fx::new();
     stacked_conflict(&f);
-    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("merged line".to_string())).unwrap();
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| Ok("merged line".to_string())).unwrap();
     let head = f.repo.resolve("HEAD").unwrap();
     f.write("c.txt", "edited after the rebase\n");
     assert!(!f.try_run(autorebase::undo_op(&sum)));
@@ -1112,7 +1167,7 @@ fn undo_refuses_when_the_branch_moved_after_the_rebase() {
     use gitem_core::autorebase;
     let f = Fx::new();
     stacked_conflict(&f);
-    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("merged line".to_string())).unwrap();
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| Ok("merged line".to_string())).unwrap();
     f.write("later.txt", "later\n");
     f.commit_all("made after the rebase");
     let head = f.repo.resolve("HEAD").unwrap();
@@ -1126,7 +1181,7 @@ fn auto_rebase_pauses_when_the_model_is_unsure_or_fails() {
     use gitem_core::autorebase;
     let f = Fx::new();
     stacked_conflict(&f);
-    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("UNSURE".to_string())).unwrap();
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| Ok("UNSURE".to_string())).unwrap();
     assert!(sum.paused.as_deref().unwrap().contains("confident"), "{:?}", sum.paused);
     let st = f.repo.status().unwrap();
     assert!(matches!(st.op, RepoOp::Rebase | RepoOp::RebaseInteractive), "left for the user to finish");
@@ -1134,12 +1189,12 @@ fn auto_rebase_pauses_when_the_model_is_unsure_or_fails() {
     f.run(autorebase::undo_op(&sum));
     assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
 
-    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Err(gitem_core::Error::Other("HTTP 429: slow down".into()))).unwrap();
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| Err(gitem_core::Error::Other("HTTP 429: slow down".into()))).unwrap();
     assert!(sum.paused.as_deref().unwrap().contains("429"));
     f.run(autorebase::undo_op(&sum));
 
     // A model echoing conflict markers isn't accepted.
-    let sum = autorebase::run(&f.repo, "main", "", &|_, _| Ok("<<<<<<< a\nx\n=======\ny\n>>>>>>> b".to_string())).unwrap();
+    let sum = autorebase::run(&f.repo, "main", "", false, &|_, _| Ok("<<<<<<< a\nx\n=======\ny\n>>>>>>> b".to_string())).unwrap();
     assert!(sum.paused.as_deref().unwrap().contains("markers"));
     f.run(autorebase::undo_op(&sum));
     assert_eq!(f.read("c.txt"), "mine\nmiddle\n");
@@ -1151,7 +1206,7 @@ fn auto_rebase_reports_bad_refs_as_errors() {
     let f = Fx::new();
     f.write("a", "1\n");
     f.commit_all("base");
-    assert!(autorebase::run(&f.repo, "no-such-ref", "", &|_, _| Ok(String::new())).is_err());
+    assert!(autorebase::run(&f.repo, "no-such-ref", "", false, &|_, _| Ok(String::new())).is_err());
 }
 
 #[test]

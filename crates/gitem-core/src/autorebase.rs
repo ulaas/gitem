@@ -55,8 +55,11 @@ pub fn undo_op(sum: &Summary) -> GitOp {
     GitOp::new("Undo auto-rebase").expect_rev("HEAD", &sum.end, "The branch has moved since the rebase, so undoing it would drop those commits. Nothing was changed.").step(&keep)
 }
 
-/// Run the rebase. `complete` sends (system, user) to the AI provider.
-pub fn run(repo: &Repo, onto: &str, instructions: &str, complete: &dyn Fn(&str, &str) -> Result<String>) -> Result<Summary> {
+/// Run the rebase. `complete` sends (system, user) to the AI provider. With `review`, it
+/// stops once the model has resolved a commit's conflicts, before that commit is made: the
+/// model's text came partly from a branch that may not be trustworthy, so someone should
+/// read it first. Continuing from the banner finishes the rebase.
+pub fn run(repo: &Repo, onto: &str, instructions: &str, review: bool, complete: &dyn Fn(&str, &str) -> Result<String>) -> Result<Summary> {
     let mut sum = Summary { start: repo.resolve("HEAD")?, ..Default::default() };
     let root = Some(repo.root.as_path());
     let first = ops::rebase(&ops::RebaseOpts { onto: onto.to_string(), autostash: true, ..Default::default() }).run(&repo.git, root, None, &mut |_| {});
@@ -87,6 +90,10 @@ pub fn run(repo: &Repo, onto: &str, instructions: &str, complete: &dyn Fn(&str, 
                 }
             }
         }
+        if review && !conflicts.is_empty() {
+            sum.paused = Some(format!("the AI resolved {}. Read the result before continuing: nothing has been committed from it yet.", conflicts.join(", ")));
+            return Ok(sum);
+        }
         // The step's own commit message is reused, so no editor is wanted.
         let opts = RunOpts { env: vec![("GIT_EDITOR".to_string(), "true".to_string())], is_write: true, ..Default::default() };
         let args = vec!["rebase".to_string(), "--continue".to_string()];
@@ -101,6 +108,9 @@ pub fn run(repo: &Repo, onto: &str, instructions: &str, complete: &dyn Fn(&str, 
 }
 
 fn resolve_file(repo: &Repo, path: &str, instructions: &str, complete: &dyn Fn(&str, &str) -> Result<String>) -> std::result::Result<(), String> {
+    if repo.ai_ignored(path) {
+        return Err("your AI ignore rules keep this file out of AI requests, so it wasn't sent".to_string());
+    }
     let (b, o, t) = (repo.stage_content(1, path), repo.stage_content(2, path), repo.stage_content(3, path));
     if o.is_empty() || t.is_empty() {
         return Err("one side deleted this file, which needs your decision".to_string());

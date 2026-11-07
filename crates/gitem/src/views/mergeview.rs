@@ -451,6 +451,10 @@ impl MergeView {
             if ui.add_enabled(!self.ai.busy() && unresolved > 0, egui::Button::new("Resolve with AI").small()).on_hover_text("Proposes text for each open conflict. Nothing is saved until you review and save it.").clicked() {
                 let cfg = cx.settings.ai.clone();
                 let path = self.title();
+                if cx.repo.ai_ignored(&path) {
+                    cx.error(format!("Your AI ignore rules keep {path} out of AI requests, so it wasn't sent."));
+                    return;
+                }
                 let open: Vec<(usize, String, String, String)> = doc.regions.iter().enumerate().filter_map(|(i, r)| match r {
                     Region::Conflict { base, ours, theirs, resolution: Resolution::Unresolved } => Some((i, plain_text(base), plain_text(ours), plain_text(theirs))),
                     _ => None,

@@ -113,7 +113,7 @@ impl ComposerView {
                 self.suggest.spawn(ui.ctx(), move || -> Result<Vec<ComposedCommit>, String> {
                     let mut diff = repo.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?;
                     // Untracked files have no diff, so list them by name.
-                    let tracked: Vec<&String> = paths.iter().filter(|p| !diff.contains(p.as_str())).collect();
+                    let tracked: Vec<&String> = paths.iter().filter(|p| !diff.contains(p.as_str()) && !repo.ai_ignored(p)).collect();
                     if !tracked.is_empty() {
                         diff.push_str("\n\nNew untracked files:\n");
                         for t in tracked {

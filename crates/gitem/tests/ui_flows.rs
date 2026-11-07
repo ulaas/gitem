@@ -4197,7 +4197,7 @@ fn undo_of_an_auto_rebase_from_its_tab_keeps_uncommitted_work() {
     let slot = undo.clone();
     let repo = h.state().repos[0].repo.clone();
     let job: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(move || {
-        let done = gitem_core::autorebase::run(&repo, "main", "", &|_, _| Ok("merged".to_string())).map_err(|e| e.to_string())?;
+        let done = gitem_core::autorebase::run(&repo, "main", "", false, &|_, _| Ok("merged".to_string())).map_err(|e| e.to_string())?;
         *slot.lock().unwrap() = Some(gitem_core::autorebase::undo_op(&done));
         Ok(done.describe("main"))
     });
