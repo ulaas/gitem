@@ -485,6 +485,28 @@ impl Repo {
         Ok(self.run(&["merge-base", rev_arg(a)?, rev_arg(b)?])?.text().trim().to_string())
     }
 
+    /// What a branch made by a pull request's Check out holds that fetching it again would
+    /// replace: commits since it was last brought up to date from the host, and not on any
+    /// remote. The reflog says which that was, as a fork's commits are on no remote either.
+    /// `None` if there's no such branch. With no reflog, its commits on no remote are counted.
+    pub fn commits_a_fetch_would_replace(&self, local: &str) -> Result<Option<(String, Vec<String>)>> {
+        let full = format!("refs/heads/{local}");
+        let Ok(sha) = self.resolve(&full) else { return Ok(None) };
+        let log = self.run(&["log", "-g", "--format=%H %gs", &full])?.text();
+        let fetched = log.lines().find_map(|l| {
+            let (hash, what) = l.split_once(' ')?;
+            (what.starts_with("fetch") || what.starts_with("merge FETCH_HEAD") || what.starts_with("reset: moving to FETCH_HEAD") || what.starts_with("pull")).then(|| hash.to_string())
+        });
+        let mut args = vec!["log".to_string(), "--format=%s".to_string(), sha.clone()];
+        if let Some(f) = fetched {
+            args.push(format!("^{f}"));
+        }
+        args.extend(["--not".to_string(), "--remotes".to_string(), "--".to_string()]);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let subjects = self.run(&refs)?.text().lines().map(String::from).collect();
+        Ok(Some((sha, subjects)))
+    }
+
     /// (a-only, b-only) commit counts.
     pub fn ahead_behind(&self, a: &str, b: &str) -> Result<(u32, u32)> {
         let o = self.run(&["rev-list", "--left-right", "--count", &format!("{}...{}", rev_arg(a)?, rev_arg(b)?), "--"])?.text();

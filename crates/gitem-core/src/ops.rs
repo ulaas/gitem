@@ -1005,6 +1005,32 @@ pub fn push(o: &PushOpts) -> GitOp {
     GitOp::new(if o.force_with_lease || o.force { "Force push" } else { "Push" }).step_v(a).net()
 }
 
+/// Push to the branch's upstream. `git push` alone refuses when the upstream has another name,
+/// as a pull request's `pr/7` following `origin/topic` does, so that case is spelled out.
+pub fn push_to_upstream(branch: Option<&str>, upstream: Option<&str>, remotes: &[&str]) -> GitOp {
+    if let (Some(branch), Some(upstream)) = (branch, upstream)
+        // The longest, as a remote's name can hold a slash and start with another's.
+        && let Some((remote, name)) = remotes.iter().filter_map(|r| Some((*r, upstream.strip_prefix(*r)?.strip_prefix('/')?))).max_by_key(|(r, _)| r.len())
+        && name != branch
+    {
+        return push(&PushOpts { remote: Some(remote.to_string()), refspec: Some(format!("refs/heads/{branch}:refs/heads/{name}")), ..Default::default() });
+    }
+    push(&PushOpts::default())
+}
+
+/// Send a fork's pull request back where it came from. It becomes the branch's upstream, so
+/// the toolbar's Push does this from then on. The host decides whether it's allowed.
+pub fn push_pr_to_fork(remote: &str, local: &str, head: &str) -> GitOp {
+    let mut op = push(&PushOpts { remote: Some(remote.to_string()), refspec: Some(format!("refs/heads/{local}:refs/heads/{head}")), set_upstream: true, ..Default::default() });
+    op.title = format!("Push {local} to {remote}/{head}");
+    op
+}
+
+/// Keep what a branch holds under another name, before replacing it.
+pub fn keep_branch(name: &str, sha: &str) -> GitOp {
+    GitOp::new(format!("Keep commits on {name}")).lossless().step(&["branch", "--no-track", "--", name, sha])
+}
+
 pub fn remote_add(name: &str, url: &str) -> GitOp {
     GitOp::new(format!("Add remote {name}")).step(&["remote", "add", "--", name, url])
 }
@@ -1366,6 +1392,11 @@ mod tests {
         assert_eq!(args(&branch_delete_remote("origin/feature/x", &[])), "push --delete -- origin feature/x");
         assert_eq!(args(&branch_delete_remote("a/b/c", &["a".to_string(), "a/b".to_string()])), "push --delete -- a/b c");
         assert_eq!(args(&fetch_pr("origin", "pull/7/head", "pr/7")), "fetch -- origin +pull/7/head:pr/7");
+        assert_eq!(args(&push_to_upstream(Some("main"), Some("origin/main"), &["origin"])), "push --progress");
+        assert_eq!(args(&push_to_upstream(Some("pr/7"), Some("origin/topic"), &["origin"])), "push --progress -- origin refs/heads/pr/7:refs/heads/topic");
+        assert_eq!(args(&push_to_upstream(Some("x"), Some("a/b/x"), &["a", "a/b"])), "push --progress");
+        assert_eq!(args(&push_to_upstream(Some("x"), Some("gone/x"), &["origin"])), "push --progress");
+        assert_eq!(args(&push_pr_to_fork("them", "pr/7", "fix")), "push --progress --set-upstream -- them refs/heads/pr/7:refs/heads/fix");
     }
 
     #[test]

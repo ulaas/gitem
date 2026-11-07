@@ -583,6 +583,14 @@ impl SettingsView {
 
     fn hosting(&mut self, ui: &mut Ui, s: &mut Settings, p: &Palette) {
         group(ui, "Self-hosted servers", p, |g| {
+            let problem = gitem_core::forge::ca_file_problem();
+            g.row("Certificate authorities", "A PEM file, for a server whose authority isn't in the system's store. It replaces the store for hosting and AI requests, so add public roots to it if you also use public hosts. Git's own connections go by git's settings.", |ui| {
+                field(ui, &mut s.ca_file, "The system's store", 360.0);
+            });
+            if let Some(why) = problem {
+                note(g.ui, &format!("Using the system's store: {why}"), p);
+            }
+            g.divider();
             note(g.ui, "github.com, gitlab.com, bitbucket.org, dev.azure.com, and codeberg.org work automatically. Tokens are managed in Credentials.", p);
             let mut remove = None;
             for (i, h) in s.custom_hosts.iter_mut().enumerate() {
@@ -720,7 +728,9 @@ impl SettingsView {
                     }
                 });
             });
-            g.row("Model", "", |ui| {
+            // Only about the default, so it goes once a model is named.
+            let about_default = s.ai.model.trim().is_empty().then(|| s.ai.provider.default_model_note(gitem_core::util::now_ts())).flatten();
+            g.row("Model", about_default.as_deref().unwrap_or(""), |ui| {
                 let hint = s.ai.provider.default_model();
                 field(ui, &mut s.ai.model, hint, 260.0);
             });

@@ -84,6 +84,16 @@ impl RemoteRepo {
     }
 }
 
+/// The address of `to`, a fork, in the same form as a remote's address for `from`: ssh stays
+/// ssh and a port stays. `None` if `from` isn't in that address.
+pub fn fork_remote_url(url: &str, from: &str, to: &str) -> Option<String> {
+    if to.is_empty() || to.starts_with('-') || to.contains(char::is_whitespace) {
+        return None;
+    }
+    let at = url.rfind(from)?;
+    Some(format!("{}{to}{}", &url[..at], &url[at + from.len()..]))
+}
+
 /// Normalise any remote URL form to (host, path).
 pub fn parse_remote_url(url: &str) -> Option<(String, String)> {
     let u = url.trim();
@@ -463,6 +473,8 @@ pub struct PullRequest {
     pub author_id: String,
     /// Its branch is in someone else's copy, so a branch of the same name here isn't it.
     pub from_fork: bool,
+    /// That copy, as `owner/repo`, where the host says.
+    pub head_repo: String,
 }
 
 impl PullRequest {
@@ -602,10 +614,44 @@ pub fn launchpad_group(pr: &PullRequest, me: &str) -> LaunchpadGroup {
     LaunchpadGroup::Other
 }
 
+/// The authorities from the CA file setting, and what's wrong with that file if anything is.
+static CA_FILE: std::sync::Mutex<(Option<ureq::tls::RootCerts>, Option<String>)> = std::sync::Mutex::new((None, None));
+
+/// Trust only the authorities in this PEM file for hosting and AI requests, in place of the
+/// system's store, as git's `http.sslCAInfo` does. Blank goes back to the store. A file that
+/// can't be used leaves the store in charge, which checks no less, and says why in the result.
+pub fn set_ca_file(path: &str) -> std::result::Result<(), String> {
+    let parsed = if path.trim().is_empty() { Ok(None) } else { read_ca_file(path.trim()).map(Some) };
+    let problem = parsed.as_ref().err().cloned();
+    *CA_FILE.lock().unwrap_or_else(|e| e.into_inner()) = (parsed.unwrap_or(None), problem.clone());
+    problem.map_or(Ok(()), Err)
+}
+
+/// Why the CA file setting isn't in use.
+pub fn ca_file_problem() -> Option<String> {
+    CA_FILE.lock().unwrap_or_else(|e| e.into_inner()).1.clone()
+}
+
+fn read_ca_file(path: &str) -> std::result::Result<ureq::tls::RootCerts, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Can't read {path}: {e}"))?;
+    let certs: Vec<ureq::tls::Certificate<'static>> = ureq::tls::parse_pem(&bytes)
+        .filter_map(|item| match item {
+            Ok(ureq::tls::PemItem::Certificate(c)) => Some(c),
+            _ => None,
+        })
+        .collect();
+    if certs.is_empty() {
+        return Err(format!("{path} holds no certificates in PEM form."));
+    }
+    Ok(ureq::tls::RootCerts::new_with_certs(&certs))
+}
+
 /// Certificates are checked against the system's trust store, as git does, so a company's
-/// own certificate authority works without anything being set up here.
+/// own certificate authority works without anything being set up here. The CA file setting
+/// is for an authority that isn't in the store.
 pub(crate) fn tls() -> ureq::tls::TlsConfig {
-    ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build()
+    let chosen = CA_FILE.lock().unwrap_or_else(|e| e.into_inner()).0.clone();
+    ureq::tls::TlsConfig::builder().root_certs(chosen.unwrap_or(ureq::tls::RootCerts::PlatformVerifier)).build()
 }
 
 fn agent() -> ureq::Agent {
@@ -813,7 +859,7 @@ impl ForgeClient {
             }
             ForgeKind::Gerrit | ForgeKind::GoogleSource => Vec::new(),
             ForgeKind::GitHub => {
-                let q = "query($o:String!,$n:String!,$c:String){repository(owner:$o,name:$n){pullRequests(first:50,after:$c,states:OPEN,orderBy:{field:UPDATED_AT,direction:DESC}){pageInfo{hasNextPage endCursor} nodes{number title url body isDraft state author{login} isCrossRepository headRefName baseRefName mergeable reviewDecision additions deletions updatedAt labels(first:10){nodes{name}} reviewRequests(first:15){nodes{requestedReviewer{... on User{login}}}} commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}";
+                let q = "query($o:String!,$n:String!,$c:String){repository(owner:$o,name:$n){pullRequests(first:50,after:$c,states:OPEN,orderBy:{field:UPDATED_AT,direction:DESC}){pageInfo{hasNextPage endCursor} nodes{number title url body isDraft state author{login} isCrossRepository headRepository{nameWithOwner} headRefName baseRefName mergeable reviewDecision additions deletions updatedAt labels(first:10){nodes{name}} reviewRequests(first:15){nodes{requestedReviewer{... on User{login}}}} commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}";
                 let (nodes, warning) = self.github_pages(q, "pullRequests")?;
                 return Ok((nodes.iter().map(parse_github_pr).collect(), warning));
             }
@@ -1308,6 +1354,7 @@ fn parse_github_pr(n: &Value) -> PullRequest {
         labels: strs(n.pointer("/labels/nodes"), "name"),
         body: s(n.get("body")),
         from_fork: n.get("isCrossRepository").and_then(Value::as_bool).unwrap_or(false),
+        head_repo: s(n.pointer("/headRepository/nameWithOwner")),
         ..Default::default()
     }
 }
@@ -1361,6 +1408,7 @@ fn parse_bitbucket_pr(n: &Value) -> PullRequest {
         body: s(n.get("description")),
         requested_reviewers: strs(n.get("reviewers"), "account_id"),
         from_fork: !from.is_empty() && !to.is_empty() && from != to,
+        head_repo: from,
         ..Default::default()
     }
 }
@@ -1388,6 +1436,7 @@ fn parse_gitea_pr(n: &Value) -> PullRequest {
         labels: strs(n.get("labels"), "name"),
         body: s(n.get("body")),
         from_fork: !from.is_empty() && !to.is_empty() && from != to,
+        head_repo: from,
         ..Default::default()
     }
 }
@@ -1446,28 +1495,51 @@ fn parse_azure_pr(n: &Value, repo: &RemoteRepo) -> PullRequest {
 pub fn trello_issues(base_url: &str, credential: &str) -> Result<Vec<Issue>> {
     let (key, token) = credential.split_once(':').ok_or_else(|| Error::Other("A Trello credential is written as apikey:token.".into()))?;
     let base = if base_url.is_empty() { "https://api.trello.com" } else { base_url.trim_end_matches('/') };
-    let url = format!("{base}/1/members/me/cards?filter=visible&fields=name,shortUrl,idShort,dateLastActivity,closed&key={}&token={}", url_encode(key), url_encode(token));
-    let mut resp = agent().get(&url).call().map_err(|e| Error::Other(format!("Trello: {e}")))?;
-    let status = resp.status().as_u16();
-    let text = resp.body_mut().read_to_string().map_err(|e| Error::Other(format!("Trello: reading the reply: {e}")))?;
-    if status >= 400 {
-        return Err(Error::Other(format!("Trello HTTP {status}: {}", text.chars().take(300).collect::<String>())));
+    // Trello gives cards a page at a time when asked to, with `before` naming the card to go
+    // back from. An id starts with when it was made, so the lowest one is the place to go on.
+    let mut all = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut before: Option<String> = None;
+    loop {
+        let mut url = format!("{base}/1/members/me/cards?filter=visible&limit={PER_PAGE}&fields=id,name,shortUrl,idShort,dateLastActivity,closed&key={}&token={}", url_encode(key), url_encode(token));
+        if let Some(b) = &before {
+            url.push_str(&format!("&before={}", url_encode(b)));
+        }
+        let mut resp = agent().get(&url).call().map_err(|e| Error::Other(format!("Trello: {e}")))?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().map_err(|e| Error::Other(format!("Trello: reading the reply: {e}")))?;
+        if status >= 400 {
+            return Err(Error::Other(format!("Trello HTTP {status}: {}", text.chars().take(300).collect::<String>())));
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|e| Error::Other(format!("Trello: {e}")))?;
+        let cards = list_in(&v, "", "Trello")?;
+        let full_page = cards.len() >= PER_PAGE;
+        let lowest = cards.iter().map(|c| s(c.get("id"))).filter(|i| !i.is_empty()).min();
+        let mut any_new = false;
+        for c in cards {
+            let id = s(c.get("id"));
+            if !id.is_empty() && !seen.insert(id) {
+                continue;
+            }
+            any_new = true;
+            all.push(Issue {
+                id: format!("#{}", c.get("idShort").and_then(Value::as_u64).unwrap_or(0)),
+                number: c.get("idShort").and_then(Value::as_u64).unwrap_or(0),
+                title: s(c.get("name")),
+                url: s(c.get("shortUrl")),
+                state: "open".into(),
+                updated: ts(c.get("dateLastActivity")),
+                source: "Trello".into(),
+                ..Default::default()
+            });
+        }
+        // A host that ignores `before` repeats itself, which ends this too.
+        if !full_page || !any_new || lowest.is_none() || all.len() >= LIST_LIMIT {
+            all.truncate(LIST_LIMIT);
+            return Ok(all);
+        }
+        before = lowest;
     }
-    let v: Value = serde_json::from_str(&text).map_err(|e| Error::Other(format!("Trello: {e}")))?;
-    let cards = list_in(&v, "", "Trello")?;
-    Ok(cards
-        .iter()
-        .map(|c| Issue {
-                    id: format!("#{}", c.get("idShort").and_then(Value::as_u64).unwrap_or(0)),
-                    number: c.get("idShort").and_then(Value::as_u64).unwrap_or(0),
-                    title: s(c.get("name")),
-                    url: s(c.get("shortUrl")),
-                    state: "open".into(),
-                    updated: ts(c.get("dateLastActivity")),
-                    source: "Trello".into(),
-                    ..Default::default()
-        })
-        .collect())
 }
 
 /// `server` selects the older API of self-hosted Jira Data Center and Server,
@@ -1718,6 +1790,16 @@ mod tests {
 
     fn api_of(r: RemoteRepo) -> String {
         ForgeClient::new(r, String::new(), String::new()).api_base()
+    }
+
+    #[test]
+    fn a_forks_address_follows_the_remotes_form() {
+        assert_eq!(fork_remote_url("git@host.invalid:o/r.git", "o/r", "them/r").unwrap(), "git@host.invalid:them/r.git");
+        assert_eq!(fork_remote_url("https://host.invalid:8443/o/r", "o/r", "them/r").unwrap(), "https://host.invalid:8443/them/r");
+        assert_eq!(fork_remote_url("https://o/r.invalid/o/r.git", "o/r", "t/r").unwrap(), "https://o/r.invalid/t/r.git", "the last one is the path");
+        assert_eq!(fork_remote_url("https://host.invalid/o/r.git", "x/y", "t/r"), None);
+        assert_eq!(fork_remote_url("https://host.invalid/o/r.git", "o/r", ""), None);
+        assert_eq!(fork_remote_url("https://host.invalid/o/r.git", "o/r", "--upload-pack=x"), None);
     }
 
     #[test]

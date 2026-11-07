@@ -42,9 +42,19 @@ impl AiProvider {
             Self::OpenRouter => "openrouter",
         }
     }
+    /// What to know about the model used when none is named, at this time. See [`Self::default_model`].
+    pub fn default_model_note(self, now: i64) -> Option<String> {
+        /// 14 January 2027, 00:00 UTC, from OpenAI's deprecations page in November 2026.
+        const GPT_4O_MINI_SHUTDOWN: i64 = 1_799_884_800;
+        match self {
+            Self::OpenAi if now >= GPT_4O_MINI_SHUTDOWN => Some("OpenAI gave 14 January 2027 as the date gpt-4o-mini shuts down, which has passed. Name a current model here.".to_string()),
+            Self::OpenAi => Some("The default, gpt-4o-mini, is due to shut down on 14 January 2027. Name another model before then.".to_string()),
+            _ => None,
+        }
+    }
     /// Hosted models get retired, so these want checking now and then. Last checked against
-    /// each provider's docs and OpenRouter's public list in November 2026. OpenAI's page gives
-    /// the `gpt-4o-mini` snapshot a shutdown date of 14 January 2027.
+    /// each provider's docs and OpenRouter's public list in November 2026. A date that's known
+    /// is said in Settings, by [`Self::default_model_note`].
     pub fn default_model(self) -> &'static str {
         match self {
             Self::Anthropic => "claude-opus-5-5",
@@ -629,6 +639,21 @@ pub fn clean_message(s: &str) -> String {
         return rest.strip_suffix("```").unwrap_or(rest).trim().to_string();
     }
     t.to_string()
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    /// With the date passed in, this can't start failing on the day.
+    #[test]
+    fn openai_defaults_note_turns_from_a_warning_into_a_request() {
+        let before = AiProvider::OpenAi.default_model_note(1_799_884_799).unwrap();
+        assert!(before.contains("is due to shut down on 14 January 2027"), "{before}");
+        let after = AiProvider::OpenAi.default_model_note(1_799_884_800).unwrap();
+        assert!(after.contains("has passed"), "{after}");
+        assert_eq!(AiProvider::Anthropic.default_model_note(1_799_884_800), None);
+    }
 }
 
 #[cfg(test)]

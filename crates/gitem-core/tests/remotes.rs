@@ -354,6 +354,35 @@ fn pull_request_refs_fetch_into_a_local_branch() {
 }
 
 #[test]
+fn a_pull_requests_branch_says_which_commits_a_fetch_would_replace() {
+    let n = Net::new();
+    let first = n.a.commit("pr.txt", "pr\n", "pull request work");
+    n.a.run(ops::push(&PushOpts { remote: Some("origin".into()), refspec: Some(format!("{first}:refs/pull/7/head")), ..Default::default() }));
+    assert_eq!(n.b.repo.commits_a_fetch_would_replace("pr-7").unwrap(), None, "no such branch");
+    n.b.run(ops::fetch_pr("origin", "refs/pull/7/head", "pr-7"));
+    let replaced = |n: &Net| n.b.repo.commits_a_fetch_would_replace("pr-7").unwrap().unwrap().1;
+    assert!(replaced(&n).is_empty(), "only what was fetched: {:?}", replaced(&n));
+
+    n.b.run(ops::checkout("pr-7"));
+    n.b.commit("mine.txt", "mine\n", "mine");
+    assert_eq!(replaced(&n), ["mine"]);
+
+    // What's on a remote can come back, so it doesn't count.
+    n.b.run(ops::push_to_upstream(Some("pr-7"), Some("origin/elsewhere"), &["origin"]));
+    assert_eq!(n.remote_sha("refs/heads/elsewhere").unwrap(), n.b.branch("pr-7").unwrap().sha);
+    n.b.fetch();
+    assert!(replaced(&n).is_empty(), "{:?}", replaced(&n));
+
+    // Update and Reset to its tip count as coming from the host, and what's new after them doesn't.
+    let tip = n.a.commit("pr.txt", "pr 2\n", "more pull request work");
+    n.a.run(ops::push(&PushOpts { remote: Some("origin".into()), refspec: Some(format!("{tip}:refs/pull/7/head")), force: true, ..Default::default() }));
+    n.b.run(ops::reset_pr_branch("origin", "refs/pull/7/head"));
+    assert!(replaced(&n).is_empty(), "{:?}", replaced(&n));
+    n.b.commit("mine2.txt", "mine\n", "mine again");
+    assert_eq!(replaced(&n), ["mine again"]);
+}
+
+#[test]
 fn remotes_can_be_managed() {
     let n = Net::new();
     n.b.run(ops::remote_add("extra", "https://example.invalid/x.git"));

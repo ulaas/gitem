@@ -128,6 +128,8 @@ pub struct Settings {
     pub workspaces: Vec<Workspace>,
     pub autolinks: Vec<Autolink>,
     pub custom_hosts: Vec<CustomHost>,
+    /// A PEM file of authorities to trust for hosting and AI requests, in place of the system's.
+    pub ca_file: String,
     pub ai: AiConfig,
     pub issue_trackers: IssueTrackerConfig,
     // Blame presentation
@@ -241,6 +243,7 @@ impl Default for Settings {
             workspaces: Vec::new(),
             autolinks: Vec::new(),
             custom_hosts: Vec::new(),
+            ca_file: String::new(),
             ai: AiConfig::default(),
             issue_trackers: IssueTrackerConfig::default(),
             inline_blame: true,

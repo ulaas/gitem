@@ -43,3 +43,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Reads keep their output on a busy machine
         run: cargo test -p gitem-core --locked --test real_git -- --ignored reads_keep_their_output_on_a_busy_machine
+
+  gitea:
+    # The hosting client against a real Gitea, which the mock in http_clients.rs can't stand in
+    # for. The test only talks to localhost and makes and deletes its own repository.
+    runs-on: ubuntu-latest
+    services:
+      gitea:
+        image: gitea/gitea:1
+        env:
+          GITEA__security__INSTALL_LOCK: "true"
+        ports:
+          - 3000:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux libraries
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: Wait for Gitea, and make a user with a token
+        run: |
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:3000/api/healthz > /dev/null && break
+            sleep 2
+          done
+          container="${{ job.services.gitea.id }}"
+          docker exec -u git "$container" gitea admin user create --username gitem --password gitem-test-pw --email gitem@example.invalid --must-change-password=false
+          token=$(docker exec -u git "$container" gitea admin user generate-access-token --username gitem --scopes all --raw)
+          echo "::add-mask::$token"
+          echo "GITEM_GITEA_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Gitea contract test
+        run: cargo test -p gitem-core --locked --test gitea_contract -- --ignored
+        env:
+          GITEM_GITEA_URL: http://127.0.0.1:3000

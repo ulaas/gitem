@@ -771,6 +771,8 @@ pub struct GitemApp {
     applied: Option<(gitem_core::settings::ThemeChoice, u32, String)>,
     open_path: String,
     settings_dirty: bool,
+    /// The CA file setting last handed to the HTTP clients.
+    ca_file_applied: String,
     pub shot: Option<Shot>,
     pub shot_tabs: Vec<Tab>,
     pub shot_inspect: Option<String>,
@@ -893,6 +895,7 @@ impl GitemApp {
             applied: None,
             open_path: String::new(),
             settings_dirty: false,
+            ca_file_applied: String::new(),
             shot: None,
             shot_tabs: Vec::new(),
             shot_inspect: None,
@@ -1483,6 +1486,11 @@ impl GitemApp {
                     self.close_guard = Some(CloseGuard { target: CloseTarget::Tab { root: r.repo.root.clone(), key }, items: vec![lost] });
                 }
             }
+            Action::Many(all) => {
+                for a in all {
+                    self.apply_action(ctx, a);
+                }
+            }
             Action::ForRepo(root, inner) => match self.repos.iter().position(|r| r.repo.root == root) {
                 Some(i) => {
                     let shown = self.active;
@@ -1882,7 +1890,8 @@ impl GitemApp {
                 if no_remote {
                     out.push(Action::Form(forms::add_remote()));
                 } else if upstream.is_some() {
-                    out.push(Action::Run(ops::push(&ops::PushOpts::default())));
+                    let names: Vec<&str> = remotes.iter().map(String::as_str).collect();
+                    out.push(Action::Run(ops::push_to_upstream(branch.as_deref(), upstream.as_deref(), &names)));
                 } else {
                     out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), false, self.settings.confirm_destructive)));
                 }
@@ -2427,6 +2436,27 @@ impl GitemApp {
         }
     }
 
+    /// Off the UI thread: the file can be on a drive that's slow to answer, and typing a path
+    /// comes through here at each key. One read at a time, and only of the newest value. Until
+    /// it lands, the system's store checks certificates.
+    fn apply_ca_file(&mut self, ctx: &egui::Context) {
+        if self.ca_file_applied == self.settings.ca_file {
+            return;
+        }
+        self.ca_file_applied = self.settings.ca_file.clone();
+        let (path, ctx) = (self.ca_file_applied.clone(), ctx.clone());
+        static NEWEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static READING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let turn = NEWEST.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            let _one = READING.lock().unwrap_or_else(|e| e.into_inner());
+            if NEWEST.load(std::sync::atomic::Ordering::SeqCst) == turn {
+                let _ = gitem_core::forge::set_ca_file(&path);
+                ctx.request_repaint();
+            }
+        });
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
         // In a text field the same keys are Redo.
         if !ctx.egui_wants_keyboard_input()
@@ -2522,7 +2552,8 @@ impl GitemApp {
         }
         if push && idle && !r.data.remotes().is_empty() {
             if st.is_some_and(|s| s.upstream.is_some()) {
-                out.push(Action::Run(ops::push(&ops::PushOpts::default())));
+                let names: Vec<&str> = r.data.remotes().iter().map(|x| x.name.as_str()).collect();
+                out.push(Action::Run(ops::push_to_upstream(st.and_then(|s| s.branch.as_deref()), st.and_then(|s| s.upstream.as_deref()), &names)));
             } else {
                 let remotes = r.data.remotes().iter().map(|x| x.name.clone()).collect();
                 out.push(Action::Form(forms::push_form(st.and_then(|s| s.branch.clone()), remotes, false, self.settings.confirm_destructive)));
@@ -2626,6 +2657,7 @@ impl GitemApp {
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        self.apply_ca_file(&ctx);
         self.handle_shot(ui);
         self.check_window_close(&ctx);
         let mut out: Vec<Action> = Vec::new();

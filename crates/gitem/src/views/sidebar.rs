@@ -362,7 +362,9 @@ impl Sidebar {
             if b.ahead > 0 {
                 headed = true;
                 if tracking_heading(ui, crate::chrome::icon::ARROW_UP, &format!("Outgoing to {up}"), b.ahead, p.outgoing(), b.is_current.then_some("Push")) {
-                    cx.run(ops::push(&ops::PushOpts::default()));
+                    let names: Vec<&str> = cx.data.remotes().iter().map(|x| x.name.as_str()).collect();
+                    let op = ops::push_to_upstream(Some(&b.name), Some(up), &names);
+                    cx.run(op);
                 }
                 if listed_commits(ui, cx, t.outgoing.get(), Some(b.ahead as usize), t.outgoing_limit, TRACKING_PAGE, t.outgoing.busy()) {
                     t.outgoing_limit += TRACKING_PAGE;

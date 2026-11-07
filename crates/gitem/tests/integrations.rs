@@ -199,6 +199,10 @@ impl Fx {
         tip
     }
 
+    fn bare(&self) -> PathBuf {
+        self.root.parent().unwrap().join("bare.git")
+    }
+
     fn in_user(&self, args: &[&str]) -> String {
         run(&self.git, &self.root, args).trim().to_string()
     }
@@ -396,6 +400,145 @@ fn a_checked_out_pull_request_follows_its_branch_through_a_force_push() {
     quiet(&mut h);
     no_errors(&h);
     assert_eq!(f.in_user(&["rev-parse", "pr/7"]), again);
+}
+
+/// What the user adds to `pr/7`, after Check out made it.
+fn checked_out_with_a_commit_of_mine(f: &Fx, h: &mut Harness<'static, GitemApp>) -> String {
+    click(h, "Check out");
+    wait_for_label(h, "Current branch");
+    quiet(h);
+    std::fs::write(f.root.join("mine.txt"), "mine\n").unwrap();
+    f.in_user(&["add", "-A"]);
+    f.in_user(&["commit", "-q", "-m", "my own work"]);
+    f.in_user(&["rev-parse", "HEAD"])
+}
+
+fn back_on_main_and_reloaded(f: &Fx, h: &mut Harness<'static, GitemApp>) {
+    f.in_user(&["switch", "-q", "main"]);
+    h.key_press(egui::Key::F5);
+    wait_for_label(h, "Check out");
+    quiet(h);
+}
+
+#[test]
+fn check_out_over_commits_of_mine_asks_and_keeps_them() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    let mine = checked_out_with_a_commit_of_mine(&f, &mut h);
+    back_on_main_and_reloaded(&f, &mut h);
+    click(&mut h, "Check out");
+    wait_for_text(&mut h, "pr/7 has commits of yours");
+    wait_for_text(&mut h, "my own work");
+    assert_eq!(f.in_user(&["rev-parse", "pr/7"]), mine, "nothing changes before the answer");
+    click(&mut h, "Continue");
+    wait_for_label(&mut h, "Current branch");
+    quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(f.in_user(&["rev-parse", "pr/7-saved"]), mine);
+    assert_eq!(f.in_user(&["rev-parse", "HEAD"]), f.in_user(&["rev-parse", "refs/remotes/origin/topic"]));
+    assert_eq!(f.in_user(&["branch", "--show-current"]), "pr/7");
+}
+
+#[test]
+fn check_out_over_commits_of_mine_can_be_cancelled_or_told_to_replace() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    let mine = checked_out_with_a_commit_of_mine(&f, &mut h);
+    back_on_main_and_reloaded(&f, &mut h);
+    click(&mut h, "Check out");
+    wait_for_text(&mut h, "pr/7 has commits of yours");
+    click(&mut h, "Cancel");
+    quiet(&mut h);
+    assert_eq!(f.in_user(&["rev-parse", "pr/7"]), mine);
+    assert_eq!(f.in_user(&["branch", "--show-current"]), "main");
+    click(&mut h, "Check out");
+    wait_for_text(&mut h, "pr/7 has commits of yours");
+    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.step();
+    h.step();
+    click(&mut h, "Replace them. The reflog has them for a while");
+    click(&mut h, "Continue");
+    wait_for_label(&mut h, "Current branch");
+    quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(f.in_user(&["rev-parse", "HEAD"]), f.in_user(&["rev-parse", "refs/remotes/origin/topic"]));
+    assert!(f.in_user(&["branch", "--list", "pr/7-saved"]).is_empty());
+}
+
+#[test]
+fn checking_out_again_with_nothing_of_mine_there_just_does_it() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    click(&mut h, "Check out");
+    wait_for_label(&mut h, "Current branch");
+    quiet(&mut h);
+    back_on_main_and_reloaded(&f, &mut h);
+    f.author_force_pushes("rewritten");
+    click(&mut h, "Check out");
+    wait_for_label(&mut h, "Current branch");
+    quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(f.in_user(&["log", "-1", "--format=%s"]), "rewritten");
+}
+
+/// git refuses a plain push from `pr/7` to `origin/topic`. Pushing goes to a real bare repository.
+#[test]
+fn push_from_a_pull_requests_branch_goes_back_to_its_own_branch() {
+    let f = Fx::new();
+    f.in_user(&["remote", "set-url", "--push", "origin", "../bare.git"]);
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    let mine = checked_out_with_a_commit_of_mine(&f, &mut h);
+    h.key_press(egui::Key::F5);
+    wait_for_label(&mut h, "Push 1");
+    quiet(&mut h);
+    click(&mut h, "Push 1");
+    quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(f.in_user(&["--git-dir=../bare.git", "rev-parse", "refs/heads/topic"]), mine);
+    assert!(f.in_user(&["--git-dir=../bare.git", "for-each-ref", "--format=%(refname)", "refs/heads/pr"]).is_empty(), "no pr/7 on the remote");
+}
+
+#[test]
+fn a_forks_pull_request_pushes_back_to_a_remote_for_the_fork() {
+    let f = Fx::new();
+    let mut pr = gitea_pr(7, "their-branch", "From a fork");
+    pr["head"]["repo"]["full_name"] = json!("them/r");
+    f.host.lock().unwrap().prs = vec![pr];
+    run(&f.git, f.bare().parent().unwrap(), &["clone", "-q", "--bare", "--no-local", "bare.git", "fork.git"]);
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    click(&mut h, "Check out");
+    wait_for_label(&mut h, "Current branch");
+    quiet(&mut h);
+    std::fs::write(f.root.join("fix.txt"), "fix\n").unwrap();
+    f.in_user(&["add", "-A"]);
+    f.in_user(&["commit", "-q", "-m", "a fix for them"]);
+    let mine = f.in_user(&["rev-parse", "HEAD"]);
+    click(&mut h, "Push to the fork…");
+    wait_for_label(&mut h, "Fork's address");
+    use egui_kittest::kittest::NodeT;
+    // Worked out from the remote's own address.
+    let shown = format!("{}/them/r.git", f.base);
+    let input = egui::accesskit::Role::TextInput;
+    let field = h.query_all_by_role(input).last().unwrap();
+    assert_eq!(field.accesskit_node().value().unwrap_or_default(), shown);
+    field.focus();
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    // The mock can't take a push, so it goes to a real bare repository instead.
+    h.query_all_by_role(input).last().unwrap().type_text("../fork.git");
+    h.step();
+    h.step();
+    click_last(&mut h, "Push");
+    quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(f.in_user(&["--git-dir=../fork.git", "rev-parse", "refs/heads/their-branch"]), mine);
+    assert_eq!(f.in_user(&["rev-parse", "--abbrev-ref", "@{upstream}"]), "them/their-branch");
 }
 
 #[test]
@@ -717,4 +860,42 @@ fn a_git_credential_with_a_path_is_saved_for_its_host() {
     let saved = format!("{}https://sn34.invalid", gitem_core::cred::PREFIX_GIT);
     assert!(gitem_core::cred::get(&saved).unwrap().is_some(), "{:?}", gitem_core::cred::list(gitem_core::cred::PREFIX_GIT));
     gitem_core::cred::delete(&saved).unwrap();
+}
+
+// ---- Settings that say something about the network (SN-10, SN-17)
+
+fn open_settings_page(h: &mut Harness<GitemApp>, page: &str) {
+    h.state_mut().repos[0].open_tab(Tab::Settings(Box::default()));
+    wait_for_label_any(h, page);
+    quiet(h);
+    click_last(h, page);
+    quiet(h);
+}
+
+#[test]
+fn settings_says_when_openais_default_is_going_until_a_model_is_named() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |s| s.ai.provider = gitem_core::ai::AiProvider::OpenAi);
+    open_settings_page(&mut h, "AI");
+    let note = gitem_core::ai::AiProvider::OpenAi.default_model_note(gitem_core::util::now_ts()).unwrap();
+    wait_for_text(&mut h, &note);
+    h.state_mut().settings.ai.model = "some-current-model".into();
+    h.step();
+    h.step();
+    assert!(h.query_by_label_contains(&note).is_none());
+}
+
+#[test]
+fn a_ca_file_that_cannot_be_used_says_so_on_the_page() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |s| s.ca_file = "Z:/no/such/authorities.pem".into());
+    open_settings_page(&mut h, "Hosting");
+    wait_for_text(&mut h, "Using the system's store: Can't read Z:/no/such/authorities.pem");
+    h.state_mut().settings.ca_file = String::new();
+    let t = Instant::now();
+    while gitem_core::forge::ca_file_problem().is_some() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "it stayed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

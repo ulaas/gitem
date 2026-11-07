@@ -82,6 +82,8 @@ pub enum Action {
     BranchPr(Option<(String, u64, String)>),
     /// Something changed on the hosting provider, so its lists are out of date.
     ForgeChanged(String),
+    /// These, in order.
+    Many(Vec<Action>),
     /// Apply an action to a specific repository, whichever one is showing now.
     ForRepo(PathBuf, Box<Action>),
 }
@@ -99,6 +101,8 @@ pub enum Later {
     Confirm { title: String, body: String, label: String, op: GitOp },
     /// A toast, and the hosting provider's lists are out of date.
     ForgeChanged(String),
+    /// These, in order.
+    Many(Vec<Later>),
 }
 
 impl Later {
@@ -113,6 +117,7 @@ impl Later {
             Later::Tab(build) => Action::OpenTab(build()),
             Later::Confirm { title, body, label, op } => Action::Confirm { title, body, label, op },
             Later::ForgeChanged(s) => Action::ForgeChanged(s),
+            Later::Many(all) => Action::Many(all.into_iter().map(Later::into_action).collect()),
         }
     }
 }

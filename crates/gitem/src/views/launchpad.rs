@@ -2,7 +2,7 @@
 //! host plus Jira and Linear, "start work", and pull-request creation.
 use egui::{RichText, Ui};
 use gitem_core::forge::{self, ForgeClient, Issue, LaunchpadGroup, PullRequest, RemoteRepo, launchpad_group};
-use gitem_core::{GitExe, ai, cred, ops, util};
+use gitem_core::{GitExe, Repo, ai, cred, ops, util};
 
 use crate::action::{Action, Cx, Later};
 use crate::forms::{self, FormDialog};
@@ -392,23 +392,18 @@ impl LaunchpadView {
                         if ui.small_button("Reset to its tip…").on_hover_text("For when its author has force-pushed and Update refuses").clicked() {
                             cx.confirm("Reset to the pull request", &format!("Make {local} what the pull request holds now? Uncommitted changes are lost. Commits made here stay in the reflog."), "Reset", ops::reset_pr_branch(&remote, fetch));
                         }
+                        if pr.from_fork && ui.small_button("Push to the fork…").on_hover_text(format!("Send {local} back to {} in the fork", pr.head)).clicked() {
+                            cx.form(push_to_fork_form(pr, &local, repo.as_ref(), cx.data.remotes()));
+                        }
                     }
                 } else if let Some(fetch) = &fetch_ref {
                     let tracks = !pr.from_fork && forge::is_plain_branch_name(&pr.head);
-                    if ui.small_button("Check out").on_hover_text(format!("Fetch into {local}, replacing what it held, and switch to it")).clicked() {
-                        cx.run(ops::fetch_pr(&remote, fetch, &local));
-                        if tracks {
-                            cx.run(ops::track_pr(&remote, &pr.head, &local));
-                        }
-                        cx.run(ops::checkout(&local));
+                    let how = FetchPr { remote: remote.clone(), fetch: fetch.clone(), local: local.clone(), head: tracks.then(|| pr.head.clone()) };
+                    if ui.small_button("Check out").on_hover_text(format!("Fetch into {local} and switch to it. Asks first if commits of yours are there")).clicked() {
+                        cx.out.push(how.clone().start(cx.repo, false));
                     }
                     if ui.small_button("Open in worktree").clicked() {
-                        cx.run(ops::fetch_pr(&remote, fetch, &local));
-                        if tracks {
-                            cx.run(ops::track_pr(&remote, &pr.head, &local));
-                        }
-                        let refs = vec![local.clone()];
-                        cx.form(forms::add_worktree(cx.repo, refs, Some(local.clone())));
+                        cx.out.push(how.start(cx.repo, true));
                     }
                 } else if repo.is_some() {
                     ui.label(RichText::new("No way to fetch this one from here").small().color(p.faint)).on_hover_text("It comes from a fork, and this host has no ref for it in this repository. Open it on the host.");
@@ -661,4 +656,98 @@ pub fn start_work_form(repo: &gitem_core::Repo, i: &Issue, format: &str, base: O
                 vec![Action::Run(ops::branch_start_work(&n, b.as_deref()))]
             })
         })
+}
+
+/// Bringing a pull request into its local branch, `pr/N`.
+#[derive(Clone)]
+struct FetchPr {
+    remote: String,
+    fetch: String,
+    local: String,
+    /// Its branch on the remote, for a branch in this repository, to follow from there.
+    head: Option<String>,
+}
+
+impl FetchPr {
+    /// Fetching replaces what `pr/N` holds, so first find out if that's anything of the user's.
+    fn start(self, repo: &Repo, worktree: bool) -> Action {
+        let repo = repo.clone();
+        Action::Later(Box::new(move || {
+            let found = repo.commits_a_fetch_would_replace(&self.local).map_err(|e| e.to_string())?;
+            let Some((sha, subjects)) = found.filter(|(_, s)| !s.is_empty()) else {
+                return Ok(Later::Many(self.steps(None, &repo, worktree)));
+            };
+            let keep = self.free_name(&repo);
+            Ok(Later::Form(Box::new(move || self.ask(&repo, sha, subjects, keep, worktree))))
+        }))
+    }
+
+    /// A name for keeping commits under that isn't taken.
+    fn free_name(&self, repo: &Repo) -> String {
+        let first = format!("{}-saved", self.local);
+        std::iter::once(first.clone()).chain((2..100).map(|n| format!("{first}-{n}"))).find(|n| repo.resolve(&format!("refs/heads/{n}")).is_err()).unwrap_or(first)
+    }
+
+    fn steps(&self, expected: Option<&str>, repo: &Repo, worktree: bool) -> Vec<Later> {
+        let mut fetch = ops::fetch_pr(&self.remote, &self.fetch, &self.local);
+        if let Some(sha) = expected {
+            fetch = fetch.expect_rev(&format!("refs/heads/{}", self.local), sha, "It has new commits since you were asked. Nothing was replaced.");
+        }
+        let mut all = vec![Later::Run(fetch)];
+        if let Some(head) = &self.head {
+            all.push(Later::Run(ops::track_pr(&self.remote, head, &self.local)));
+        }
+        if worktree {
+            let (repo, local) = (repo.clone(), self.local.clone());
+            all.push(Later::Form(Box::new(move || forms::add_worktree(&repo, vec![local.clone()], Some(local)))));
+        } else {
+            all.push(Later::Run(ops::checkout(&self.local)));
+        }
+        all
+    }
+
+    fn ask(self, repo: &Repo, sha: String, subjects: Vec<String>, keep: String, worktree: bool) -> FormDialog {
+        const SHOWN: usize = 8;
+        let mut list: Vec<String> = subjects.iter().take(SHOWN).map(|s| format!("  {s}")).collect();
+        if subjects.len() > SHOWN {
+            list.push(format!("  and {} more", subjects.len() - SHOWN));
+        }
+        let keep_label = format!("Keep them on a new branch, {keep}, then fetch");
+        let repo = repo.clone();
+        FormDialog::new(format!("{} has commits of yours", self.local), "Continue")
+            .info(format!("Fetching replaces what {} holds, and {} aren't in what was last fetched or on any remote:\n{}", self.local, plural(subjects.len(), "commit", "commits"), list.join("\n")))
+            .choice("what", "What to do", &[&keep_label, "Replace them. The reflog has them for a while"], 0)
+            .on_submit(move |v| {
+                let mut out = Vec::new();
+                if v.index("what") == 0 {
+                    out.push(Action::Run(ops::keep_branch(&keep, &sha)));
+                }
+                out.extend(self.steps(Some(&sha), &repo, worktree).into_iter().map(Later::into_action));
+                Ok(out)
+            })
+    }
+}
+
+/// A pull request from a fork goes back to its branch there, through a remote for that fork.
+fn push_to_fork_form(pr: &forge::PullRequest, local: &str, repo: Option<&forge::RemoteRepo>, remotes: &[gitem_core::model::Remote]) -> FormDialog {
+    let owner = pr.head_repo.split('/').next().filter(|o| !o.is_empty()).unwrap_or("fork").to_string();
+    let url = repo.and_then(|f| remotes.iter().find_map(|r| forge::fork_remote_url(&r.push_url, &f.path, &pr.head_repo))).unwrap_or_default();
+    let (local, head) = (local.to_string(), pr.head.clone());
+    let known: Vec<(String, String)> = remotes.iter().map(|r| (r.name.clone(), r.push_url.clone())).collect();
+    let mut form = FormDialog::new(format!("Push {local} to the fork"), "Push").text("name", "Remote name", &owner).text("url", "Fork's address", &url).info(format!("Pushes to its branch, {head}, which becomes what {local} follows. The host decides whether you may: its author has to allow edits by maintainers."));
+    if url.is_empty() {
+        form = form.info("This host doesn't say where the fork is, so its address has to be typed.");
+    }
+    form.on_submit(move |v| {
+        let name = v.opt("name").ok_or("Give the remote a name.")?;
+        let url = v.opt("url").ok_or("Give the fork's address.")?;
+        let mut out = Vec::new();
+        match known.iter().find(|(n, _)| *n == name) {
+            Some((_, there)) if *there != url => return Err(format!("A remote called {name} already points at {there}. Choose another name.")),
+            Some(_) => {}
+            None => out.push(Action::Run(ops::remote_add(&name, &url))),
+        }
+        out.push(Action::Run(ops::push_pr_to_fork(&name, &local, &head)));
+        Ok(out)
+    })
 }

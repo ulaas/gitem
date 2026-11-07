@@ -244,6 +244,32 @@ fn link_only_providers_say_so() {
     assert!(c.list_issues().unwrap().is_empty());
 }
 
+/// Each page goes back from the lowest id of the one before, up to the limit all hosts have.
+#[test]
+fn trello_cards_come_a_page_at_a_time_and_stop() {
+    let cards = |from: usize, n: usize| json!((from..from + n).map(|i| json!({"id":format!("{:08}", 1000 - i),"idShort":i,"name":format!("Card {i}")})).collect::<Vec<_>>());
+    let m = mock(move |r| {
+        let before = r.path.split("before=").nth(1).map(|b| b.split('&').next().unwrap().parse::<usize>().unwrap());
+        assert!(r.path.contains("limit=50"), "{}", r.path);
+        match before {
+            None => (200, cards(0, 50).to_string()),
+            Some(b) if b == 1000 - 49 => (200, cards(50, 10).to_string()),
+            other => panic!("asked from {other:?}"),
+        }
+    });
+    let all = forge::trello_issues(&m.base, "key:tok").unwrap();
+    assert_eq!(all.len(), 60);
+    assert_eq!(all[59].title, "Card 59");
+}
+
+/// A host that ignores `before` gives the same page, which must not go round for ever or repeat.
+#[test]
+fn trello_paging_stops_when_a_page_holds_nothing_new() {
+    let page = json!((0..50).map(|i| json!({"id":format!("{i:08}"),"idShort":i,"name":"Card"})).collect::<Vec<_>>());
+    let m = mock(move |_| (200, page.to_string()));
+    assert_eq!(forge::trello_issues(&m.base, "key:tok").unwrap().len(), 50);
+}
+
 #[test]
 fn jira_cloud_server_linear_and_trello() {
     let m = mock(|r| {
