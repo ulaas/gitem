@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use egui::epaint::CubicBezierShape;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
-use gitem_core::graph::{self, GraphRow};
+use gitem_core::graph::{self, LaneRows};
 use gitem_core::model::*;
 use gitem_core::ops;
 use gitem_core::repo::parse_search;
@@ -24,7 +24,7 @@ const WIP: &str = "__WIP__";
 
 struct Graph {
     commits: Vec<Commit>,
-    rows: Vec<GraphRow>,
+    rows: LaneRows,
     index: HashMap<String, usize>,
     max_width: u16,
     /// Git stopped at the limit, so there may be older commits.
@@ -290,8 +290,8 @@ impl GraphView {
                 let parents = if shown(&head) || shown(&target) { vec![head] } else { Vec::new() };
                 commits.insert(0, Commit { sha: WIP.into(), parents, subject: "Work in progress".into(), ..Default::default() });
             }
-            let rows = if f.first_parent || f.no_merges { graph::layout(&graph::parents_for_filters(&commits, f.first_parent, hidden_merges.as_ref())) } else { graph::layout(&commits) };
-            let max_width = rows.iter().map(|r| r.width).max().unwrap_or(1);
+            let rows = if f.first_parent || f.no_merges { graph::layout_rows(&graph::parents_for_filters(&commits, f.first_parent, hidden_merges.as_ref())) } else { graph::layout_rows(&commits) };
+            let max_width = rows.max_width().unwrap_or(1);
             let index = commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect();
             Ok(Graph { commits, rows, index, max_width, more, loaded })
         });
@@ -700,6 +700,7 @@ impl GraphView {
         let cols = self.cols.layout(w, lane_acc.clamp(60.0, 260.0));
         let at = |key: &str| cols.iter().find(|c| c.key == key).map_or((0.0, 0.0), |c| (c.x, c.w));
         let ((x_refs, refs_w), (x_graph, graph_w), (x_msg, msg_w)) = (at("refs"), at("graph"), at("message"));
+        let lanes_in_view = lane_offsets.partition_point(|x| *x <= graph_w + LANE_W);
         let ((x_changes, changes_w), (x_author, author_w), (x_date, date_w), (x_sha, sha_w)) = (at("changes"), at("author"), at("date"), at("sha"));
         let (show_refs, show_author, show_date, show_sha) = (refs_w > 0.0, author_w > 0.0, date_w > 0.0, sha_w > 0.0);
 
@@ -749,7 +750,7 @@ impl GraphView {
                 for vi in range {
                     let i = visible[vi];
                     let c = &g.commits[i];
-                    let r = &g.rows[i];
+                    let r = g.rows.row(i);
                     let is_wip = c.sha == WIP;
                     let selected = self.selected.contains(&c.sha);
                     let (rect, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
@@ -783,6 +784,13 @@ impl GraphView {
                             painter.add(Shape::CubicBezier(b));
                         }
                     };
+                    // Only what the column has room for: it clips the rest, which still costs to draw.
+                    g.rows.for_each_passing(i, |lane, color| {
+                        if (lane as usize) < lanes_in_view {
+                            let x = lane_x(lane);
+                            painter.line_segment([pos2(x, top), pos2(x, bot)], Stroke::new(1.6, p.lane(color)));
+                        }
+                    });
                     for e in &r.top {
                         draw(pos2(lane_x(e.from), top), pos2(lane_x(e.to), mid), p.lane(e.color));
                     }
@@ -999,7 +1007,11 @@ impl GraphView {
         let sha = g.commits[i].sha.clone();
         if sha == WIP {
             self.selected.clear();
-            cx.open(Tab::changes());
+            if cx.settings.wip_in_details {
+                cx.out.push(crate::action::Action::ShowWip);
+            } else {
+                cx.open(Tab::changes());
+            }
             return;
         }
         if mods.ctrl || mods.command {
