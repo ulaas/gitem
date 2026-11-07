@@ -31,6 +31,10 @@ pub struct HomeView {
     scan_pick: Task<Option<std::path::PathBuf>>,
     recent: Task<Vec<Commit>>,
     recent_gen: Option<u64>,
+    /// Fetch all or Pull all, going through a workspace's repositories.
+    sweep: Task<String>,
+    /// How many of those have finished: the list of them is out of date after each.
+    swept: u64,
 }
 
 impl HomeView {
@@ -213,6 +217,11 @@ impl HomeView {
         ui.spacing_mut().item_spacing.y = 4.0;
     }
 
+    fn start_sweep(&mut self, ctx: &egui::Context, cx: &Cx, repos: Vec<String>, done: &'static str, op: impl Fn() -> ops::GitOp + Send + 'static) {
+        let git = cx.repo.git.clone();
+        self.sweep.spawn(ctx, move || sweep(git, repos, done, op));
+    }
+
     fn workspaces(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         section(ui, "Workspaces", &p);
@@ -234,7 +243,17 @@ impl HomeView {
         }
         self.workspace_idx = self.workspace_idx.min(ws.len() - 1);
         let w = &ws[self.workspace_idx];
-        let key = format!("{}:{}", w.name, cx.data.status_gen);
+        if self.sweep.poll() {
+            if let Some(m) = self.sweep.value.take() {
+                cx.toast(m);
+            }
+            if let Some(e) = self.sweep.error.take() {
+                cx.error(e);
+            }
+            self.swept += 1;
+        }
+        // What a sweep did to the others doesn't show in this repository's generation.
+        let key = format!("{}:{}:{}", w.name, cx.data.status_gen, self.swept);
         if self.summaries_for.as_deref() != Some(&key) {
             self.summaries_for = Some(key);
             let (git, repos) = (cx.repo.git.clone(), w.repos.clone());
@@ -252,25 +271,18 @@ impl HomeView {
             });
         }
         ui.horizontal(|ui| {
-            if ui.small_button("Fetch all").clicked() {
+            let busy = self.sweep.busy();
+            let why = "One of these is already going through the repositories.";
+            if ui.add_enabled(!busy, egui::Button::new("Fetch all").small()).on_disabled_hover_text(why).clicked() {
+                let prune = cx.settings.prune_on_fetch;
+                self.start_sweep(ui.ctx(), cx, w.repos.clone(), "Fetched", move || ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() }));
+            }
+            if ui.add_enabled(!busy, egui::Button::new("Pull all").small()).on_hover_text("Fast-forward only, so nothing needs resolving. A repository that can't is left as it is and reported").on_disabled_hover_text(why).clicked() {
+                self.start_sweep(ui.ctx(), cx, w.repos.clone(), "Pulled", || ops::pull(ops::PullMode::FfOnly, false));
+            }
+            if ui.small_button("Open all").clicked() {
                 for r in &w.repos {
-                    let (git, r, prune) = (cx.repo.git.clone(), r.clone(), cx.settings.prune_on_fetch);
-                    cx.out.push(Action::Later(Box::new(move || {
-                        // One of these may never have been opened here, and a fetch can start
-                        // what its config names. So the same check as opening it, and no fetch
-                        // until that's decided.
-                        if Repo::open(git, std::path::Path::new(&r)).is_ok_and(|x| x.trust.restricted()) {
-                            return Err(format!("Not fetching {r}: its config names programs that you haven't said can run. Open it to decide."));
-                        }
-                        let op = ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() });
-                        let mut wrapped = ops::GitOp::new(format!("Fetch {r}")).net();
-                        for s in op.steps {
-                            let mut args = vec!["-C".to_string(), r.clone()];
-                            args.extend(s.args);
-                            wrapped = wrapped.step_v(args);
-                        }
-                        Ok(crate::action::Later::RunGlobal(wrapped))
-                    })));
+                    cx.out.push(Action::OpenRepo(r.into()));
                 }
             }
             if ui.small_button("Add current repository").clicked() {
@@ -320,7 +332,7 @@ impl HomeView {
                     }))])
                 }));
             }
-            if self.summaries.busy() {
+            if self.summaries.busy() || self.sweep.busy() {
                 ui.add(spinner(13.0));
             }
         });
@@ -357,6 +369,30 @@ impl HomeView {
                 self.summaries.value = Some(list);
             }
         }
+    }
+}
+
+/// One op through each repository in turn, off the UI thread. What failed is reported once, all
+/// together, and doesn't stop the others. A repository that hasn't been opened and has config
+/// that would run a program is left out until someone has decided about it.
+fn sweep(git: gitem_core::GitExe, repos: Vec<String>, done: &str, op: impl Fn() -> ops::GitOp) -> Result<String, String> {
+    let (mut worked, mut failed) = (0, Vec::new());
+    for path in &repos {
+        let dir = std::path::Path::new(path);
+        let result = match Repo::open(git.clone(), dir) {
+            Ok(r) if r.trust.restricted() => Err("its config names programs that you haven't said can run. Open it to decide.".to_string()),
+            Ok(r) => op().unattended().run(&r.git, Some(dir), None, &mut |_| {}).map(|_| ()).map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match result {
+            Ok(()) => worked += 1,
+            Err(e) => failed.push(format!("{path}: {}", e.lines().last().unwrap_or(&e))),
+        }
+    }
+    if failed.is_empty() {
+        Ok(format!("{done} {}", plural(worked, "repository", "repositories")))
+    } else {
+        Err(format!("{done} {}. {} didn't work:\n{}", plural(worked, "repository", "repositories"), failed.len(), failed.join("\n")))
     }
 }
 

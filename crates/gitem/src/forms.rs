@@ -382,15 +382,30 @@ const MERGE_MODES: [(ops::MergeMode, &str); 5] = [
     (ops::MergeMode::NoCommit, "Merge without committing (--no-commit)"),
 ];
 
+const MERGE_FAVOUR: [(Option<&str>, &str); 3] = [(None, "Stop and let me resolve it"), (Some("ours"), "Take this branch's side (-X ours)"), (Some("theirs"), "Take the other branch's side (-X theirs)")];
+
 pub fn merge_form(target: String) -> FormDialog {
-    FormDialog::new(format!("Merge {target} into the current branch"), "Merge").choice_of("mode", "Strategy", &MERGE_MODES, 0).on_submit(move |v| run(ops::merge(&target, v.picked("mode", &MERGE_MODES))))
+    FormDialog::new(format!("Merge {target} into the current branch"), "Merge")
+        .choice_of("mode", "Strategy", &MERGE_MODES, 0)
+        .choice_of("favour", "On a conflict", &MERGE_FAVOUR, 0)
+        .multiline("message", "Message (optional)", "")
+        .on_submit(move |v| run(ops::merge_with(&target, v.picked("mode", &MERGE_MODES), v.picked("favour", &MERGE_FAVOUR), v.opt("message").as_deref())))
 }
 
 pub fn rebase_form(onto: String) -> FormDialog {
+    rebase_form_with(onto, false)
+}
+
+/// For a stack of pull requests, each branch on top of the one before.
+pub fn rebase_stack_form(onto: String) -> FormDialog {
+    rebase_form_with(onto, true).info("Branches between it and your current branch move with it. Each then needs pushing: Push stack, from Launchpad, sends them all.")
+}
+
+fn rebase_form_with(onto: String, stack: bool) -> FormDialog {
     FormDialog::new(format!("Rebase the current branch onto {onto}"), "Rebase")
         .check("autostash", "Stash local changes during the rebase", true)
         .check("merges", "Keep merge commits (--rebase-merges)", false)
-        .check("update_refs", "Update dependent branches (--update-refs)", false)
+        .check("update_refs", "Update dependent branches (--update-refs)", stack)
         .on_submit(move |v| {
             run(ops::rebase(&ops::RebaseOpts { onto: onto.clone(), autostash: v.on("autostash"), rebase_merges: v.on("merges"), update_refs: v.on("update_refs"), ..Default::default() }))
         })
@@ -411,7 +426,14 @@ pub fn cherry_pick_form(shas: Vec<String>) -> FormDialog {
     FormDialog::new(format!("Cherry-pick {}", crate::widgets::plural(shas.len(), "commit", "commits")), "Cherry-pick")
         .check("x", "Record the source commit (-x)", false)
         .check("no_commit", "Apply without committing", false)
-        .on_submit(move |v| run(ops::cherry_pick(&shas, v.on("no_commit"), v.on("x"))))
+        .text("mainline", "Parent to compare with, for a merge commit (-m)", "")
+        .on_submit(move |v| {
+            let mainline = match v.opt("mainline") {
+                Some(n) => Some(n.parse::<u32>().ok().filter(|n| *n > 0).ok_or("The parent is a number, starting at 1.")?),
+                None => None,
+            };
+            run(ops::cherry_pick_parent(&shas, v.on("no_commit"), v.on("x"), mainline))
+        })
 }
 
 pub fn revert_form(sha: String, is_merge: bool) -> FormDialog {
@@ -420,6 +442,47 @@ pub fn revert_form(sha: String, is_merge: bool) -> FormDialog {
         f = f.info("This is a merge commit. The revert is relative to its first parent.");
     }
     f.on_submit(move |v| run(ops::revert(&sha, v.on("no_commit"), is_merge.then_some(1))))
+}
+
+/// Several commits, newest first, so that later ones come off before what they build on.
+pub fn revert_many_form(shas: Vec<String>) -> FormDialog {
+    FormDialog::new(format!("Revert {}", crate::widgets::plural(shas.len(), "commit", "commits")), "Revert").info("Each gets a commit of its own, unless they're applied without committing. A merge commit among them stops it: revert that on its own, to say which parent it's relative to.").check("no_commit", "Apply without committing", false).on_submit(move |v| run(ops::revert_many(&shas, v.on("no_commit"))))
+}
+
+/// Which remote a tag goes to, for repositories with more than one, and whether it may replace.
+pub fn tag_push_form(name: String, remotes: Vec<String>, default: String) -> FormDialog {
+    let refs: Vec<&str> = remotes.iter().map(String::as_str).collect();
+    let at = remotes.iter().position(|r| *r == default).unwrap_or(0);
+    FormDialog::new(format!("Push tag {name}"), "Push").choice("remote", "Remote", &refs, at).check("force", "Replace it if the remote's is on another commit. Others may be relying on the old one", false).on_submit(move |v| {
+        let remote = v.text("remote");
+        run(if v.on("force") { ops::tag_push_replacing(&remote, &name) } else { ops::tag_push(&remote, &name) })
+    })
+}
+
+pub fn tags_push_all_form(remotes: Vec<String>, default: String) -> FormDialog {
+    let refs: Vec<&str> = remotes.iter().map(String::as_str).collect();
+    let at = remotes.iter().position(|r| *r == default).unwrap_or(0);
+    FormDialog::new("Push all tags", "Push").choice("remote", "Remote", &refs, at).check("force", "Replace any the remote has on another commit", false).on_submit(move |v| run(ops::tags_push_all(&v.text("remote"), v.on("force"))))
+}
+
+pub fn tag_delete_remote_form(name: String, remotes: Vec<String>, default: String) -> FormDialog {
+    let refs: Vec<&str> = remotes.iter().map(String::as_str).collect();
+    let at = remotes.iter().position(|r| *r == default).unwrap_or(0);
+    FormDialog::new(format!("Delete tag {name} on a remote"), "Delete on remote").danger().info("This affects everyone using that remote.").choice("remote", "Remote", &refs, at).on_submit(move |v| run(ops::tag_delete_remote(&v.text("remote"), &name)))
+}
+
+pub fn lfs_pattern_form(title: &str, submit: &str, then: fn(&str) -> GitOp) -> FormDialog {
+    FormDialog::new(title, submit).text("pattern", "Pattern or path", "").on_submit(move |v| {
+        let p = required(v, "pattern", "A pattern or path")?;
+        run(then(&p))
+    })
+}
+
+pub fn lfs_unlock_form() -> FormDialog {
+    FormDialog::new("Unlock a file", "Unlock").text("path", "Path", "").check("force", "Even if someone else holds the lock", false).on_submit(|v| {
+        let p = required(v, "path", "A path")?;
+        run(ops::lfs_unlock(&p, v.on("force")))
+    })
 }
 
 pub fn stash_form(paths: Vec<String>) -> FormDialog {
@@ -561,7 +624,7 @@ impl FormDialog {
             match f {
                 Field::Check { key: k, value: v, .. } if *k == key => *v = value == "1",
                 Field::Choice { key: k, options, value: v, .. } if *k == key => *v = options.iter().position(|o| o == value).expect("that option"),
-                Field::Text { key: k, value: v, .. } if *k == key => *v = value.to_string(),
+                Field::Text { key: k, value: v, .. } | Field::Pick { key: k, value: v, .. } | Field::Multiline { key: k, value: v, .. } if *k == key => *v = value.to_string(),
                 _ => {}
             }
         }
@@ -640,6 +703,7 @@ pub fn clone_form() -> FormDialog {
         .text("branch", "Branch (optional)", "")
         .text("depth", "Depth (optional)", "")
         .check("recursive", "Include submodules", true)
+        .check("partial", "Download file contents only as needed (--filter=blob:none)", false)
         .on_submit(|v| {
             let url = required(v, "url", "A URL")?;
             let parent = required(v, "parent", "A folder")?;
@@ -649,7 +713,8 @@ pub fn clone_form() -> FormDialog {
                 Some(d) => Some(d.parse::<u32>().map_err(|_| "Depth must be a number.".to_string())?),
                 None => None,
             };
-            Ok(vec![Action::RunGlobal { op: ops::clone_repo(&url, &dest, depth, v.on("recursive"), v.opt("branch").as_deref()), open_after: Some(dest.into()) }])
+            let make = if v.on("partial") { ops::clone_partial } else { ops::clone_repo };
+            Ok(vec![Action::RunGlobal { op: make(&url, &dest, depth, v.on("recursive"), v.opt("branch").as_deref()), open_after: Some(dest.into()) }])
         })
 }
 

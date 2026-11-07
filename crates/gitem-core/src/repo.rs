@@ -983,6 +983,7 @@ impl Repo {
             HealthItem { label: "File system monitor".into(), detail: "Lets status skip scanning files that didn't change, in your terminal and editor. gitem turns it off for its own reads, since it starts a program named by the repository's config.".into(), config: vec![("core.fsmonitor".into(), "true".into())], enabled: is_on("core.fsmonitor"), ..Default::default() },
             HealthItem { label: "Large-repository index".into(), detail: "Index format for repositories with many files.".into(), config: vec![("feature.manyFiles".into(), "true".into())], enabled: is_on("feature.manyFiles"), ..Default::default() },
             HealthItem { label: "Sparse index".into(), detail: "Smaller index when using sparse checkout.".into(), config: vec![("index.sparse".into(), "true".into())], enabled: is_on("index.sparse"), ..Default::default() },
+            HealthItem { label: "Remember conflict resolutions".into(), detail: "Git's rerere: when a conflict comes back, it reapplies how you resolved it last time, for you to check.".into(), config: vec![("rerere.enabled".into(), "true".into())], enabled: is_on("rerere.enabled"), ..Default::default() },
             HealthItem { label: "Scheduled maintenance".into(), detail: "Git keeps this repository optimized in the background, using a task it adds to your system's scheduler.".into(), enabled: registered, maintenance: true, ..Default::default() },
         ];
         for item in &mut items {
@@ -1259,6 +1260,25 @@ impl Repo {
         self.root.join(".gitignore")
     }
 
+    /// Ignore rules for this clone only. Shared by its worktrees.
+    pub fn info_exclude_path(&self) -> PathBuf {
+        self.common_dir.join("info").join("exclude")
+    }
+
+    /// Where the user's ignore rules for every repository live: as configured, or git's default.
+    pub fn global_ignore_path(&self) -> Result<PathBuf> {
+        if let Some(p) = self.config_get("core.excludesFile").filter(|p| !p.trim().is_empty()) {
+            return Ok(match p.strip_prefix("~/") {
+                Some(rest) => home_dir()?.join(rest),
+                None => PathBuf::from(p),
+            });
+        }
+        match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+            Some(x) => Ok(PathBuf::from(x).join("git").join("ignore")),
+            None => Ok(home_dir()?.join(".config").join("git").join("ignore")),
+        }
+    }
+
     pub fn check_ignore(&self, path: &str) -> Option<String> {
         let o = self.git.run_raw(Some(&self.root), &["check-ignore", "-v", "--", path]).ok()?;
         o.ok().then(|| o.text().trim().to_string())
@@ -1341,6 +1361,10 @@ impl Repo {
         let (Ok(a), Ok(b)) = (rev_arg(a), rev_arg(b)) else { return false };
         self.git.run_raw(Some(&self.root), &["merge-base", "--is-ancestor", a, b]).map(|o| o.ok()).unwrap_or(false)
     }
+}
+
+fn home_dir() -> Result<PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).ok_or_else(|| Error::Other("Couldn't tell where your home folder is.".to_string()))
 }
 
 /// Stands between message terms in `LogQuery::grep`. Nobody types it, unlike `|`.

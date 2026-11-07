@@ -167,6 +167,15 @@ pub struct Settings {
     pub start_work_format: String,
     /// Run in a new terminal to start an agent session in a worktree.
     pub agent_command: String,
+    /// What Open terminal starts: a known name, a program and its arguments, or empty for the
+    /// system's plain one.
+    #[serde(default)]
+    pub terminal: String,
+    /// Names git knows, for `git difftool` and `git mergetool`. Empty means what git is set to.
+    #[serde(default)]
+    pub external_diff_tool: String,
+    #[serde(default)]
+    pub external_merge_tool: String,
     /// Run in a new terminal by "Run task on worktree".
     pub worktree_task: String,
     /// Run git's safe maintenance when a repository is opened.
@@ -266,6 +275,9 @@ impl Default for Settings {
             commit_sign: false,
             commit_signoff: false,
             pull_autostash: false,
+            terminal: String::new(),
+            external_diff_tool: String::new(),
+            external_merge_tool: String::new(),
             check_updates: false,
             update_url: crate::update::DEFAULT_RELEASE_URL.to_string(),
             last_update_check: 0,

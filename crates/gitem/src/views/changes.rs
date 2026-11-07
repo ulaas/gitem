@@ -1150,6 +1150,10 @@ fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, state: &mut RowState,
                 add_to_gitignore(cx, &e.path);
                 ui.close();
             }
+            if ui.button("Ignore…").on_hover_text("A pattern instead of this one path, or a list that isn't shared").clicked() {
+                cx.form(ignore_form(cx.repo, &e.path));
+                ui.close();
+            }
             if ui.button("Delete file…").clicked() {
                 if cx.repo.is_nested_repo(&e.path) {
                     // `git clean` would leave it alone and report success.
@@ -1188,18 +1192,79 @@ pub fn gitignore_entry(path: &str) -> String {
     out
 }
 
-pub fn add_to_gitignore(cx: &mut Cx, path: &str) {
+/// Rules for this file as it could be ignored: itself, its folder, or everything of its kind.
+pub fn ignore_patterns(path: &str) -> Vec<String> {
+    let mut v = vec![gitignore_entry(path)];
+    if let Some((folder, _)) = path.trim_end_matches('/').rsplit_once('/') {
+        v.push(format!("{}/", gitignore_entry(folder)));
+    }
+    if let Some((_, ext)) = path.rsplit_once('/').map_or(path, |x| x.1).rsplit_once('.')
+        && !ext.is_empty()
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        v.push(format!("*.{ext}"));
+    }
+    v
+}
+
+pub fn ignore_form(repo: &gitem_core::Repo, path: &str) -> forms::FormDialog {
+    const WHERE: [&str; 3] = ["This repository's .gitignore, which is shared", "This clone only (.git/info/exclude)", "Every repository of mine (Git's global ignore file)"];
+    let patterns = ignore_patterns(path);
+    let refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    let repo = repo.clone();
+    forms::FormDialog::new(format!("Ignore {path}"), "Ignore").choice("pattern", "Rule", &refs, 0).choice("place", "Where", &WHERE, 0).on_submit(move |v| {
+        let rule = v.text("pattern");
+        let file = match v.index("place") {
+            0 => repo.ignore_path(),
+            1 => repo.info_exclude_path(),
+            _ => repo.global_ignore_path().map_err(|e| e.to_string())?,
+        };
+        append_rule(&file, &rule).map_err(|e| format!("Could not update {}: {e}", file.display()))?;
+        Ok(vec![crate::action::Action::Toast(format!("Added {rule} to {}", file.display())), crate::action::Action::ReloadRepository])
+    })
+}
+
+fn append_rule(file: &std::path::Path, rule: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let file = cx.repo.ignore_path();
-    let needs_nl = std::fs::read(&file).map(|b| !b.is_empty() && !b.ends_with(b"\n")).unwrap_or(false);
-    let r = std::fs::OpenOptions::new().create(true).append(true).open(&file).and_then(|mut f| {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let needs_nl = std::fs::read(file).map(|b| !b.is_empty() && !b.ends_with(b"\n")).unwrap_or(false);
+    std::fs::OpenOptions::new().create(true).append(true).open(file).and_then(|mut f| {
         if needs_nl {
             f.write_all(b"\n")?;
         }
-        f.write_all(format!("{}\n", gitignore_entry(path)).as_bytes())
-    });
+        f.write_all(format!("{rule}\n").as_bytes())
+    })
+}
+
+pub fn add_to_gitignore(cx: &mut Cx, path: &str) {
+    let file = cx.repo.ignore_path();
+    let r = append_rule(&file, &gitignore_entry(path));
     match r {
         Ok(()) => cx.toast(format!("Ignored {path}")),
         Err(e) => cx.error(format!("Could not update .gitignore: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod ignore_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_can_be_ignored_by_itself_its_folder_or_its_kind() {
+        assert_eq!(ignore_patterns("src/gen/a.log"), ["/src/gen/a.log", "/src/gen/", "*.log"]);
+        assert_eq!(ignore_patterns("Makefile"), ["/Makefile"]);
+        assert_eq!(ignore_patterns("build/"), ["/build/"]);
+    }
+
+    #[test]
+    fn a_rule_starts_on_a_line_of_its_own() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("info").join("exclude");
+        append_rule(&f, "*.a").unwrap();
+        std::fs::write(&f, "no newline").unwrap();
+        append_rule(&f, "*.b").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "no newline\n*.b\n");
     }
 }

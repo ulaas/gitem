@@ -685,7 +685,20 @@ pub enum MergeMode {
 }
 
 pub fn merge(rev: &str, mode: MergeMode) -> GitOp {
+    merge_with(rev, mode, None, None)
+}
+
+/// With `-X` for which side wins a conflict, and a message of the user's own.
+pub fn merge_with(rev: &str, mode: MergeMode, favour: Option<&str>, message: Option<&str>) -> GitOp {
     let mut a = v(&["merge", "--no-edit"]);
+    if let Some(side) = favour {
+        a.push("-X".into());
+        a.push(side.to_string());
+    }
+    if let Some(m) = message {
+        a.push("-m".into());
+        a.push(m.to_string());
+    }
     match mode {
         MergeMode::Default => {}
         MergeMode::NoFf => a.push("--no-ff".into()),
@@ -767,7 +780,16 @@ pub fn op_skip(cmd: &str) -> GitOp {
 }
 
 pub fn cherry_pick(shas: &[String], no_commit: bool, x_trailer: bool) -> GitOp {
+    cherry_pick_parent(shas, no_commit, x_trailer, None)
+}
+
+/// With `-m`, which parent counts as the mainline when what's being picked is a merge.
+pub fn cherry_pick_parent(shas: &[String], no_commit: bool, x_trailer: bool, mainline: Option<u32>) -> GitOp {
     let mut a = v(&["cherry-pick"]);
+    if let Some(m) = mainline {
+        a.push("-m".into());
+        a.push(m.to_string());
+    }
     if no_commit {
         a.push("--no-commit".into());
     }
@@ -790,6 +812,17 @@ pub fn revert(sha: &str, no_commit: bool, mainline: Option<u32>) -> GitOp {
     }
     a.push(sha.to_string());
     GitOp::new(format!("Revert {}", short(sha))).names(&[sha]).step_v(a).moves_head("revert")
+}
+
+/// Several commits at once, newest first, each reverted in turn.
+pub fn revert_many(shas: &[String], no_commit: bool) -> GitOp {
+    let mut a = v(&["revert", "--no-edit"]);
+    if no_commit {
+        a.push("--no-commit".into());
+    }
+    a.extend_from_slice(shas);
+    let names: Vec<&str> = shas.iter().map(String::as_str).collect();
+    GitOp::new(format!("Revert {}", crate::util::count_of(shas.len(), "commit"))).names(&names).step_v(a).moves_head("revert")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -867,6 +900,21 @@ pub fn tag_delete(name: &str) -> GitOp {
         return GitOp::new(format!("Delete tag {name}")).step(&["update-ref", "-d", name]);
     }
     GitOp::new(format!("Delete tag {name}")).names(&[name]).step(&["tag", "-d", name])
+}
+
+/// A push that replaces a tag the remote holds at another commit.
+pub fn tag_push_replacing(remote: &str, name: &str) -> GitOp {
+    GitOp::new(format!("Push tag {name}, replacing it")).names(&[remote]).step(&["push", "--force", "--", remote, &format!("refs/tags/{name}")]).net()
+}
+
+/// Every tag here, lightweight ones too, which `--follow-tags` would skip.
+pub fn tags_push_all(remote: &str, replacing: bool) -> GitOp {
+    let mut a = v(&["push", "--tags"]);
+    if replacing {
+        a.push("--force".into());
+    }
+    a.extend(v(&["--", remote]));
+    GitOp::new(format!("Push all tags to {remote}")).names(&[remote]).step_v(a).net()
 }
 
 pub fn tag_delete_remote(remote: &str, name: &str) -> GitOp {
@@ -1221,6 +1269,20 @@ pub fn reset_pr_branch(remote: &str, ref_spec: &str) -> GitOp {
     GitOp::new("Reset to the pull request").step(&["fetch", "--", remote, ref_spec]).step(&["reset", "--hard", "FETCH_HEAD"]).net()
 }
 
+/// A clone that leaves file contents on the server until they're needed.
+pub fn clone_partial(url: &str, dest: &str, depth: Option<u32>, recursive: bool, branch: Option<&str>) -> GitOp {
+    let mut op = clone_repo(url, dest, depth, recursive, branch);
+    if let Some(s) = op.steps.first_mut() {
+        s.args.insert(1, "--filter=blob:none".to_string());
+    }
+    op
+}
+
+/// Bring in the history a shallow clone left out.
+pub fn unshallow() -> GitOp {
+    GitOp::new("Fetch the full history").step(&["fetch", "--unshallow"]).net()
+}
+
 pub fn clone_repo(url: &str, dest: &str, depth: Option<u32>, recursive: bool, branch: Option<&str>) -> GitOp {
     let mut a = v(&["clone", "--progress"]);
     if let Some(d) = depth {
@@ -1392,6 +1454,23 @@ pub fn lfs_track(pattern: &str) -> GitOp {
     GitOp::new(format!("LFS track {pattern}")).step(&["lfs", "track", pattern]).step(&["add", ".gitattributes"])
 }
 
+pub fn lfs_untrack(pattern: &str) -> GitOp {
+    GitOp::new(format!("LFS untrack {pattern}")).names(&[pattern]).step(&["lfs", "untrack", pattern])
+}
+
+pub fn lfs_lock(path: &str) -> GitOp {
+    GitOp::new(format!("LFS lock {path}")).names(&[path]).step(&["lfs", "lock", path]).net()
+}
+
+pub fn lfs_unlock(path: &str, force: bool) -> GitOp {
+    let mut a = v(&["lfs", "unlock"]);
+    if force {
+        a.push("--force".into());
+    }
+    a.push(path.to_string());
+    GitOp::new(format!("LFS unlock {path}")).names(&[path]).step_v(a).net()
+}
+
 pub fn lfs_pull() -> GitOp {
     GitOp::new("LFS pull").step(&["lfs", "pull"]).net()
 }
@@ -1508,6 +1587,31 @@ pub fn publish_repository(name: &str, url: &str, branch: &str) -> GitOp {
 
 /// Folder comparison in the configured difftool. Real copies, since making a symlink
 /// fails on Windows without the right privilege, even where `core.symlinks` is on.
+/// This file in the user's own diff tool, or the one git is set up with if `tool` is empty.
+pub fn difftool_file(tool: &str, rev: Option<&str>, path: &str) -> GitOp {
+    let mut a = v(&["difftool", "--no-prompt"]);
+    if !tool.is_empty() {
+        a.push(format!("--tool={tool}"));
+    }
+    if let Some(r) = rev {
+        a.push(r.to_string());
+    }
+    a.push("--".into());
+    a.push(path.to_string());
+    GitOp::new(format!("Open {path} in the diff tool")).names(&[tool, rev.unwrap_or_default()]).step_v(a).literal()
+}
+
+/// This conflicted file in the user's own merge tool. Git marks it resolved if the tool says so.
+pub fn mergetool_file(tool: &str, path: &str) -> GitOp {
+    let mut a = v(&["mergetool", "--no-prompt"]);
+    if !tool.is_empty() {
+        a.push(format!("--tool={tool}"));
+    }
+    a.push("--".into());
+    a.push(path.to_string());
+    GitOp::new(format!("Open {path} in the merge tool")).names(&[tool]).step_v(a).literal()
+}
+
 pub fn difftool_dir(a: &str, b: &str) -> GitOp {
     GitOp::new(format!("Open directory compare of {a} and {b}")).step(&["difftool", "--dir-diff", "--no-symlinks", "--no-prompt", a, b])
 }

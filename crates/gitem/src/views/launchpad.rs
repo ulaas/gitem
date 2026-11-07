@@ -458,8 +458,8 @@ impl LaunchpadView {
                         })));
                     }
                 if let Some(parent) = parent
-                    && here && ui.small_button("Rebase stack").on_hover_text(format!("Rebase onto {} and keep dependent branches together", parent.head)).clicked() {
-                        cx.form(forms::rebase_form(parent.head.clone()));
+                    && here && ui.small_button("Rebase stack").on_hover_text(format!("Rebase onto {}, moving the branches between with it", parent.head)).clicked() {
+                        cx.form(forms::rebase_stack_form(parent.head.clone()));
                     }
                 if let Some(r) = repo {
                     let n = pr.number;

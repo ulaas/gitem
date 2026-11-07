@@ -127,6 +127,8 @@ impl Tab {
             Tab::Graph(_) => "graph".into(),
             Tab::Changes(_) => "changes".into(),
             Tab::Launchpad(_) => "launchpad".into(),
+            Tab::Search(_) => "search".into(),
+            Tab::Visual(_) => "visual".into(),
             Tab::Worktrees(_) => "worktrees".into(),
             Tab::Contributors(_) => "contributors".into(),
             Tab::Reflog(_) => "reflog".into(),
@@ -141,6 +143,7 @@ impl Tab {
             Tab::Health(_) => "health".into(),
             Tab::Agents(_) => "agents".into(),
             Tab::Review(_) => "review".into(),
+            Tab::Prune(_) => "prune".into(),
             Tab::File(v) if v.rev.is_none() => format!("file:{}", v.path),
             _ => return None,
         })
@@ -152,6 +155,8 @@ impl Tab {
             "graph" => Tab::graph(),
             "changes" => Tab::changes(),
             "launchpad" => Tab::Launchpad(Box::default()),
+            "search" => Tab::Search(Box::default()),
+            "visual" => Tab::visual(""),
             "worktrees" => Tab::Worktrees(Box::default()),
             "contributors" => Tab::Contributors(Box::default()),
             "reflog" => Tab::Reflog(Box::default()),
@@ -166,6 +171,7 @@ impl Tab {
             "health" => Tab::Health(Box::default()),
             "agents" => Tab::Agents(Box::default()),
             "review" => Tab::Review(Box::default()),
+            "prune" => Tab::Prune(Box::default()),
             other => Tab::file(other.strip_prefix("file:")?, None, None),
         })
     }

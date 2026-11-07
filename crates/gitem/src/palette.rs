@@ -209,6 +209,72 @@ pub fn commands() -> Vec<Item> {
             Ok(vec![Action::Confirm { title: "Delete branch".to_string(), body: format!("Delete {n}? This fails if it has unmerged commits."), label: "Delete".to_string(), op: ops::branch_delete(&n, false) }])
         }));
     }));
+    v.push(item("Git", "Revert a Commit…", |cx| {
+        let refs = cx.data.ref_names();
+        cx.form(pick_ref("Revert which commit?", refs, |r| forms::revert_form(r, false)));
+    }));
+    v.push(item("Git", "Cherry-pick a Range…", |cx| {
+        cx.form(forms::FormDialog::new("Cherry-pick a range", "Next").text("from", "After this commit", "").text("to", "Up to and including", "HEAD").on_submit(|v| {
+            let (from, to) = (v.opt("from").ok_or("Say where the range starts.")?, v.opt("to").ok_or("Say where the range ends.")?);
+            Ok(vec![Action::Form(forms::cherry_pick_form(vec![format!("{from}..{to}")]))])
+        }));
+    }));
+    for (label, verb, pop, drop) in [("Apply a Stash…", "Apply", false, false), ("Pop a Stash…", "Pop", true, false), ("Drop a Stash…", "Drop", false, true)] {
+        v.push(item("Git", label, move |cx| {
+            let list: Vec<(String, String)> = cx.data.stashes().iter().map(|s| (format!("{}: {}", s.selector, s.message), s.sha.clone())).collect();
+            if list.is_empty() {
+                cx.toast("There are no stashes.");
+                return;
+            }
+            let names = list.iter().map(|x| x.0.clone()).collect();
+            cx.form(forms::FormDialog::new(format!("{verb} a stash"), verb).pick("s", "Stash", names, "").on_submit(move |v| {
+                let chosen = v.opt("s").ok_or("Choose a stash.")?;
+                let (name, sha) = list.iter().find(|x| x.0 == chosen).ok_or("Choose a stash from the list.")?;
+                let sel = name.split(':').next().unwrap_or_default();
+                let op = if drop { ops::stash_drop(sel) } else { ops::stash_apply(sel, pop, false) };
+                let op = ops::only_if_stash_is(op, sel, sha);
+                Ok(vec![if drop { Action::Confirm { title: "Drop stash".to_string(), body: format!("Drop {name}? The toolbar's Undo can restore it straight afterwards."), label: "Drop".to_string(), op } } else { Action::Run(op) }])
+            }));
+        }));
+    }
+    v.push(item("Git", "Delete a Tag…", |cx| {
+        let names: Vec<String> = cx.data.tags().iter().map(|t| t.name.clone()).collect();
+        cx.form(forms::FormDialog::new("Delete a tag", "Next").pick("name", "Tag", names, "").on_submit(|v| {
+            let n = v.opt("name").ok_or("Choose a tag.")?;
+            Ok(vec![Action::Confirm { title: "Delete tag".to_string(), body: format!("Delete tag {n} from this repository?"), label: "Delete".to_string(), op: ops::tag_delete(&n) }])
+        }));
+    }));
+    v.push(item("Git", "Push a Tag…", |cx| {
+        let (names, remotes): (Vec<String>, Vec<String>) = (cx.data.tags().iter().map(|t| t.name.clone()).collect(), cx.data.remote_names());
+        let default = cx.data.forge_remote.clone().unwrap_or_else(|| "origin".to_string());
+        cx.form(forms::FormDialog::new("Push a tag", "Next").pick("name", "Tag", names, "").on_submit(move |v| {
+            let n = v.opt("name").ok_or("Choose a tag.")?;
+            Ok(vec![Action::Form(forms::tag_push_form(n, remotes.clone(), default.clone()))])
+        }));
+    }));
+    v.push(item("Git", "Push All Tags…", |cx| {
+        let default = cx.data.forge_remote.clone().unwrap_or_else(|| "origin".to_string());
+        cx.form(forms::tags_push_all_form(cx.data.remote_names(), default));
+    }));
+    v.push(item("Git", "Rename a Branch…", |cx| {
+        let names: Vec<String> = cx.data.local_branches().map(|b| b.name.clone()).collect();
+        cx.form(forms::FormDialog::new("Rename a branch", "Next").pick("name", "Branch", names, "").on_submit(|v| {
+            let n = v.opt("name").ok_or("Choose a branch.")?;
+            Ok(vec![Action::Form(forms::rename_branch(n))])
+        }));
+    }));
+    v.push(item("Git", "Remove a Worktree…", |cx| {
+        let names: Vec<String> = cx.data.worktrees().iter().filter(|w| !w.is_main && !w.is_current).map(|w| w.path.clone()).collect();
+        if names.is_empty() {
+            cx.toast("There's no other worktree to remove from here.");
+            return;
+        }
+        cx.form(forms::FormDialog::new("Remove a worktree", "Next").pick("path", "Worktree", names, "").on_submit(|v| {
+            let p = v.opt("path").ok_or("Choose a worktree.")?;
+            Ok(vec![Action::Confirm { title: "Remove worktree".to_string(), body: format!("Remove the worktree at {p}?"), label: "Remove".to_string(), op: ops::worktree_remove(&p, false) }])
+        }));
+    }));
+    v.push(item("Git", "Fetch the Full History", |cx| cx.run(ops::unshallow())));
     v.push(item("App", "Change Theme…", |cx| {
         use gitem_core::settings::ThemeChoice;
         let names: Vec<&str> = ThemeChoice::ALL.iter().map(|t| t.name()).collect();
@@ -268,7 +334,7 @@ pub fn commands() -> Vec<Item> {
             Ok(vec![Action::OpenTab(Tab::file(&path, Some(rev), line))])
         }));
     }));
-    v.push(item("App", "Zen Mode (Hide Side Panels)", |cx| cx.out.push(Action::OpenTerminal(std::path::PathBuf::new(), Some("__zen__".to_string())))));
+    v.push(item("App", "Zen Mode (Hide Side Panels)", |cx| cx.out.push(Action::ToggleZen)));
     v.push(item("App", "Open Terminal Here", |cx| cx.out.push(Action::OpenTerminal(cx.repo.root.clone(), None))));
     v.push(item("App", "Refresh", |cx| cx.out.push(Action::Refresh)));
     v

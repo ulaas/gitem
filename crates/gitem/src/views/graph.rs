@@ -944,6 +944,13 @@ impl GraphView {
             cx.form(forms::cherry_pick_form(shas));
             ui.close();
         }
+        if self.selected.len() > 1 && self.selected.contains(&c.sha) && ui.button(format!("Revert {} selected commits…", self.selected.len())).clicked() {
+            // Newest first: what came later comes off before what it builds on.
+            let mut shas = self.selected.clone();
+            shas.sort_by_key(|s| g.index.get(s).copied().unwrap_or(0));
+            cx.form(forms::revert_many_form(shas));
+            ui.close();
+        }
         // Branch-specific commands for refs on this commit. A commit can have dozens, so past a
         // few they go in a list of their own, or the menu outgrows the window. Not one that
         // scrolls: egui shuts the whole menu on a press on a submenu's row in a scroll area. So

@@ -72,6 +72,8 @@ pub enum Action {
     GraphFocus(String),
     /// Hide this ref from the commit graph.
     GraphHide(String),
+    /// Hide everything but the view, or bring it all back.
+    ToggleZen,
     /// Open a terminal in a folder, optionally running a command there.
     OpenTerminal(PathBuf, Option<String>),
     /// Close this repository's tab, asking first if that would lose something.

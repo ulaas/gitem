@@ -53,6 +53,10 @@ impl Fx {
         self.git(&["add", "-A"]);
         self.git(&["commit", "-q", "-m", msg]);
     }
+    /// Beside the repository, in the form git can take as an argument.
+    fn beside(&self, name: &str) -> PathBuf {
+        self._dir.path().join(name)
+    }
     fn head(&self) -> String {
         self.git(&["rev-parse", "HEAD"]).trim().to_string()
     }
@@ -394,4 +398,107 @@ fn asking_from_about_answers_either_way_and_opens_nothing_by_itself() {
     click(&mut h, "Check for updates");
     wait_for_text(&mut h, "Couldn't find out");
     assert!(h.state().errors_showing().is_empty());
+}
+
+// ---- workspaces
+
+fn other_repo(f: &Fx, name: &str, remote: &std::path::Path) -> PathBuf {
+    let path = f.beside(name);
+    let p = path.to_string_lossy().replace('\\', "/");
+    f.git.run(None, &["clone", "-q", &remote.to_string_lossy().replace('\\', "/"), &p]).unwrap();
+    for (k, v) in [("user.name", "T"), ("user.email", "t@example.com")] {
+        f.git.run(Some(&path), &["config", k, v]).unwrap();
+    }
+    path
+}
+
+#[test]
+fn pull_all_goes_through_a_workspace_and_reports_failures_once() {
+    let f = Fx::new();
+    let bare = f.beside("r.git");
+    f.git.run(None, &["init", "-q", "--bare", "-b", "main", &bare.to_string_lossy().replace('\\', "/")]).unwrap();
+    f.git(&["remote", "add", "origin", &bare.to_string_lossy().replace('\\', "/")]);
+    f.git(&["push", "-q", "-u", "origin", "main"]);
+    let (one, two) = (other_repo(&f, "one", &bare), other_repo(&f, "two", &bare));
+    f.write("a.txt", "new\n");
+    f.commit("on the remote");
+    f.git(&["push", "-q", "origin", "main"]);
+    let tip = f.head();
+    let missing = f.beside("not-there");
+    let list: Vec<String> = [&one, &two, &missing, &one.join("no")].iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
+    let mut h = f.harness(|s| s.workspaces = vec![gitem_core::settings::Workspace { name: "All".to_string(), repos: list }]);
+    open(&mut h, Tab::home());
+    click(&mut h, "All");
+    settle(&mut h);
+    click(&mut h, "Pull all");
+    wait_for(&mut h, "the report", |h| !h.state().errors_showing().is_empty());
+    let shown = h.state().errors_showing().to_vec();
+    assert_eq!(shown.len(), 1, "one report for all of them: {shown:?}");
+    assert!(shown[0].contains("Pulled 2 repositories") && shown[0].contains("2 didn't work"), "{shown:?}");
+    for p in [&one, &two] {
+        assert_eq!(f.git.run(Some(p), &["rev-parse", "HEAD"]).unwrap().text().trim(), tip);
+    }
+}
+
+// ---- small things
+
+#[test]
+fn a_bare_repository_is_called_that() {
+    let f = Fx::new();
+    let bare = f.beside("b.git");
+    f.git.run(None, &["init", "-q", "--bare", &bare.to_string_lossy().replace('\\', "/")]).unwrap();
+    let mut h = f.harness(|_| {});
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::OpenRepo(bare));
+    wait_for(&mut h, "the message", |h| !h.state().errors_showing().is_empty());
+    assert!(h.state().errors_showing()[0].contains("is a bare repository"), "{:?}", h.state().errors_showing());
+}
+
+#[test]
+fn the_palette_reaches_a_stash_drop_and_it_can_be_undone() {
+    let f = Fx::new();
+    f.write("a.txt", "stashed\n");
+    f.git(&["stash", "push", "-q", "-m", "saved work"]);
+    let mut h = f.harness(|_| {});
+    h.state_mut().open_palette_with(">Drop a Stash");
+    h.step();
+    h.key_press(egui::Key::Enter);
+    wait_for_label(&mut h, "Drop a stash");
+    let name = {
+        let st = &h.state().repos[0].data.stashes()[0];
+        format!("{}: {}", st.selector, st.message)
+    };
+    h.state_mut().form_set_for_test("s", &name);
+    click(&mut h, "Drop");
+    wait_for_text(&mut h, "Drop stash@{0}");
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(250) {
+        h.step();
+    }
+    h.query_all_by_label("Drop").last().unwrap().click();
+    h.step();
+    settle(&mut h);
+    assert_eq!(f.git(&["stash", "list"]), "");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::UndoLast);
+    wait_for_text(&mut h, "Undo drop of 1 stash");
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(250) {
+        h.step();
+    }
+    h.query_all_by_label("Undo drop of 1 stash").last().unwrap().click();
+    h.step();
+    settle(&mut h);
+    assert!(f.git(&["stash", "list"]).contains("saved work"));
+}
+
+#[test]
+fn zen_mode_comes_through_its_own_action() {
+    let f = Fx::new();
+    let mut h = f.harness(|_| {});
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::ToggleZen);
+    assert!(!h.state().repos[0].panels_showing());
+    h.state_mut().apply_action(&ctx, gitem::action::Action::ToggleZen);
+    assert!(h.state().repos[0].panels_showing());
 }

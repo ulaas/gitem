@@ -751,7 +751,9 @@ fn dialog_backdrop(ctx: &egui::Context, controls_width: f32) {
 
 /// Git's own message for a missing folder blames git: "The directory name is invalid".
 fn could_not_open(path: &Path, why: &str) -> String {
-    if path.exists() {
+    if path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir() {
+        format!("{} is a bare repository: it has no files checked out to show. Clone it, or add a worktree of it from a terminal and open that.", path.display())
+    } else if path.exists() {
         format!("{} isn't a git repository:\n{why}", path.display())
     } else {
         format!("{} doesn't exist. It may have been moved, renamed or deleted.", path.display())
@@ -1708,7 +1710,7 @@ impl GitemApp {
             Action::GraphFocus(name) | Action::GraphHide(name) if self.repos.is_empty() => drop(name),
             Action::GraphFocus(name) => self.with_graph(|g| g.focus_ref(&name)),
             Action::GraphHide(name) => self.with_graph(|g| g.hide_ref(&name)),
-            Action::OpenTerminal(_, Some(c)) if c == "__zen__" => {
+            Action::ToggleZen => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     let on = !(r.show_sidebar || r.show_inspect);
                     r.show_sidebar = on;
@@ -1716,7 +1718,7 @@ impl GitemApp {
                     r.show_inspect = on;
                 }
             }
-            Action::OpenTerminal(dir, command) => open_terminal(&dir, command.as_deref(), &mut self.errors),
+            Action::OpenTerminal(dir, command) => open_terminal(&dir, command.as_deref(), &self.settings.terminal, &mut self.errors),
             Action::CloseRepo(root) => {
                 if let Some(i) = self.repos.iter().position(|r| r.repo.root == root) {
                     self.request_close_repo(i);
@@ -2601,14 +2603,9 @@ impl GitemApp {
 
     fn shortcuts(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
         // In a text field the same keys are Redo.
-        if !ctx.egui_wants_keyboard_input()
-            && ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z))
-            && let Some(r) = self.repos.get_mut(self.active) {
-                let on = !(r.show_sidebar || r.show_inspect);
-                r.show_sidebar = on;
-                r.show_rail = on;
-                r.show_inspect = on;
-            }
+        if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z)) {
+            out.push(Action::ToggleZen);
+        }
         let (palette, refresh, sidebar, changes, graph) = ctx.input(|i| {
             (i.modifiers.command && i.key_pressed(egui::Key::P), i.key_pressed(egui::Key::F5), i.modifiers.command && i.key_pressed(egui::Key::B), i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::G), i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::H))
         });
@@ -3236,8 +3233,8 @@ fn forget_recent(path: &str) -> Action {
 
 /// A new terminal window in `dir`, optionally running a command there. The folder
 /// is passed as the working directory, so its name is never parsed by a shell.
-fn open_terminal(dir: &Path, command: Option<&str>, errors: &mut Vec<String>) {
-    if let Err(e) = terminal_command(dir, command).spawn() {
+fn open_terminal(dir: &Path, command: Option<&str>, choice: &str, errors: &mut Vec<String>) {
+    if let Err(e) = chosen_terminal(dir, command, choice).unwrap_or_else(|| terminal_command(dir, command)).spawn() {
         errors.push(format!("Could not open a terminal: {e}"));
     }
 }
@@ -3258,6 +3255,65 @@ fn macos_terminal_script(dir: &Path, cmd: &str) -> String {
 #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 fn unix_terminal_args(cmd: &str) -> Vec<String> {
     vec!["-e".to_string(), "sh".to_string(), "-c".to_string(), format!("{cmd}; exec \"${{SHELL:-sh}}\"")]
+}
+
+/// The program and arguments for a terminal the user chose. None means the system's plain one.
+/// Names work out what they mean, and anything else is taken as a program with its arguments.
+fn terminal_parts(choice: &str, command: Option<&str>, dir: &Path) -> Option<(String, Vec<String>)> {
+    let choice = choice.trim();
+    let dir_text = dir.to_string_lossy();
+    let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+    Some(match (choice, cfg!(windows)) {
+        ("", _) | ("cmd", true) => return None,
+        ("powershell" | "pwsh", true) => {
+            let mut a = owned(&["-NoExit"]);
+            if let Some(c) = command {
+                a.extend(owned(&["-Command", c]));
+            }
+            (format!("{choice}.exe"), a)
+        }
+        ("wt", true) => {
+            let mut a = vec!["-d".to_string(), dir_text.into_owned()];
+            if let Some(c) = command {
+                a.extend(owned(&["cmd", "/K", c]));
+            }
+            ("wt.exe".to_string(), a)
+        }
+        ("git-bash", true) => {
+            let root = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+            let mut a = vec![format!("--cd={dir_text}")];
+            if let Some(c) = command {
+                a.push("-c".to_string());
+                a.push(format!("{c}; exec bash"));
+            }
+            (format!(r"{root}\Git\git-bash.exe"), a)
+        }
+        _ => {
+            let mut words = gitem_core::ops::split_command_line(choice);
+            if words.is_empty() {
+                return None;
+            }
+            let program = words.remove(0);
+            words.extend(command.map(String::from));
+            (program, words)
+        }
+    })
+}
+
+fn chosen_terminal(dir: &Path, command: Option<&str>, choice: &str) -> Option<std::process::Command> {
+    let (program, args) = terminal_parts(choice, command, dir)?;
+    let mut c = std::process::Command::new(program);
+    c.args(args).current_dir(dir).env("GITEM_WORKTREE_PATH", dir);
+    // Its command is found on PATH, not in the repository it opens in, whatever the terminal.
+    if command.is_some() {
+        c.env("NoDefaultCurrentDirectoryInExePath", "1");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
+    }
+    Some(c)
 }
 
 fn terminal_command(dir: &Path, command: Option<&str>) -> std::process::Command {
@@ -3352,6 +3408,33 @@ pub fn open_file(path: &Path, editor: &str, errors: &mut Vec<String>) {
 }
 
 pub use mergeview::MergeSource;
+
+#[cfg(test)]
+mod terminal_choice_tests {
+    use super::*;
+
+    #[test]
+    fn empty_means_the_plain_one_and_a_program_keeps_its_arguments() {
+        let dir = Path::new("some dir");
+        assert_eq!(terminal_parts("", Some("x"), dir), None);
+        assert_eq!(terminal_parts("  ", None, dir), None);
+        let (program, args) = terminal_parts("alacritty --hold", Some("run me"), dir).unwrap();
+        assert_eq!((program.as_str(), args), ("alacritty", vec!["--hold".to_string(), "run me".to_string()]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn each_known_terminal_is_told_where_and_what() {
+        let dir = Path::new("C:/a b");
+        assert_eq!(terminal_parts("cmd", None, dir), None);
+        assert_eq!(terminal_parts("pwsh", Some("t"), dir), Some(("pwsh.exe".to_string(), ["-NoExit", "-Command", "t"].map(String::from).to_vec())));
+        assert_eq!(terminal_parts("powershell", None, dir), Some(("powershell.exe".to_string(), vec!["-NoExit".to_string()])));
+        assert_eq!(terminal_parts("wt", Some("t"), dir), Some(("wt.exe".to_string(), ["-d", "C:/a b", "cmd", "/K", "t"].map(String::from).to_vec())));
+        let (bash, args) = terminal_parts("git-bash", Some("t"), dir).unwrap();
+        assert!(bash.ends_with(r"Git\git-bash.exe"), "{bash}");
+        assert_eq!(args, ["--cd=C:/a b", "-c", "t; exec bash"].map(String::from).to_vec());
+    }
+}
 
 #[cfg(all(test, windows))]
 mod terminal_tests {

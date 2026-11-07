@@ -379,6 +379,9 @@ impl CredentialsView {
                 if ui.button("Register as rebase editor").clicked() {
                     cx.run(ops::config_set("sequence.editor", &format!("\"{h}\" --rebase-editor"), "global"));
                 }
+                if ui.button("Register as commit message editor").clicked() {
+                    cx.run(ops::config_set("core.editor", &format!("\"{h}\" --edit-file"), "global"));
+                }
             });
         }
         section(ui, "Prompts", &p);

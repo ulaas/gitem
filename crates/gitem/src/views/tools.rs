@@ -291,6 +291,15 @@ impl ToolsView {
             if ui.button("Track a pattern…").clicked() {
                 cx.form(forms::lfs_track_form());
             }
+            if ui.button("Stop tracking…").clicked() {
+                cx.form(forms::lfs_pattern_form("Stop tracking a pattern", "Stop tracking", ops::lfs_untrack));
+            }
+            if ui.button("Lock a file…").on_hover_text("Needs a server that supports locks").clicked() {
+                cx.form(forms::lfs_pattern_form("Lock a file", "Lock", ops::lfs_lock));
+            }
+            if ui.button("Unlock a file…").clicked() {
+                cx.form(forms::lfs_unlock_form());
+            }
             if ui.button("Pull objects").clicked() {
                 cx.run(ops::lfs_pull());
             }

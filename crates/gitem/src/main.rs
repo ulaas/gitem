@@ -30,32 +30,13 @@ Visual checks:
 
 fn tab_by_name(name: &str) -> Option<Tab> {
     Some(match name {
-        "home" => Tab::home(),
-        "graph" => Tab::graph(),
-        "changes" => Tab::changes(),
-        "launchpad" => Tab::Launchpad(Box::default()),
-        "search" => Tab::Search(Box::default()),
-        "worktrees" => Tab::Worktrees(Box::default()),
-        "contributors" => Tab::Contributors(Box::default()),
-        "reflog" => Tab::Reflog(Box::default()),
-        "rebase" => Tab::rebase(None),
-        "bisect" => Tab::Bisect(Box::default()),
-        "patches" => Tab::Patches(Box::default()),
-        "composer" => Tab::Composer(Box::default()),
-        "tools" => Tab::Tools(Box::default()),
-        "config" => Tab::Config(Box::default()),
         "credentials" => Tab::Credentials(Box::default()),
-        "console" => Tab::Console(Box::default()),
-        "settings" => Tab::Settings(Box::default()),
-        "agents" => Tab::Agents(Box::default()),
-        "review" => Tab::Review(Box::default()),
-        "health" => Tab::Health(Box::default()),
-        "treemap" => Tab::Treemap(Box::default()),
-        "visual" => Tab::visual(""),
         "credentials:signing" => Tab::Credentials(Box::new(gitem::views::credentials::CredentialsView::on_signing())),
+        // The same names a saved session uses.
         _ => match name.strip_prefix("settings:") {
             Some(page) => Tab::Settings(Box::new(gitem::views::settings::SettingsView::on_page(page))),
-            None => return None,
+            None if name.starts_with("file:") => return None,
+            None => return Tab::from_spec(name),
         },
     })
 }

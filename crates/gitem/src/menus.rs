@@ -442,13 +442,26 @@ pub fn tag_menu(ui: &mut Ui, cx: &mut Cx, t: &Tag) {
     }
     ui.separator();
     let remote = cx.data.forge_remote.clone().unwrap_or_else(|| "origin".into());
+    let remotes = cx.data.remote_names();
     if item(ui, "Push to remote") {
         cx.run(ops::tag_push(&remote, &name));
+    }
+    if !remotes.is_empty() {
+        if item(ui, "Push to…") {
+            cx.form(forms::tag_push_form(name.clone(), remotes.clone(), remote.clone()));
+        }
+        if item(ui, "Push all tags…") {
+            cx.form(forms::tags_push_all_form(remotes.clone(), remote.clone()));
+        }
     }
     if risky(ui, cx, "Delete locally…") {
         cx.confirm("Delete tag", &format!("Delete tag {name} from this repository?"), "Delete", ops::tag_delete(&name));
     }
-    if risky(ui, cx, "Delete on remote…") {
+    if remotes.len() > 1 {
+        if risky(ui, cx, "Delete on a remote…") {
+            cx.form(forms::tag_delete_remote_form(name.clone(), remotes, remote.clone()));
+        }
+    } else if risky(ui, cx, "Delete on remote…") {
         cx.confirm("Delete remote tag", &format!("Delete tag {name} on {remote}?"), "Delete on remote", ops::tag_delete_remote(&remote, &name));
     }
     ui.separator();
@@ -602,6 +615,9 @@ pub fn file_menu(ui: &mut Ui, cx: &mut Cx, path: &str, rev: Option<&str>) {
         && item(ui, "Restore this version…") {
             cx.confirm("Restore file", &format!("Replace {path} in the working tree and index with the version from {}?", gitem_core::util::prefix(r, 10)), "Restore", ops::restore_file_from(r, path));
         }
+    if item(ui, "Open in external diff tool") {
+        cx.out.push(Action::RunDetached(ops::difftool_file(&cx.settings.external_diff_tool, rev, path)));
+    }
     ui.separator();
     if item(ui, "Copy path") {
         cx.copy(path.to_string());

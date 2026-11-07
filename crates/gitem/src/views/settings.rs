@@ -798,6 +798,17 @@ impl SettingsView {
             g.row("Worktree task", "Run in a new terminal by Run task on worktree.", |ui| {
                 field(ui, &mut s.worktree_task, "npm test", 240.0);
             });
+            g.row("Terminal", "cmd, powershell, pwsh, wt or git-bash on Windows, or a program and its arguments. Empty is the system's plain one.", |ui| {
+                field(ui, &mut s.terminal, "wt", 240.0);
+            });
+        });
+        group(ui, "Your own tools", p, |g| {
+            g.row("Diff tool", "A name git knows, for Open in external diff tool. Empty means git's diff.tool.", |ui| {
+                field(ui, &mut s.external_diff_tool, "bc", 240.0);
+            });
+            g.row("Merge tool", "A name git knows, for Open in external merge tool. Empty means git's merge.tool.", |ui| {
+                field(ui, &mut s.external_merge_tool, "bc", 240.0);
+            });
         });
         let exe = std::env::current_exe().map(|e| e.to_string_lossy().replace('\\', "/")).unwrap_or_default();
         let mcp = format!("claude mcp add gitem -- \"{exe}\" --mcp");
