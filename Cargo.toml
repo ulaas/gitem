@@ -17,3 +17,11 @@ opt-level = 2
 opt-level = 3
 lto = "thin"
 strip = true
+
+# For what gets shipped: a tenth smaller, and about five times as long to build. Not
+# `panic = "abort"`, which would save more: a worker thread's panic would then end the app
+# rather than fail one view, and tests rely on unwinding.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

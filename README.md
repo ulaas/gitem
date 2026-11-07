@@ -9,6 +9,8 @@ cargo build --release
 target/release/gitem [path-to-repository ...]
 ```
 
+`cargo build --profile dist` makes a smaller binary, in `target/dist`, and takes minutes.
+
 With no path, gitem restores the repositories from your last session. With a path, it opens that repository and leaves the saved session in place for next time.
 
 ### Which git is used

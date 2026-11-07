@@ -266,3 +266,24 @@ fn a_session_repository_that_is_slow_to_answer_does_not_hold_up_the_window() {
     }
     assert!(h.state().errors_showing().is_empty());
 }
+
+
+/// AS-12: a read that hangs left the last answer on screen, with nothing to say so.
+#[test]
+fn a_status_that_never_answers_says_so_and_can_be_restarted() {
+    let f = Fx::new("status", 40_000);
+    let mut h = f.harness(Settings::default());
+    pump(&mut h, 200);
+    let t = Instant::now();
+    while h.query_by_label("Stop and try again").is_none() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "it never said anything");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(t.elapsed() >= Duration::from_secs(15), "not before it's been a while");
+    assert!(h.query_by_label_contains("Still waiting: git status").is_some());
+    h.get_by_label("Stop and try again").click();
+    pump(&mut h, 2000);
+    assert_eq!(f.report().0, 2, "the first was stopped, and another started");
+    assert!(h.state().errors_showing().is_empty());
+}

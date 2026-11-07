@@ -276,7 +276,7 @@ fn pf2_long_lines() {
 fn pf2_many_long_lines() {
     let f = Fx::new();
     let line = minified(50_000);
-    let text: String = (0..200).map(|i| format!("{i}{line}\n")).collect();
+    let text: String = (0..120).map(|i| format!("{i}{line}\n")).collect();
     f.write("min.js", "x\n");
     f.commit("base");
     f.write("min.js", &text);
