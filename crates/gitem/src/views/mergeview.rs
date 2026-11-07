@@ -263,6 +263,8 @@ impl MergeView {
 
     fn reset_for_reload(&mut self) {
         self.started = false;
+        // Its answers go in by position, into whatever document is showing by then.
+        self.ai.stop();
         self.doc.value = None;
         self.editing = None;
         self.expanded.clear();
@@ -440,7 +442,8 @@ impl MergeView {
             }
             if self.ai.poll() {
                 for (i, lines) in self.ai.value.take().unwrap_or_default() {
-                    if let Some(Region::Conflict { resolution, .. }) = doc.regions.get_mut(i) {
+                    // Asked about open ones. One decided on since keeps that decision.
+                    if let Some(Region::Conflict { resolution: resolution @ Resolution::Unresolved, .. }) = doc.regions.get_mut(i) {
                         *resolution = Resolution::Custom(lines);
                     }
                 }
@@ -474,7 +477,7 @@ impl MergeView {
                 });
             }
             if self.ai.busy() {
-                ui.add(egui::Spinner::new().size(13.0));
+                ui.add(spinner(13.0));
             }
             if ui.small_button("Whitespace").on_hover_text("Auto-resolve conflicts that differ only in whitespace").clicked() {
                 let n = doc.resolve_whitespace_only();
@@ -644,11 +647,17 @@ impl MergeView {
                     lines.iter().enumerate().map(|(k, l)| (Some(k), plain(l))).collect()
                 };
                 let hidden = lines.len().saturating_sub(COLLAPSE_CONTEXT * 2);
+                // An open region can be most of a large file, in up to four panes.
+                let clip = ui.clip_rect();
                 for (row, (marker, text)) in shown.iter().enumerate() {
                     let y = rect.top() + row as f32 * row_h;
+                    if y + row_h < clip.top() || y > clip.bottom() {
+                        continue;
+                    }
                     if marker.is_none() {
                         let r = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), row_h));
                         let resp = ui.interact(r, ui.id().with(("expand", i)), Sense::click());
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{hidden} unchanged lines")));
                         ui.painter().rect_filled(r, 0.0, if resp.hovered() { pal.hover } else { pal.panel2 });
                         ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("⋯ {hidden} unchanged lines (click to show)"), prop(11.0), pal.dim);
                         if resp.clicked() {
@@ -762,7 +771,11 @@ impl MergeView {
 }
 
 fn lines_at(ui: &Ui, pane: Rect, lines: &[String], row_h: f32, font: f32, color: Color32) {
-    for (k, l) in lines.iter().enumerate() {
+    // Only those on screen: an open region can be most of a large file, in up to four panes.
+    let clip = ui.clip_rect();
+    let first = (((clip.top() - pane.top()) / row_h).floor().max(0.0) as usize).min(lines.len());
+    let last = (((clip.bottom() - pane.top()) / row_h).ceil().max(0.0) as usize).clamp(first, lines.len());
+    for (k, l) in lines.iter().enumerate().take(last).skip(first) {
         let y = pane.top() + k as f32 * row_h;
         paint_text(ui, Rect::from_min_size(pos2(pane.left() + 6.0, y), vec2(pane.width() - 8.0, row_h)), plain(l), mono(font), color);
     }

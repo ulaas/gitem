@@ -45,6 +45,13 @@ impl WorktreesView {
                 Ok(m)
             });
         }
+        if !cx.data.refs_known() {
+            match &cx.data.refs.error {
+                Some(e) => error_box(ui, e, &p),
+                None => spinner_row(ui, "Reading worktrees…", &p),
+            }
+            return;
+        }
         ui.horizontal(|ui| {
             if ui.button("Add worktree…").clicked() {
                 cx.form(forms::add_worktree(cx.repo, cx.data.ref_names(), None));
@@ -56,7 +63,7 @@ impl WorktreesView {
                 cx.run(ops::worktree_repair());
             }
             if self.dirty.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         ui.add_space(4.0);

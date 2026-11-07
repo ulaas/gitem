@@ -1,5 +1,7 @@
 //! Commit details panel ("Inspect"): metadata, message with autolinks, signature,
 //! containing refs, notes, changed files, AI explanation, and quick actions.
+use std::time::{Duration, Instant};
+
 use egui::{RichText, Sense, Ui, vec2};
 use gitem_core::cred;
 use gitem_core::model::*;
@@ -16,11 +18,19 @@ pub struct Details {
     pub commit: Commit,
     pub files: Vec<FileChange>,
     pub signature: SignatureInfo,
-    pub branches: Vec<String>,
-    pub tags: Vec<String>,
     pub note: Option<String>,
-    pub describe: Option<String>,
 }
+
+/// What it takes every ref in the repository to answer, loaded when asked for.
+#[derive(Default)]
+struct RefsInfo {
+    branches: Vec<String>,
+    tags: Vec<String>,
+    describe: Option<String>,
+}
+
+/// Selections closer together than this are someone moving through the list.
+const SELECTION_SETTLES: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
 pub struct InspectPanel {
@@ -31,6 +41,12 @@ pub struct InspectPanel {
     explained_for: Option<String>,
     selected_file: Option<String>,
     show_refs: bool,
+    /// The refs that hold `loaded`, once someone has asked.
+    refs_info: Task<RefsInfo>,
+    refs_info_for: Option<String>,
+    /// When the selection last changed, and to what.
+    last_change: Option<(String, Instant)>,
+    moving: bool,
 }
 
 impl InspectPanel {
@@ -38,29 +54,51 @@ impl InspectPanel {
         self.sha = Some(sha.to_string());
     }
 
+    /// The commit whose details are on hand to show.
+    pub fn showing(&self) -> Option<&str> {
+        self.details.get().map(|d| d.commit.sha.as_str())
+    }
+
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         self.details.poll();
         self.explanation.poll();
+        self.refs_info.poll();
         let Some(sha) = self.sha.clone() else {
             empty_state(ui, "No commit selected", "Pick a commit to inspect it here.", &p);
             return;
         };
         if self.loaded.as_deref() != Some(&sha) {
+            // Holding an arrow key mustn't start a load per commit. Nothing about the last
+            // commit stays on screen meanwhile, so it can't be taken for this one's.
+            if self.last_change.as_ref().is_none_or(|(s, _)| *s != sha) {
+                // A click after a pause loads at once. One soon after the last is a key held.
+                self.moving = self.last_change.as_ref().is_some_and(|(_, t)| t.elapsed() < SELECTION_SETTLES * 2);
+                self.last_change = Some((sha.clone(), Instant::now()));
+            }
+            let since_change = self.last_change.as_ref().map_or(SELECTION_SETTLES, |(_, t)| t.elapsed());
+            if self.moving && since_change < SELECTION_SETTLES {
+                self.details.stop();
+                self.details.value = None;
+                self.details.error = None;
+                ui.ctx().request_repaint_after(SELECTION_SETTLES - since_change);
+                spinner_row(ui, "Loading commit…", &p);
+                return;
+            }
             self.loaded = Some(sha.clone());
             self.selected_file = None;
-            let repo = cx.repo.clone();
             let s = sha.clone();
             self.details.value = None;
-            self.details.spawn(ui.ctx(), move || -> Result<Details, String> {
+            self.details.error = None;
+            self.refs_info = Task::default();
+            self.refs_info_for = None;
+            self.details.spawn_git(ui.ctx(), cx.repo, move |repo| -> Result<Details, String> {
                 let e = |x: gitem_core::Error| x.to_string();
                 let commit = repo.commit(&s).map_err(e)?;
                 let files = repo.commit_files(&s).map_err(e)?;
                 let signature = repo.signature(&s).unwrap_or_default();
-                let (branches, tags) = repo.containing_refs(&s).unwrap_or_default();
                 let note = repo.commit_note(&s);
-                let describe = repo.describe(&s);
-                Ok(Details { commit, files, signature, branches, tags, note, describe })
+                Ok(Details { commit, files, signature, note })
             });
         }
         if let Some(e) = &self.details.error {
@@ -148,21 +186,43 @@ impl InspectPanel {
                 }
             });
         }
-        if let Some(x) = &d.describe {
-            ui.label(RichText::new(format!("Describes as {x}")).small().color(p.faint));
+        // These look at every ref in the repository, about a second and a half with thousands
+        // of them, so only when someone wants to know.
+        if self.show_refs && self.refs_info_for.as_deref() != Some(&c.sha) {
+            self.refs_info_for = Some(c.sha.clone());
+            let s = c.sha.clone();
+            self.refs_info.spawn_git(ui.ctx(), cx.repo, move |repo| -> Result<RefsInfo, String> {
+                let (branches, tags) = repo.containing_refs(&s).map_err(|e| e.to_string())?;
+                Ok(RefsInfo { branches, tags, describe: repo.describe(&s) })
+            });
         }
+        let info = self.refs_info.get().filter(|_| self.refs_info_for.as_deref() == Some(&c.sha));
         ui.horizontal(|ui| {
-            let text = format!("On {} branch(es), {} tag(s)", d.branches.len(), d.tags.len());
+            let text = match info {
+                Some(i) => format!("On {} branch(es), {} tag(s)", i.branches.len(), i.tags.len()),
+                None => "Branches and tags with this commit".to_string(),
+            };
             if ui.selectable_label(self.show_refs, RichText::new(text).small().color(p.dim)).clicked() {
                 self.show_refs = !self.show_refs;
             }
+            if self.show_refs && self.refs_info.busy() {
+                ui.add(spinner(12.0));
+            }
         });
         if self.show_refs {
-            for b in d.branches.iter().take(50) {
-                ui.label(RichText::new(format!("  {b}")).small().color(p.dim));
+            if let Some(e) = &self.refs_info.error {
+                error_box(ui, e, &p);
             }
-            for t in d.tags.iter().take(50) {
-                ui.label(RichText::new(format!("  ◆ {t}")).small().color(p.dim));
+            if let Some(i) = info {
+                if let Some(x) = &i.describe {
+                    ui.label(RichText::new(format!("Describes as {x}")).small().color(p.faint));
+                }
+                for b in i.branches.iter().take(50) {
+                    ui.label(RichText::new(format!("  {b}")).small().color(p.dim));
+                }
+                for t in i.tags.iter().take(50) {
+                    ui.label(RichText::new(format!("  ◆ {t}")).small().color(p.dim));
+                }
             }
         }
 
@@ -174,7 +234,7 @@ impl InspectPanel {
                 self.explain(ui.ctx(), cx, c);
             }
             if busy {
-                ui.add(egui::Spinner::new().size(13.0));
+                ui.add(spinner(13.0));
             }
         });
         if self.explained_for.as_deref() == Some(&c.sha) {
@@ -200,25 +260,27 @@ impl InspectPanel {
         });
         ui.add_space(2.0);
         ui.spacing_mut().item_spacing.y = 0.0;
-        for f in &d.files {
-            let sel = self.selected_file.as_deref() == Some(&f.path);
-            let resp = file_row(ui, f, sel, &p).on_hover_text(&f.path);
-            if resp.clicked() {
-                self.selected_file = Some(f.path.clone());
-                cx.diff(DiffSource::Commit(c.sha.clone()), Some(&f.path));
-            }
-            resp.context_menu(|ui| {
-                if ui.button("Open changes").clicked() {
+        visible_rows(ui, 22.0, d.files.len(), |ui, range| {
+            for f in &d.files[range] {
+                let sel = self.selected_file.as_deref() == Some(&f.path);
+                let resp = file_row(ui, f, sel, &p).on_hover_text(&f.path);
+                if resp.clicked() {
+                    self.selected_file = Some(f.path.clone());
                     cx.diff(DiffSource::Commit(c.sha.clone()), Some(&f.path));
-                    ui.close();
                 }
-                if ui.button("Open this revision").clicked() {
-                    cx.open(Tab::file(&f.path, Some(c.sha.clone()), None));
-                    ui.close();
-                }
-                menus::file_menu(ui, cx, &f.path, Some(&c.sha));
-            });
-        }
+                resp.context_menu(|ui| {
+                    if ui.button("Open changes").clicked() {
+                        cx.diff(DiffSource::Commit(c.sha.clone()), Some(&f.path));
+                        ui.close();
+                    }
+                    if ui.button("Open this revision").clicked() {
+                        cx.open(Tab::file(&f.path, Some(c.sha.clone()), None));
+                        ui.close();
+                    }
+                    menus::file_menu(ui, cx, &f.path, Some(&c.sha));
+                });
+            }
+        });
     }
 
     fn explain(&mut self, ctx: &egui::Context, cx: &Cx, c: &Commit) {

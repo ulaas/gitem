@@ -403,4 +403,7 @@ pub struct LogQuery {
     pub literal_paths: bool,
     /// Ref globs passed as `--exclude=<glob>` before `--all`.
     pub excludes: Vec<String>,
+    /// No parent before all its children, which the graph's lanes rely on. It makes git walk
+    /// the whole history first, whatever the limit, so only the graph asks for it.
+    pub date_order: bool,
 }

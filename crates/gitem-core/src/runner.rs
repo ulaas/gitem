@@ -172,6 +172,9 @@ pub struct GitExe {
     /// What to override for the repository this belongs to. Empty until [`crate::Repo::open`]
     /// has looked at its config.
     pub neutral: Arc<Neutral>,
+    /// Set this and whatever this copy is running stops, and it runs nothing more. For
+    /// reads whose answer nobody wants any more.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Overrides that keep a repository's own programs from running until it's trusted.
@@ -212,7 +215,7 @@ impl GitExe {
     pub fn discover(configured: Option<&Path>) -> Result<Self> {
         let helper = std::env::current_exe().ok();
         let log: CommandLog = Arc::new(Mutex::new(VecDeque::new()));
-        let make = |path: PathBuf, source| GitExe { path, source, log: log.clone(), helper: helper.clone(), neutral: Arc::default() };
+        let make = |path: PathBuf, source| GitExe { path, source, log: log.clone(), helper: helper.clone(), neutral: Arc::default(), cancel: None };
         if let Some(p) = configured.filter(|p| !p.as_os_str().is_empty())
             && works(p) {
                 return Ok(make(p.to_path_buf(), GitSource::Configured));
@@ -275,6 +278,11 @@ impl GitExe {
     /// Full control: stdin, env, cancellation, and a callback receiving stderr
     /// lines as they arrive (`\r` counts as a line end so progress works).
     pub fn run_opts(&self, cwd: Option<&Path>, args: &[String], opts: &RunOpts, on_line: &mut dyn FnMut(&str)) -> Result<GitOutput> {
+        let stop = [opts.cancel.as_ref(), self.cancel.as_ref()];
+        let stopped = || stop.iter().flatten().any(|c| c.load(Ordering::Relaxed));
+        if stopped() {
+            return Err(Error::Other("cancelled".into()));
+        }
         let start = Instant::now();
         let mut cmd = Command::new(&self.path);
         // Stable, parseable output regardless of the user's configuration.
@@ -414,7 +422,7 @@ impl GitExe {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            if !cancelled && opts.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            if !cancelled && stopped() {
                 cancelled = true;
                 kill_tree(&mut child);
             }
@@ -452,7 +460,8 @@ impl GitExe {
                 last_data = Instant::now();
             }
         }
-        let stdout = stdout_buf.lock().map(|v| v.clone()).unwrap_or_default();
+        // Taken, not copied: a big blame is hundreds of megabytes.
+        let stdout = stdout_buf.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
         let code = status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&stderr_all).into_owned();
 

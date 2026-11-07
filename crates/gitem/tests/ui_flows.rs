@@ -158,7 +158,7 @@ fn error_boxes(h: &Harness<GitemApp>) -> Vec<String> {
 }
 
 fn no_errors(h: &Harness<GitemApp>) {
-    assert!(h.query_by_label("Something went wrong").is_none(), "an error dialog is showing");
+    assert!(h.state().errors_showing().is_empty(), "an error dialog is showing");
     let boxes = error_boxes(h);
     assert!(boxes.is_empty(), "a view is showing an error: {boxes:?}");
 }
@@ -205,7 +205,7 @@ fn visit_all(h: &mut Harness<GitemApp>) {
         let title = tab.title();
         h.state_mut().repos[0].open_tab(tab);
         wait_until_quiet(h);
-        assert!(h.query_by_label("Something went wrong").is_none(), "error showing after opening {title}");
+        assert!(h.state().errors_showing().is_empty(), "error showing after opening {title}");
         let boxes = error_boxes(h);
         assert!(boxes.is_empty(), "{title} shows an error: {boxes:?}");
     }
@@ -520,7 +520,7 @@ fn failed_ops_show_the_error_and_drop_queued_followups() {
     let ctx = h.ctx.clone();
     h.state_mut().apply_action(&ctx, Action::Run(ops::checkout("no-such-branch")));
     h.state_mut().apply_action(&ctx, Action::Run(ops::tag_create("must-not-exist", None, None, false)));
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_error(&mut h);
     assert_no_op_started(&mut h, "the queued step after a failure must not run");
     assert!(f.git(&["tag"]).is_empty(), "the queued step after a failure must not run");
     click(&mut h, "Dismiss");
@@ -568,7 +568,7 @@ fn opening_a_folder_that_is_not_a_repo_reports_it() {
     let ctx = h.ctx.clone();
     let p: &Path = not_repo.path();
     h.state_mut().apply_action(&ctx, Action::OpenRepo(p.to_path_buf()));
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_error(&mut h);
     assert_eq!(h.state().repos.len(), 1);
 }
 
@@ -1190,7 +1190,7 @@ fn a_rejected_commit_keeps_the_message() {
     h.step();
     h.step();
     click(&mut h, "Stage all and commit 1 file(s)");
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_error(&mut h);
     for _ in 0..20 {
         h.step();
         std::thread::sleep(Duration::from_millis(10));
@@ -1675,7 +1675,7 @@ fn a_rejected_push_shows_git_s_reason() {
     let mut h = harness(&r.f);
     settle(&mut h);
     click(&mut h, "Push 1");
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_error(&mut h);
     assert_eq!(r.remote_tip(), tip);
     assert!(r.f.git(&["log", "-1", "--format=%s"]).contains("from here"), "local work is untouched");
 }
@@ -1691,9 +1691,9 @@ fn a_pull_conflict_opens_into_the_merge_workflow() {
     click(&mut h, "Fetch");
     let ctx = h.ctx.clone();
     h.state_mut().apply_action(&ctx, Action::Run(ops::pull(ops::PullMode::Merge, false)));
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_label(&mut h, "Resolve");
     assert!(r.f.git(&["status", "--porcelain"]).contains("AA conflict.txt"));
-    click(&mut h, "Dismiss");
+    no_errors(&h);
     click(&mut h, "Resolve");
     pump_for_label(&mut h, "Take theirs");
 }
@@ -1818,7 +1818,7 @@ fn a_lock_in_the_way_is_never_removed_without_being_asked() {
     h.state_mut().git_running = || false;
     let lock = stuck_on_a_lock(&f, &mut h);
     assert!(lock.exists());
-    assert!(h.query_by_label("Something went wrong").is_none(), "this dialog replaces the raw error");
+    assert!(h.state().errors_showing().is_empty(), "this dialog replaces the raw error");
     click(&mut h, "Leave it");
     assert!(lock.exists());
     assert!(h.query_by_label(LOCK_TITLE).is_none());
@@ -2036,7 +2036,7 @@ fn a_damaged_review_file_is_kept_and_reported() {
     let mut h = harness(&f);
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::Review(Box::default()));
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_error(&mut h);
     let kept = std::fs::read_dir(f.root.join(".git")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("gitem-review.json.bad-")).count();
     assert_eq!(kept, 1);
 }
@@ -2284,7 +2284,7 @@ fn closing_a_repository_with_ops_running_says_so_and_still_reports_the_failure()
     assert!(h.query_by_label_contains("queued git command").is_some());
     answer_close(&mut h, "Close anyway");
     assert!(h.state().repos.is_empty());
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_error(&mut h);
     assert!(h.query_by_label_contains("refused by the slow hook").is_some());
     assert_eq!(f.git(&["tag", "--list", "queued-tag"]).trim(), "", "the queued op did not run");
 }
@@ -2374,7 +2374,7 @@ fn a_failed_clone_opens_nothing_and_says_so() {
     let ctx = h.ctx.clone();
     let op = ops::clone_repo(&d.path().join("missing.git").to_string_lossy(), &dest.to_string_lossy(), None, false, None);
     h.state_mut().apply_action(&ctx, Action::RunGlobal { op, open_after: Some(dest) });
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_error(&mut h);
     assert_eq!(h.state().repos.len(), 1);
 }
 
@@ -3446,7 +3446,7 @@ fn a_rejected_composer_commit_keeps_what_has_not_landed() {
     plan_commit(&mut h, 0, "fine one");
     plan_commit(&mut h, 0, "refused two");
     click(&mut h, "Create 2 commit(s)");
-    pump_for_label(&mut h, "Something went wrong");
+    pump_for_error(&mut h);
     wait_until_quiet(&mut h);
     assert_eq!(f.subjects()[0], "fine one", "the first landed");
     assert_eq!(composer_plan_len(&h).as_deref(), Some("Commit Composer: a plan of 1 commit(s)"), "the second is still planned");
@@ -3735,6 +3735,13 @@ fn ticking_both_force_options_is_refused_rather_than_dropping_the_lease() {
     pump_for_label(&mut h, "Choose Force with lease or Force, not both.");
     assert_no_op_started(&mut h, "pushed with both ticked");
     assert_eq!(r.remote_tip(), before);
+}
+
+/// Until an error dialog is up. Its title names what failed, so tests look at the app.
+fn pump_for_error(h: &mut Harness<GitemApp>) {
+    pump(h, |a| !a.errors_showing().is_empty(), "an error");
+    h.step();
+    h.step();
 }
 
 fn pump_for_any(h: &mut Harness<GitemApp>, label: &str) {
@@ -4281,9 +4288,8 @@ fn a_big_blame_costs_a_frame_no_more_than_a_small_one() {
     assert_quiet_and_quick(&mut h, &f, "file of 30,000 lines");
 }
 
-/// The sidebar's lists aren't virtualised: 40 ms per frame at 5,000 branches and 5,000 tags.
+/// Only the sidebar rows on screen are drawn. It used to take 40 ms per frame.
 #[test]
-#[ignore = "PF-36, Phase 5"]
 fn many_refs_cost_a_frame_no_more_than_a_few() {
     let f = Fx::new();
     many_commits(&f, 200);
@@ -4297,9 +4303,8 @@ fn many_refs_cost_a_frame_no_more_than_a_few() {
     assert_quiet_and_quick(&mut h, &f, "graph and sidebar with 10,000 refs");
 }
 
-/// The list isn't virtualised: 18 ms per frame at 5,000 files on a desktop.
+/// Only the rows on screen are drawn. It used to take 18 ms per frame.
 #[test]
-#[ignore = "PF-5, Phase 5"]
 fn a_huge_status_costs_a_frame_no_more_than_a_small_one() {
     let f = Fx::new();
     sample_history(&f);
@@ -4396,4 +4401,569 @@ fn a_rebase_row_is_reordered_by_its_handle_and_selected_by_a_click() {
     h.step();
     let dropped = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Rebase(r) = t { r.items.iter().find(|i| i.text == "two").map(|i| i.action) } else { None });
     assert_eq!(dropped, Some(gitem_core::rebase::RebaseAction::Drop));
+}
+
+fn many_untracked(f: &Fx, n: usize) {
+    std::fs::create_dir(f.root.join("many")).unwrap();
+    for i in 0..n {
+        std::fs::write(f.root.join(format!("many/file{i}.txt")), "x").unwrap();
+    }
+}
+
+/// Virtualising the list keeps everything that was on it in reach.
+#[test]
+fn a_long_changes_list_keeps_its_filter_and_section_buttons() {
+    let f = Fx::new();
+    sample_history(&f);
+    many_untracked(&f, 300);
+    f.write("staged.txt", "s\n");
+    f.git(&["add", "staged.txt"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_any(&mut h, "many/file0.txt");
+    pump_for_any(&mut h, "STAGED (1)");
+    pump_for_any(&mut h, "UNSTAGED (300)");
+    assert!(h.query_by_label("many/file299.txt").is_none(), "a row off screen isn't drawn");
+    // The filter box is the first text field in the Changes tab, and stays on screen.
+    let filter = h.query_all_by_role(egui::accesskit::Role::TextInput).position(|n| n.rect().left() > 200.0).expect("the filter box");
+    h.query_all_by_role(egui::accesskit::Role::TextInput).nth(filter).unwrap().focus();
+    h.step();
+    h.query_all_by_role(egui::accesskit::Role::TextInput).nth(filter).unwrap().type_text("file299");
+    h.step();
+    h.step();
+    pump_for_any(&mut h, "many/file299.txt");
+    pump_for_any(&mut h, "UNSTAGED (1)");
+    assert!(h.query_by_label("many/file0.txt").is_none());
+    click(&mut h, "Stage all");
+    wait_for(&mut h, "everything to be staged", || !f.git(&["status", "--porcelain"]).contains("??"));
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn folders_in_a_long_changes_tree_still_open_and_close() {
+    let f = Fx::new();
+    sample_history(&f);
+    many_untracked(&f, 300);
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, gitem_core::settings::Settings { changes_tree: true, ..Default::default() });
+    app.git = Ok(f.git.clone());
+    let root = f.root.clone();
+    let mut opened = false;
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5);
+    let mut h = builder.build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    );
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_any(&mut h, "many/file0.txt");
+    click(&mut h, "many");
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(h.query_by_label("many/file0.txt").is_none(), "closed");
+    click(&mut h, "many");
+    pump_for_any(&mut h, "many/file0.txt");
+    no_errors(&h);
+}
+
+/// AS-7: this used to say "Reading status…" forever, with no error anywhere.
+#[test]
+fn a_corrupt_index_says_so_and_can_be_retried() {
+    let f = Fx::new();
+    sample_history(&f);
+    let index = f.root.join(".git/index");
+    let good = std::fs::read(&index).unwrap();
+    std::fs::write(&index, b"not an index").unwrap();
+    let mut h = harness(&f);
+    pump(&mut h, |a| a.repos.first().is_some_and(|r| r.data.status.error.is_some()), "status to fail");
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_any(&mut h, "Git can't read this repository. What's showing may be out of date.");
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(h.query_by_label_contains("Reading status").is_none());
+    assert!(h.query_by_label_contains("Error: Git couldn't read the status").is_some(), "Changes says what's wrong");
+    std::fs::write(&index, good).unwrap();
+    // On the banner, and in the Changes tab.
+    h.query_all_by_label("Try again").next().unwrap().click();
+    h.step();
+    pump(&mut h, |a| a.repos[0].data.status.error.is_none() && a.repos[0].data.status.get().is_some(), "status to work again");
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.query_by_label_contains("Git can't read this repository").is_none());
+}
+
+#[test]
+fn a_repository_folder_that_goes_away_says_so() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    // Windows can refuse a folder rename while something watches inside it.
+    let moved = f.root.with_extension("moved");
+    if std::fs::rename(&f.root, &moved).is_err() {
+        eprintln!("skipped: this system won't rename a watched folder");
+        return;
+    }
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Refresh);
+    pump_for_any(&mut h, "This repository's folder is gone. It may have been moved, renamed or deleted.");
+    assert!(h.state().repos[0].data.status.get().is_some(), "what was there stays");
+    std::fs::rename(&moved, &f.root).unwrap();
+}
+
+/// UX-10: an empty list before git has answered isn't a repository with nothing in it.
+#[test]
+fn the_sidebar_shows_no_counts_until_it_knows_them() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    h.step();
+    assert!(h.state().repos[0].data.refs.get().is_none(), "this frame is before git has answered");
+    assert!(h.query_by_label_contains("Reading branches").is_some());
+    assert!(h.query_by_label("Branches section").is_none());
+    settle(&mut h);
+    assert!(h.query_by_label("Branches section").is_some());
+}
+
+/// AS-25: a failure mustn't cost actions that have nothing to do with it.
+#[test]
+fn a_failure_keeps_what_was_asked_for_separately() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::checkout("no-such-branch")));
+    h.step();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::tag_create("still-runs", None, None, false)));
+    pump_for_error(&mut h);
+    wait_until_quiet(&mut h);
+    assert!(f.git(&["tag"]).contains("still-runs"));
+}
+
+/// Nothing queued was asked for with a rebase or merge going on.
+#[test]
+fn a_failure_that_leaves_an_operation_going_drops_the_queue() {
+    let r = with_remote();
+    r.commit_elsewhere("conflict.txt", "from elsewhere");
+    r.f.write("conflict.txt", "from here\n");
+    r.f.commit("from here");
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    click(&mut h, "Fetch");
+    wait_until_quiet(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::pull(ops::PullMode::Merge, false)));
+    h.step();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::tag_create("must-not-exist", None, None, false)));
+    pump_for_error(&mut h);
+    wait_until_quiet(&mut h);
+    assert!(r.f.git(&["tag"]).is_empty());
+    assert!(h.state().errors_showing()[0].contains("1 queued command(s) after it were not run"), "{:?}", h.state().errors_showing());
+}
+
+/// AS-19: applies to every button that runs something, not only those checked by hand.
+#[test]
+fn a_double_click_on_a_button_runs_its_command_once() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let op = || ops::tag_create("once", None, None, false);
+    h.state_mut().apply_action(&ctx, Action::Run(op()));
+    h.step();
+    h.state_mut().apply_action(&ctx, Action::Run(op()));
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    // Asking again later is asking again.
+    std::thread::sleep(Duration::from_millis(700));
+    h.state_mut().apply_action(&ctx, Action::Run(op()));
+    pump_for_error(&mut h);
+}
+
+/// Two parts of one action, such as two hunks staged by one click, can be identical commands.
+#[test]
+fn two_of_the_same_command_in_one_frame_both_run() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let before = f.git(&["rev-list", "--count", "HEAD"]);
+    let empty = || ops::commit(&ops::CommitOpts { message: "again".into(), allow_empty: true, ..Default::default() });
+    h.state_mut().apply_action(&ctx, Action::Run(empty()));
+    h.state_mut().apply_action(&ctx, Action::Run(empty()));
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    assert_eq!(f.git(&["rev-list", "--count", "HEAD"]).trim().parse::<u32>().unwrap(), before.trim().parse::<u32>().unwrap() + 2);
+}
+
+/// CG-27: a hook that never returns used to hold everything behind it, with no way out.
+#[test]
+fn a_write_that_hangs_can_be_stopped() {
+    let f = Fx::new();
+    sample_history(&f);
+    let hook = f.root.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\nsleep 300\n").unwrap();
+    f.write("n.txt", "n\n");
+    f.git(&["add", "n.txt"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::commit(&ops::CommitOpts { message: "hangs".into(), ..Default::default() })));
+    let t = Instant::now();
+    pump_for_label(&mut h, "Cancel…");
+    assert!(t.elapsed() >= Duration::from_secs(2), "not offered at once");
+    h.get_by_label("Cancel…").click();
+    h.step();
+    h.step();
+    assert!(h.query_by_label_contains("half updated").is_some(), "it warns first");
+    click(&mut h, "Stop it");
+    pump(&mut h, |a| a.ops_idle(), "the op to stop");
+    no_errors_except_cancel(&h);
+    assert_eq!(f.git(&["log", "-1", "--format=%s"]).trim(), "second", "nothing was committed");
+}
+
+fn no_errors_except_cancel(h: &Harness<GitemApp>) {
+    for e in h.state().errors_showing() {
+        assert!(e.contains("cancelled"), "{e}");
+    }
+}
+
+/// UX-19: says what went wrong and offers the way out.
+#[test]
+fn a_failed_pull_with_no_upstream_names_itself_and_offers_the_fix() {
+    let r = with_remote();
+    let f = &r.f;
+    f.git(&["branch", "--unset-upstream"]);
+    let mut h = harness(f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::pull(ops::PullMode::Merge, false)));
+    pump_for_error(&mut h);
+    pump_for_label(&mut h, "Set upstream…");
+    assert!(h.state().errors_showing()[0].starts_with("Pull"), "the title says what failed");
+    assert!(h.query_by_label("Something went wrong").is_none());
+    assert!(h.query_by_label_contains("isn't linked to a branch").is_some(), "in plain words");
+    pump_for_any(&mut h, "What git said");
+    h.get_by_label("Set upstream…").click();
+    h.step();
+    h.step();
+    assert!(h.state().errors_showing().is_empty());
+    pump_for_any(&mut h, "Set upstream");
+}
+
+#[test]
+fn escape_dismisses_an_error_and_the_next_one_shows_with_a_count() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Error("first problem".into()));
+    h.state_mut().apply_action(&ctx, Action::Error("second problem".into()));
+    pump_for_any(&mut h, "1 of 2");
+    assert!(h.query_by_label("first problem").is_some());
+    h.key_press(egui::Key::Escape);
+    h.step();
+    h.step();
+    assert!(h.query_by_label("second problem").is_some());
+    assert!(h.query_by_label("1 of 2").is_none());
+}
+
+#[test]
+fn errors_people_often_meet_are_explained() {
+    use gitem::app::{ErrorFix, explain_error, error_parts};
+    let cases = [
+        ("There is no tracking information for the current branch.", ErrorFix::SetUpstream),
+        ("fatal: The current branch x has no upstream branch.", ErrorFix::SetUpstream),
+        ("error: Your local changes to the following files would be overwritten by merge:", ErrorFix::Stash),
+        ("fatal: No configured push destination.", ErrorFix::AddRemote),
+        ("fatal: 'origin' does not appear to be a git repository", ErrorFix::AddRemote),
+        ("hint: You have divergent branches and need to specify how to reconcile divergent branches.", ErrorFix::PullOptions),
+        (" ! [rejected] main -> main (non-fast-forward)", ErrorFix::PullOptions),
+        ("fatal: Authentication failed for 'https://example.invalid/'", ErrorFix::Credentials),
+        ("git@example.invalid: Permission denied (publickey).", ErrorFix::Credentials),
+    ];
+    for (text, fix) in cases {
+        assert_eq!(explain_error(text).map(|x| x.1), Some(fix), "{text}");
+    }
+    assert!(explain_error("fatal: something nobody has seen").is_none());
+    assert_eq!(error_parts("Pull failed:\nfatal: no"), ("Pull failed", "fatal: no"));
+    assert_eq!(error_parts("fatal: no"), ("Something went wrong", "fatal: no"));
+}
+
+fn auto_fetch_on(h: &mut Harness<GitemApp>) {
+    h.state_mut().settings.auto_fetch_minutes = 5;
+    h.state_mut().repos[0].make_fetch_due();
+}
+
+/// FG-4: it used to go through the op queue, in everybody's way.
+#[test]
+fn a_scheduled_fetch_stays_out_of_the_way() {
+    let r = with_remote();
+    r.commit_elsewhere("new.txt", "from elsewhere");
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    let tip = r.remote_tip();
+    auto_fetch_on(&mut h);
+    let mut seen_busy = false;
+    let t = Instant::now();
+    while r.f.git(&["rev-parse", "origin/main"]).trim() != tip {
+        h.step();
+        seen_busy |= h.state().repos[0].data.ops_busy;
+        assert!(t.elapsed() < PATIENCE);
+    }
+    wait_until_quiet(&mut h);
+    assert!(!seen_busy, "Commit stayed available");
+    assert!(h.query_by_label_contains("done").is_none(), "no toast");
+    no_errors(&h);
+}
+
+#[test]
+fn a_scheduled_fetch_that_fails_says_little_and_waits_longer() {
+    let r = with_remote();
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    r.f.git(&["remote", "set-url", "origin", &r.f.root.join("no-such-remote").to_string_lossy()]);
+    auto_fetch_on(&mut h);
+    h.step();
+    let ctx = h.ctx.clone();
+    // Asked for while it's running, and has nothing to do with it.
+    h.state_mut().apply_action(&ctx, Action::Run(ops::tag_create("unrelated", None, None, false)));
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    assert!(r.f.git(&["tag"]).contains("unrelated"), "its failure touched nothing else");
+    pump_for_any(&mut h, &format!("Background fetch failed, trying again in about {} min", 10));
+    assert_eq!(h.state().repos[0].fetch_wait_minutes(), Some(10), "twice the usual wait");
+}
+
+#[test]
+fn a_scheduled_fetch_waits_while_an_operation_is_going_on() {
+    let r = with_remote();
+    r.commit_elsewhere("conflict.txt", "from elsewhere");
+    r.f.write("conflict.txt", "from here\n");
+    r.f.commit("from here");
+    r.f.git(&["fetch", "-q"]);
+    let _ = r.f.git.run_raw(Some(&r.f.root), &["merge", "origin/main"]);
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    let before = commands_so_far(&r.f);
+    auto_fetch_on(&mut h);
+    for _ in 0..30 {
+        h.step();
+    }
+    wait_until_quiet(&mut h);
+    let log = r.f.git.log.lock().unwrap();
+    assert!(!log.iter().skip(before).any(|e| e.command.starts_with("git fetch")), "it waits");
+}
+
+/// PF-11: a build's output, ignored by git, used to mean a `git status` twice a second.
+#[test]
+fn writes_to_an_ignored_file_run_no_git() {
+    let f = Fx::new();
+    f.write(".gitignore", "target/\n");
+    sample_history(&f);
+    std::fs::create_dir_all(f.root.join("target")).unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    let before = commands_so_far(&f);
+    for i in 0..8 {
+        f.write("target/out.txt", &i.to_string());
+        for _ in 0..10 {
+            h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    // Only the one question, once, of where the user's own excludes file is.
+    let ran: Vec<String> = f.git.log.lock().unwrap().iter().skip(before).map(|e| e.command.clone()).filter(|c| !c.contains("core.excludesFile")).collect();
+    assert!(ran.is_empty(), "{ran:?}");
+    // A real change still shows.
+    f.write("visible.txt", "seen\n");
+    pump(&mut h, |a| a.repos[0].data.status.get().is_some_and(|s| !s.is_clean()), "the visible file");
+}
+
+/// PF-12: staging isn't a change to any ref.
+#[test]
+fn staging_refreshes_the_status_and_not_the_refs() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("n.txt", "n\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    let before = commands_so_far(&f);
+    f.git(&["add", "n.txt"]);
+    pump(&mut h, |a| a.repos[0].data.status.get().is_some_and(|s| s.entries.iter().any(|e| e.is_staged())), "the status to show it");
+    wait_until_quiet(&mut h);
+    let log = f.git.log.lock().unwrap();
+    let ran: Vec<&str> = log.iter().skip(before).map(|e| e.command.as_str()).collect();
+    assert!(!ran.iter().any(|c| c.contains("for-each-ref")), "{ran:?}");
+}
+
+/// PF-14: only the branch you're on opens by itself. Each open one runs git.
+#[test]
+fn many_branches_behind_their_upstream_run_no_git_at_open() {
+    let f = Fx::new();
+    many_commits(&f, 5);
+    for i in 0..10 {
+        let name = format!("b{i}");
+        f.git(&["branch", &name, "HEAD~1"]);
+        f.git(&["update-ref", &format!("refs/remotes/origin/{name}"), "HEAD"]);
+        f.git(&["config", &format!("branch.{name}.remote"), "origin"]);
+        f.git(&["config", &format!("branch.{name}.merge"), &format!("refs/heads/{name}")]);
+    }
+    f.git(&["remote", "add", "origin", "https://example.invalid/r.git"]);
+    let before = commands_so_far(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let logs = f.git.log.lock().unwrap().iter().skip(before).filter(|e| e.command.starts_with("git log")).count();
+    assert!(logs <= 2, "{logs} log commands");
+    drop(h);
+}
+
+/// PF-4: what it takes every ref to answer waits until someone asks.
+#[test]
+fn the_refs_holding_a_commit_load_when_asked_for() {
+    let f = Fx::new();
+    sample_history(&f);
+    let sha = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut h = harness(&f);
+    settle(&mut h);
+    let before = commands_so_far(&f);
+    h.state_mut().repos[0].inspect.set(&sha);
+    pump_for_any(&mut h, "Branches and tags with this commit");
+    wait_until_quiet(&mut h);
+    assert!(!f.git.log.lock().unwrap().iter().skip(before).any(|e| e.command.contains("--contains")));
+    click(&mut h, "Branches and tags with this commit");
+    pump_for_any(&mut h, "On 1 branch(es), 0 tag(s)");
+}
+
+/// PF-15: blame takes minutes on a big file, and nobody asked for it.
+#[test]
+fn a_huge_file_opens_without_blame_until_asked() {
+    let f = Fx::new();
+    let body: String = (0..1_000_000).map(|i| format!("{i:012}\n")).collect();
+    f.write("big.txt", &body);
+    f.commit("base");
+    let mut h = harness(&f);
+    settle(&mut h);
+    let before = commands_so_far(&f);
+    h.state_mut().repos[0].open_tab(Tab::file("big.txt", None, None));
+    pump_for_label(&mut h, "Blame it anyway");
+    wait_until_quiet(&mut h);
+    assert!(!f.git.log.lock().unwrap().iter().skip(before).any(|e| e.command.starts_with("git blame")));
+    click(&mut h, "Blame it anyway");
+    wait_until_quiet(&mut h);
+    assert!(f.git.log.lock().unwrap().iter().skip(before).any(|e| e.command.starts_with("git blame")));
+    assert!(h.query_by_label("Blame it anyway").is_none());
+}
+
+/// A local server answering like an AI provider, after the test says it may.
+struct SlowAi {
+    url: String,
+    release: std::sync::mpsc::Sender<&'static str>,
+}
+
+fn slow_ai() -> SlowAi {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (release, wait) = std::sync::mpsc::channel::<&'static str>();
+    std::thread::spawn(move || {
+        let Ok((mut s, _)) = listener.accept() else { return };
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        // Headers, then the body they announce.
+        loop {
+            let Ok(n) = s.read(&mut buf) else { return };
+            seen.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&seen);
+            if let Some(at) = text.find("\r\n\r\n") {
+                let len = text.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok())).unwrap_or(0);
+                if seen.len() >= at + 4 + len {
+                    break;
+                }
+            }
+        }
+        let Ok(reply) = wait.recv() else { return };
+        let body = format!("{{\"choices\":[{{\"message\":{{\"content\":\"{reply}\"}}}}]}}");
+        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    });
+    SlowAi { url, release }
+}
+
+/// AS-23: a reply that took a minute used to replace whatever had been typed meanwhile.
+#[test]
+fn a_late_ai_message_does_not_replace_what_was_typed() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("n.txt", "n\n");
+    f.git(&["add", "n.txt"]);
+    let ai = slow_ai();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().settings.ai = gitem_core::ai::AiConfig { provider: gitem_core::ai::AiProvider::OpenAiCompatible, base_url: ai.url.clone(), model: "m".into(), ..Default::default() };
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "Generate with AI");
+    for _ in 0..5 {
+        h.step();
+    }
+    click(&mut h, "Generate with AI");
+    let typed = "typed while waiting";
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
+    h.step();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text(typed);
+    h.step();
+    h.step();
+    ai.release.send("from the model").unwrap();
+    pump_for_any(&mut h, "Use it");
+    let box_text = |h: &Harness<GitemApp>| h.get_by_role(egui::accesskit::Role::MultilineTextInput).value().unwrap_or_default().to_string();
+    assert_eq!(box_text(&h), typed);
+    for _ in 0..5 {
+        h.step();
+    }
+    click(&mut h, "Use it");
+    assert_eq!(box_text(&h), "from the model");
+}
+
+#[test]
+fn an_ai_message_fills_a_box_nobody_has_touched() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("n.txt", "n\n");
+    f.git(&["add", "n.txt"]);
+    let ai = slow_ai();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().settings.ai = gitem_core::ai::AiConfig { provider: gitem_core::ai::AiProvider::OpenAiCompatible, base_url: ai.url.clone(), model: "m".into(), ..Default::default() };
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_label(&mut h, "Generate with AI");
+    for _ in 0..5 {
+        h.step();
+    }
+    click(&mut h, "Generate with AI");
+    ai.release.send("from the model").unwrap();
+    let t = Instant::now();
+    loop {
+        h.step();
+        if h.get_by_role(egui::accesskit::Role::MultilineTextInput).value().is_some_and(|v| v == "from the model") {
+            break;
+        }
+        assert!(t.elapsed() < PATIENCE, "the message never came");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }

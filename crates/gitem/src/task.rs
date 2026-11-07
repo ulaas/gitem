@@ -2,13 +2,19 @@
 //! result to the UI, which polls once per frame. Restarting drops any earlier
 //! in-flight result, so stale answers can never overwrite newer ones.
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::time::{Duration, Instant};
+
+use gitem_core::Repo;
 
 pub struct Task<T> {
     rx: Option<Receiver<Result<T, String>>>,
     pub value: Option<T>,
     pub error: Option<String>,
+    /// Stops the git commands of the work under way, for work started by `spawn_git`.
+    cancel: Option<Arc<AtomicBool>>,
+    started: Option<Instant>,
 }
 
 fn counter(ctx: &egui::Context) -> Arc<AtomicUsize> {
@@ -32,15 +38,32 @@ impl Drop for Running {
 
 impl<T> Default for Task<T> {
     fn default() -> Self {
-        Self { rx: None, value: None, error: None }
+        Self { rx: None, value: None, error: None, cancel: None, started: None }
+    }
+}
+
+impl<T> Task<T> {
+    fn stop_git(&mut self) {
+        if let Some(c) = self.cancel.take() {
+            c.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Closing a view stops what it was waiting for. A blame of a big file runs for minutes.
+impl<T> Drop for Task<T> {
+    fn drop(&mut self) {
+        self.stop_git();
     }
 }
 
 impl<T: Send + 'static> Task<T> {
     pub fn spawn<E: ToString>(&mut self, ctx: &egui::Context, f: impl FnOnce() -> Result<T, E> + Send + 'static) {
+        self.stop_git();
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         self.rx = Some(rx);
+        self.started = Some(Instant::now());
         let count = counter(&ctx);
         count.fetch_add(1, Ordering::SeqCst);
         let running = Running(count);
@@ -50,6 +73,28 @@ impl<T: Send + 'static> Task<T> {
             let _ = tx.send(r);
             ctx.request_repaint();
         });
+    }
+
+    /// The same, with a copy of `repo` for `f` to use whose git commands stop if this work
+    /// is replaced or stopped, or this task is dropped.
+    pub fn spawn_git<E: ToString>(&mut self, ctx: &egui::Context, repo: &Repo, f: impl FnOnce(Repo) -> Result<T, E> + Send + 'static) {
+        let mut repo = repo.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        repo.git.cancel = Some(cancel.clone());
+        self.spawn(ctx, move || f(repo));
+        self.cancel = Some(cancel);
+    }
+
+    /// Gives up on the work under way. Nothing it still does can reach this task.
+    pub fn stop(&mut self) {
+        self.stop_git();
+        self.rx = None;
+        self.started = None;
+    }
+
+    /// How long the work under way has been going.
+    pub fn running_for(&self) -> Option<Duration> {
+        self.started.filter(|_| self.rx.is_some()).map(|s| s.elapsed())
     }
 
     /// Returns true on the frame a result (or error) arrives.

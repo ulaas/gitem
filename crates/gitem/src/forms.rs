@@ -58,11 +58,14 @@ pub struct FormDialog {
     pub error: Option<String>,
     /// The values when first shown, to tell whether anything has been typed.
     first_shown: Option<String>,
+    /// A file picker that's open, and which field it's for.
+    picking: crate::task::Task<Option<std::path::PathBuf>>,
+    picking_field: usize,
 }
 
 impl FormDialog {
     pub fn new(title: impl Into<String>, submit: impl Into<String>) -> Self {
-        Self { title: title.into(), fields: Vec::new(), submit: submit.into(), danger: false, on_submit: Box::new(|_| Ok(Vec::new())), error: None, first_shown: None }
+        Self { title: title.into(), fields: Vec::new(), submit: submit.into(), danger: false, on_submit: Box::new(|_| Ok(Vec::new())), error: None, first_shown: None, picking: Default::default(), picking_field: 0 }
     }
 
     fn fingerprint(&self) -> String {
@@ -157,7 +160,7 @@ impl FormDialog {
         }
         let mut first_text = true;
         ui.set_min_width(440.0);
-        for f in &mut self.fields {
+        for (i, f) in self.fields.iter_mut().enumerate() {
             match f {
                 Field::Text { label, value, hint, password, .. } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
@@ -203,14 +206,17 @@ impl FormDialog {
                 Field::Path { label, value, folder, .. } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
                     ui.horizontal(|ui| {
-                        let browse = ui.button("Browse…").clicked();
+                        let browse = ui.add_enabled(!self.picking.busy(), egui::Button::new("Browse…")).clicked();
                         ui.add(crate::widgets::input(value).desired_width(f32::INFINITY));
                         if browse {
-                            let d = rfd::FileDialog::new();
-                            let picked = if *folder { d.pick_folder() } else { d.pick_file() };
-                            if let Some(path) = picked {
-                                *value = path.to_string_lossy().replace('\\', "/");
-                            }
+                            self.picking_field = i;
+                            crate::widgets::pick(&mut self.picking, ui.ctx(), rfd::FileDialog::new(), *folder);
+                        }
+                        if self.picking_field == i
+                            && self.picking.poll()
+                            && let Some(Some(path)) = self.picking.value.take()
+                        {
+                            *value = path.to_string_lossy().replace('\\', "/");
                         }
                     });
                 }

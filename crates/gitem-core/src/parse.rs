@@ -385,6 +385,44 @@ pub fn parse_name_status(out: &str) -> Vec<FileChange> {
     v
 }
 
+/// Parse `--raw --numstat -z`: every file's status, then every file's line counts. Records of
+/// the first kind look like `:100644 100644 abc def M\0path\0`, with two paths for R and C.
+pub fn parse_raw_numstat(out: &str) -> Vec<FileChange> {
+    let mut files = Vec::new();
+    let mut it = out.split('\0').peekable();
+    while let Some(meta) = it.next_if(|t| t.starts_with(':')) {
+        let c = meta.split(' ').nth(4).and_then(|code| code.chars().next()).unwrap_or(' ');
+        let status = FileStatus::from_code(c);
+        let first = it.next().unwrap_or("").to_string();
+        if matches!(c, 'R' | 'C') {
+            let path = it.next().unwrap_or("").to_string();
+            files.push(FileChange { path, orig_path: Some(first), status, additions: None, deletions: None });
+        } else {
+            files.push(FileChange { path: first, orig_path: None, status, additions: None, deletions: None });
+        }
+    }
+    let rest = it.collect::<Vec<_>>().join("\0");
+    let stats: std::collections::HashMap<String, (Option<u32>, Option<u32>)> = parse_numstat(&rest).into_iter().map(|(p, a, d)| (p, (a, d))).collect();
+    for f in &mut files {
+        if let Some((a, d)) = stats.get(&f.path) {
+            f.additions = *a;
+            f.deletions = *d;
+        }
+    }
+    files
+}
+
+/// `git shortlog -sne`: `   12\tName <email>`.
+pub fn parse_shortlog(out: &str) -> Vec<(u32, String, String)> {
+    out.lines()
+        .filter_map(|l| {
+            let (n, who) = l.trim_start().split_once('\t')?;
+            let (name, email) = who.rsplit_once(" <")?;
+            Some((n.trim().parse().ok()?, name.to_string(), email.strip_suffix('>')?.to_string()))
+        })
+        .collect()
+}
+
 /// Parse `--numstat -z` into (path, additions, deletions); binary files give `None`.
 pub fn parse_numstat(out: &str) -> Vec<(String, Option<u32>, Option<u32>)> {
     let mut v = Vec::new();

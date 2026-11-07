@@ -67,7 +67,7 @@ impl ContributorsView {
             }
             ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(180.0));
             if self.people.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         ui.add_space(4.0);

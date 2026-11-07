@@ -262,15 +262,33 @@ pub fn install_fonts(ctx: &egui::Context) {
     // Icons come first: they're the same on every platform.
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     for path in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
+        if let Some(data) = system_font(path) {
             let name = format!("system:{path}");
-            fonts.font_data.insert(name.clone(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+            fonts.font_data.insert(name.clone(), std::sync::Arc::new(data));
             for family in [FontFamily::Proportional, FontFamily::Monospace] {
                 fonts.families.entry(family).or_default().push(name.clone());
             }
         }
     }
     ctx.set_fonts(fonts);
+}
+
+/// A system font, mapped rather than read where that's safe, so only the parts in use take
+/// memory: the fallback CJK fonts are 33 MB, on a machine that may never show a character
+/// from them.
+fn system_font(path: &str) -> Option<egui::FontData> {
+    #[cfg(windows)]
+    {
+        let file = std::fs::File::open(path).ok()?;
+        // Windows won't let a mapped file be changed or removed, so this can't vanish under
+        // the program, as it could on other systems. It lives until the process ends.
+        let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+        Some(egui::FontData::from_static(Box::leak(Box::new(map))))
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::read(path).ok().map(egui::FontData::from_owned)
+    }
 }
 
 /// Flat dock tabs: the active one shares the panel's colour and runs into its content,

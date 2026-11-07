@@ -44,6 +44,11 @@ struct Running {
     own_config: bool,
     /// It clones, so the folder it leaves behind is gitem's own work.
     is_clone: bool,
+    /// What was asked for together with it. See [`Queued`].
+    batch: u64,
+    started: Instant,
+    /// Cancel was pressed, on something where that needs saying twice.
+    asking_to_stop: bool,
 }
 
 /// A fetch only updates remote-tracking refs, and can simply be done again.
@@ -70,7 +75,34 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
         let _ = tx.send(OpMsg::Done(res));
         ctx2.request_repaint();
     });
-    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, own_config, is_clone }
+    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false }
+}
+
+/// A write waiting its turn. `batch` tells what was asked for together: the steps of one
+/// action assume the earlier ones worked, and later actions don't.
+struct Queued {
+    op: GitOp,
+    open_after: Option<PathBuf>,
+    batch: u64,
+}
+
+/// Something done for the user without being asked, beside the queue. It never holds up
+/// what they do, never toasts, and its failure is a note in the status bar.
+struct Quiet {
+    task: crate::task::Task<()>,
+    is_fetch: bool,
+}
+
+/// A second identical write this soon after the first is a double click. Skip on a rebase,
+/// or Good in a bisect, would otherwise act on a state nobody has looked at yet.
+const DOUBLE_CLICK: Duration = Duration::from_millis(600);
+
+/// After this many in a row, a scheduled fetch stops getting further apart.
+const MAX_FETCH_BACKOFF: u32 = 4;
+
+/// Whether two ops are the same request: same commands, same input.
+fn same_op(a: &GitOp, b: &GitOp) -> bool {
+    a.title == b.title && a.steps.len() == b.steps.len() && a.steps.iter().zip(&b.steps).all(|(x, y)| x.args == y.args && x.stdin == y.stdin)
 }
 
 pub struct RepoTab {
@@ -83,10 +115,23 @@ pub struct RepoTab {
     sidebar: Sidebar,
     show_sidebar: bool,
     show_rail: bool,
-    queue: VecDeque<(GitOp, Option<PathBuf>)>,
+    queue: VecDeque<Queued>,
     running: Option<Running>,
+    /// When the last one was asked for, whether or not it's still in the queue.
+    last_asked: Option<(GitOp, Instant)>,
+    quiet: Option<Quiet>,
+    /// Waiting for the repository to be decided about, then `quiet`.
+    maintenance_due: bool,
     last_auto_fetch: Instant,
+    /// Scheduled fetches that failed in a row. Each one doubles the wait for the next.
+    fetch_failures: u32,
+    /// Why the last scheduled fetch failed, for the status bar.
+    fetch_note: Option<String>,
+    fetch_minutes: u32,
+    last_index_refresh: Option<Instant>,
+    last_poll: Instant,
     background: Vec<crate::task::Task<String>>,
+    later: Vec<crate::task::Task<crate::action::Later>>,
     /// The user asked to see the question about this repository's config again.
     review_trust: bool,
 }
@@ -106,7 +151,7 @@ impl RepoTab {
         if let Some(path) = dock.find_tab_from(|t| matches!(t, Tab::Graph(_))) {
             let _ = dock.set_active_tab(path);
         }
-        let watcher = RepoWatcher::new(ctx, &repo.root, &repo.git_dir);
+        let watcher = RepoWatcher::new(ctx, &repo);
         Self {
             repo,
             data,
@@ -119,8 +164,17 @@ impl RepoTab {
             show_rail: true,
             queue: VecDeque::new(),
             running: None,
+            last_asked: None,
+            quiet: None,
+            maintenance_due: false,
             last_auto_fetch: Instant::now(),
+            fetch_failures: 0,
+            fetch_note: None,
+            fetch_minutes: 0,
+            last_index_refresh: None,
+            last_poll: Instant::now(),
             background: Vec::new(),
+            later: Vec::new(),
             review_trust: false,
         }
     }
@@ -131,7 +185,7 @@ impl RepoTab {
         if let Some(r) = self.running.as_ref().filter(|r| !r.harmless) {
             items.push(format!("{} is running. {running_note}", r.title));
         }
-        let queued = self.queue.iter().filter(|(op, _)| !is_harmless(op)).count();
+        let queued = self.queue.iter().filter(|q| !is_harmless(&q.op)).count();
         if queued > 0 {
             items.push(format!("{queued} queued git command(s) won't run."));
         }
@@ -185,14 +239,14 @@ impl RepoTab {
             if let Some(res) = done {
                 let title = r.title.clone();
                 let open_after = r.open_after.clone();
-                let own_config = r.own_config;
+                let (own_config, batch) = (r.own_config, r.batch);
                 self.running = None;
                 // A pull can bring in config through a tracked `include.path`.
                 if let Err(e) = self.repo.recheck_trust(own_config) {
                     out.push(Action::Error(format!("Could not read this repository's config:\n{e}")));
                 }
                 self.data.refresh(ctx, &self.repo);
-                self.data.mark_changed();
+                self.data.mark_rewritten();
                 match res {
                     Ok(note) => {
                         if let Some(p) = open_after {
@@ -205,29 +259,179 @@ impl RepoTab {
                         }
                     }
                     Err(e) => {
-                        // Later steps assumed this one worked, so they're dropped.
-                        self.queue.clear();
+                        // Later steps of the same action assumed this one worked. Other actions
+                        // don't depend on it, unless it left the repository in the middle of
+                        // something: they were all asked for with no such thing going on.
+                        let stopped_midway = self.repo.current_op() != RepoOp::None;
+                        let before = self.queue.len();
+                        self.queue.retain(|q| !stopped_midway && q.batch != batch);
+                        let dropped = before - self.queue.len();
+                        let not_run = if dropped > 0 { format!("\n\n{dropped} queued command(s) after it were not run.") } else { String::new() };
                         // Being cancelled kills git without its cleanup. Either way, if the
                         // lock is why it stopped or what it left, there's a way out to offer.
                         if self.repo.index_lock().is_some() && (e == "cancelled" || gitem_core::runner::is_lock_failure(&e)) {
-                            out.push(Action::OfferLockRemoval(self.repo.root.clone(), format!("{title} failed:\n{e}")));
+                            out.push(Action::OfferLockRemoval(self.repo.root.clone(), format!("{title} failed:\n{e}{not_run}")));
+                        } else if stopped_midway && e.contains("CONFLICT") {
+                            // Not a failure: the banner has what to do next.
+                            out.push(Action::Toast(format!("{title} stopped at a conflict. Resolve it, then continue.")));
+                            if dropped > 0 {
+                                out.push(Action::Error(format!("{title} stopped at a conflict.{not_run}")));
+                            }
                         } else {
-                            out.push(Action::Error(format!("{title} failed:\n{e}")));
+                            out.push(Action::Error(format!("{title} failed:\n{e}{not_run}")));
                         }
                     }
                 }
             }
         }
-        if self.running.is_none()
-            && let Some((op, open)) = self.queue.pop_front() {
-                self.running = Some(spawn_op(ctx, self.repo.git.clone(), Some(self.repo.root.clone()), op, open));
+        // A fetch and a pull at once fight over the same refs. Anything else can run beside
+        // a background fetch, just as with one started from a terminal.
+        let held_back = self.quiet.as_ref().is_some_and(|q| q.is_fetch) && self.queue.front().is_some_and(|q| q.op.network);
+        if self.running.is_none() && !held_back
+            && let Some(q) = self.queue.pop_front() {
+                let mut running = spawn_op(ctx, self.repo.git.clone(), Some(self.repo.root.clone()), q.op, q.open_after);
+                running.batch = q.batch;
+                self.running = Some(running);
             }
+    }
+
+    /// Brings the next scheduled fetch forward to now, for tests: the shortest wait is a minute.
+    pub fn make_fetch_due(&mut self) {
+        self.last_auto_fetch = Instant::now().checked_sub(Duration::from_secs(24 * 3600)).unwrap_or_else(Instant::now);
+    }
+
+    /// Minutes between scheduled fetches now, with any backing off.
+    pub fn fetch_wait_minutes(&self) -> Option<u64> {
+        (self.fetch_minutes > 0).then(|| self.fetch_minutes as u64 * 2u64.pow(self.fetch_failures.min(MAX_FETCH_BACKOFF)))
+    }
+
+    /// Whether a scheduled fetch is due, and how long until the next one if not.
+    fn fetch_wait(&self, minutes: u32) -> Option<Duration> {
+        if minutes == 0 {
+            return None;
+        }
+        let every = Duration::from_secs(minutes as u64 * 60) * 2u32.pow(self.fetch_failures.min(MAX_FETCH_BACKOFF));
+        Some(every.saturating_sub(self.last_auto_fetch.elapsed()))
+    }
+
+    /// The user's work always goes first. A scheduled fetch waits for a moment with nothing
+    /// going on, since nobody wants FETCH_HEAD moved under a pull or a rebase.
+    fn start_quiet_work(&mut self, ctx: &egui::Context, settings: &Settings) {
+        self.fetch_minutes = settings.auto_fetch_minutes;
+        if let Some(q) = &mut self.quiet {
+            if !q.task.poll() {
+                return;
+            }
+            let (ok, error) = (q.task.error.is_none(), q.task.error.take());
+            if q.is_fetch {
+                if ok {
+                    self.fetch_failures = 0;
+                    self.fetch_note = None;
+                    self.data.refresh(ctx, &self.repo);
+                } else {
+                    self.fetch_failures = self.fetch_failures.saturating_add(1);
+                    self.fetch_note = error;
+                }
+            }
+            self.quiet = None;
+        }
+        let busy = self.running.is_some() || !self.queue.is_empty() || self.data.jobs.load(Ordering::Relaxed) > 0 || self.data.status.get().is_none_or(|s| s.op != RepoOp::None);
+        // Nobody asked for these, so they wait for the repository to be decided about, and
+        // run no hooks.
+        if busy || self.repo.trust.restricted() {
+            return;
+        }
+        let run = |tab: &mut Self, op: GitOp, is_fetch: bool, ctx: &egui::Context| {
+            let mut task = crate::task::Task::default();
+            task.spawn_git(ctx, &tab.repo, move |r| -> Result<(), String> { op.run(&r.git, Some(&r.root), None, &mut |_| {}).map(drop).map_err(|e| e.to_string()) });
+            tab.quiet = Some(Quiet { task, is_fetch });
+        };
+        if std::mem::take(&mut self.maintenance_due) {
+            run(self, ops::maintenance_run().background(), false, ctx);
+            return;
+        }
+        if self.fetch_wait(settings.auto_fetch_minutes).is_some_and(|w| w.is_zero()) && !self.data.remotes().is_empty() {
+            self.last_auto_fetch = Instant::now();
+            run(self, ops::fetch(&ops::FetchOpts { all: true, prune: settings.prune_on_fetch, ..Default::default() }).background().unattended(), true, ctx);
+            return;
+        }
+        // Reads can't save what they learn about the files, so after something touches a
+        // lot of them every status hashes them all again, until something writes the index.
+        let slow = self.data.status_took.get() >= SLOW_STATUS;
+        if slow && self.last_index_refresh.is_none_or(|t| t.elapsed() >= INDEX_REFRESH_EVERY) {
+            self.last_index_refresh = Some(Instant::now());
+            run(self, ops::refresh_index().background(), false, ctx);
+        }
+    }
+}
+
+/// A status slower than this is worth refreshing the index for.
+const SLOW_STATUS: Duration = Duration::from_secs(1);
+const INDEX_REFRESH_EVERY: Duration = Duration::from_secs(60);
+
+/// How often to look for changes where the file watcher doesn't work.
+const POLL_WITHOUT_WATCHER: Duration = Duration::from_secs(5);
+
+/// A way out of a failed command, when its message is one people often meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorFix {
+    SetUpstream,
+    PullOptions,
+    Stash,
+    AddRemote,
+    Credentials,
+}
+
+impl ErrorFix {
+    fn label(self) -> &'static str {
+        match self {
+            ErrorFix::SetUpstream => "Set upstream…",
+            ErrorFix::PullOptions => "Pull options…",
+            ErrorFix::Stash => "Stash…",
+            ErrorFix::AddRemote => "Add a remote…",
+            ErrorFix::Credentials => "Open Credentials",
+        }
+    }
+}
+
+/// Plain words for what git said, and what to do about it. The whole message stays available
+/// behind this. Based on git's C-locale messages, which is what gitem makes it print.
+pub fn explain_error(text: &str) -> Option<(&'static str, ErrorFix)> {
+    let has = |s: &str| text.contains(s);
+    if has("no tracking information") || has("has no upstream branch") {
+        Some(("This branch isn't linked to a branch on a remote yet.", ErrorFix::SetUpstream))
+    } else if has("would be overwritten by") || has("Please commit your changes or stash them") {
+        Some(("You have uncommitted changes in files this would replace. Stash them, or commit them, and try again.", ErrorFix::Stash))
+    } else if has("No configured push destination") || has("does not appear to be a git repository") || has("No remote repository specified") {
+        Some(("There's no remote to talk to. Add one, or check the name of the one you meant.", ErrorFix::AddRemote))
+    } else if has("reconcile divergent branches") || has("non-fast-forward") || has("fetch first") || has("Not possible to fast-forward") {
+        Some(("This branch and its remote have both moved on. Bring in the remote's commits first.", ErrorFix::PullOptions))
+    } else if has("Authentication failed") || has("could not read Username") || has("could not read Password") || has("Permission denied (publickey") || has("terminal prompts disabled") {
+        Some(("The remote didn't accept your sign-in. Check the saved credentials or your SSH key.", ErrorFix::Credentials))
+    } else {
+        None
+    }
+}
+
+/// The window's title and the text under it, from `Title failed:\ndetails`.
+pub fn error_parts(e: &str) -> (&str, &str) {
+    match e.split_once('\n') {
+        Some((first, rest)) if first.ends_with(" failed:") => (first.trim_end_matches(':'), rest),
+        _ => ("Something went wrong", e),
     }
 }
 
 use gitem_core::trust::TrustState;
 
 const DOCK_ID: &str = "gitem-dock";
+
+/// A non-network op is only offered a Cancel once it looks stuck, since stopping one can
+/// leave things half done.
+const CANCEL_OFFERED_AFTER: Duration = Duration::from_secs(3);
+
+fn ctx_repaint_at(ui: &Ui, wait: Duration) {
+    ui.ctx().request_repaint_after(wait);
+}
 
 /// What to expect while a repository's programs are off.
 const RESTRICTED_NOTE: &str = "While they're off, files that use a filter can look modified when they aren't, diffs and blame show the raw text, signatures aren't checked, and staging skips those filters.";
@@ -410,6 +614,21 @@ pub struct GitemApp {
     /// The user has said yes to losing work, so the next close request goes through.
     closing: bool,
     orphans: Vec<Orphan>,
+    /// Counts frames: what's asked for within one is one action.
+    frame_no: u64,
+    window_focused: bool,
+    /// Repositories still being opened on their own threads. A share that isn't there can
+    /// take 20 seconds to say so.
+    opening: Vec<Opening>,
+    /// A folder being picked: the dialog runs on its own thread, so this one keeps drawing.
+    folder_pick: crate::task::Task<Option<PathBuf>>,
+}
+
+struct Opening {
+    path: PathBuf,
+    task: crate::task::Task<Repo>,
+    /// From the saved session: if it can't be reached, it's only kept for next time.
+    quiet: bool,
 }
 
 struct NoRepoSettings {
@@ -438,14 +657,7 @@ impl GitemApp {
         app.crash_reports = crate::crash::pending(&gitem_core::settings::config_dir());
         let session = app.settings.open_repos.clone();
         if paths.is_empty() {
-            for p in &session {
-                if !app.open_repo(ctx, Path::new(p), true) {
-                    app.session_kept.push(p.clone());
-                    if app.git.is_ok() {
-                        app.reopen_failed.push(p.clone());
-                    }
-                }
-            }
+            app.reopen_session(ctx, &session);
         } else {
             // `gitem some-repo` shows that repository, and the session stays for next time.
             app.session_kept = session;
@@ -501,7 +713,16 @@ impl GitemApp {
             close_guard: None,
             closing: false,
             orphans: Vec::new(),
+            frame_no: 0,
+            window_focused: true,
+            opening: Vec::new(),
+            folder_pick: Default::default(),
         }
+    }
+
+    /// The errors waiting to be seen, oldest first.
+    pub fn errors_showing(&self) -> &[String] {
+        &self.errors
     }
 
     /// The way out of a lock that's in the way. Removing one that a live process holds can
@@ -558,32 +779,107 @@ impl GitemApp {
         }
     }
 
+    /// Opens the session's repositories side by side, in their saved order. Normally all of
+    /// them are done within moments. Any that aren't arrive by themselves when they answer,
+    /// and meanwhile the window is up and usable.
+    fn reopen_session(&mut self, ctx: &egui::Context, session: &[String]) {
+        const WAIT: Duration = Duration::from_secs(2);
+        let Ok(git) = self.git.clone() else {
+            self.session_kept.extend(session.iter().cloned());
+            return;
+        };
+        let mut tasks: Vec<(String, crate::task::Task<Repo>)> = session
+            .iter()
+            .map(|p| {
+                let mut task = crate::task::Task::default();
+                let (git, path) = (git.clone(), PathBuf::from(p));
+                task.spawn(ctx, move || Repo::open(git, &path));
+                (p.clone(), task)
+            })
+            .collect();
+        let start = Instant::now();
+        while start.elapsed() < WAIT && tasks.iter().any(|(_, t)| t.busy()) {
+            std::thread::sleep(Duration::from_millis(5));
+            tasks.iter_mut().for_each(|(_, t)| {
+                t.poll();
+            });
+        }
+        for (p, mut task) in tasks {
+            if let Some(repo) = task.value.take() {
+                self.add_repo(ctx, repo);
+            } else if task.busy() {
+                // Kept in the session meanwhile, in case the window closes first.
+                self.session_kept.push(p.clone());
+                self.opening.push(Opening { path: p.into(), task, quiet: true });
+            } else {
+                self.session_kept.push(p.clone());
+                self.reopen_failed.push(p);
+            }
+        }
+    }
+
+    /// Repositories that have answered since the last frame. They don't take the focus.
+    fn poll_opening(&mut self, ctx: &egui::Context) {
+        let mut done = Vec::new();
+        self.opening.retain_mut(|o| {
+            if !o.task.poll() {
+                return true;
+            }
+            done.push((o.path.clone(), o.task.value.take(), o.task.error.take(), o.quiet));
+            false
+        });
+        for (path, repo, error, quiet) in done {
+            let was_empty = self.repos.is_empty();
+            let shown = self.active;
+            let name = path.to_string_lossy().replace('\\', "/");
+            match repo {
+                Some(repo) => {
+                    self.session_kept.retain(|k| *k != name);
+                    self.add_repo(ctx, repo);
+                    self.active = if was_empty || !quiet { self.repos.len() - 1 } else { shown };
+                }
+                None if quiet => self.reopen_failed.push(name),
+                None => self.errors.push(format!("{} isn't a git repository:\n{}", path.display(), error.unwrap_or_default())),
+            }
+        }
+    }
+
+    /// The same, for one the user asked for that may be on a network share.
+    fn open_in_background(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let Ok(git) = self.git.clone() else { return };
+        let mut task = crate::task::Task::default();
+        let p = path.clone();
+        task.spawn(ctx, move || Repo::open(git, &p));
+        self.opening.push(Opening { path, task, quiet: false });
+    }
+
+    fn add_repo(&mut self, ctx: &egui::Context, repo: Repo) {
+        if let Some(i) = self.repos.iter().position(|r| r.repo.root == repo.root) {
+            self.active = i;
+            return;
+        }
+        let root = repo.root.to_string_lossy().replace('\\', "/");
+        self.session_kept.retain(|k| *k != root);
+        self.settings.touch_recent(&root);
+        let mut tab = RepoTab::new(ctx, repo, &self.settings);
+        tab.maintenance_due = self.settings.auto_maintenance;
+        self.repos.push(tab);
+        self.active = self.repos.len() - 1;
+        self.settings_dirty = true;
+    }
+
     /// Whether the repository is open now.
     pub fn open_repo(&mut self, ctx: &egui::Context, path: &Path, quiet: bool) -> bool {
         let Ok(git) = self.git.clone() else { return false };
         match Repo::open(git, path) {
             Ok(repo) => {
-                if let Some(i) = self.repos.iter().position(|r| r.repo.root == repo.root) {
-                    self.active = i;
-                    return true;
-                }
-                let root = repo.root.to_string_lossy().replace('\\', "/");
-                self.session_kept.retain(|k| *k != root);
-                self.settings.touch_recent(&root);
-                let mut tab = RepoTab::new(ctx, repo, &self.settings);
-                // Not until the repository has been decided about. It's a write with
-                // nobody asking for it, so it runs no hooks either.
-                if self.settings.auto_maintenance && !tab.repo.trust.restricted() {
-                    tab.queue.push_back((ops::maintenance_run().background(), None));
-                }
-                self.repos.push(tab);
-                self.active = self.repos.len() - 1;
-                self.settings_dirty = true;
+                self.add_repo(ctx, repo);
                 true
             }
             Err(e) => {
                 if !quiet {
-                    self.errors.push(format!("{} isn't a git repository:\n{e}", path.display()));
+                    // Git's own message for this blames git: "The directory name is invalid".
+                    self.errors.push(if path.exists() { format!("{} isn't a git repository:\n{e}", path.display()) } else { format!("{} doesn't exist. It may have been moved, renamed or deleted.", path.display()) });
                 }
                 false
             }
@@ -685,7 +981,7 @@ impl GitemApp {
                 self.errors.push(format!("Could not save that answer: {e}"));
             }
             tab.data.refresh(ctx, &tab.repo);
-            tab.data.mark_changed();
+            tab.data.mark_rewritten();
         }
     }
 
@@ -741,7 +1037,7 @@ impl GitemApp {
 
     /// No git write is queued or running anywhere.
     pub fn ops_idle(&self) -> bool {
-        self.global_queue.is_empty() && self.global_running.is_none() && self.orphans.is_empty() && self.repos.iter().all(|r| r.queue.is_empty() && r.running.is_none())
+        self.global_queue.is_empty() && self.global_running.is_none() && self.orphans.is_empty() && self.repos.iter().all(|r| r.queue.is_empty() && r.running.is_none() && r.quiet.is_none())
     }
 
     /// Everything closing the window would lose. Empty means nothing to ask about.
@@ -908,15 +1204,22 @@ impl GitemApp {
     pub fn apply_action(&mut self, ctx: &egui::Context, a: Action) {
         match a {
             Action::Run(op) => {
+                let batch = self.frame_no;
                 if let Some(r) = self.repos.get_mut(self.active) {
-                    r.queue.push_back((op, None));
+                    // Two of the same in one frame are two parts of one action.
+                    let doubled = r.last_asked.as_ref().is_some_and(|(last, at)| same_op(last, &op) && at.elapsed() < DOUBLE_CLICK && r.queue.back().is_none_or(|q| q.batch != batch));
+                    r.last_asked = Some((op.clone(), Instant::now()));
+                    if !doubled {
+                        r.queue.push_back(Queued { op, open_after: None, batch });
+                    }
                 } else {
                     self.global_queue.push_back((op, None));
                 }
             }
             Action::RunThenOpen(op, path) => {
+                let batch = self.frame_no;
                 if let Some(r) = self.repos.get_mut(self.active) {
-                    r.queue.push_back((op, Some(path)));
+                    r.queue.push_back(Queued { op, open_after: Some(path), batch });
                 } else {
                     self.global_queue.push_back((op, Some(path)));
                 }
@@ -926,6 +1229,21 @@ impl GitemApp {
                     let mut t = crate::task::Task::default();
                     t.spawn(ctx, job);
                     r.background.push(t);
+                }
+            }
+            Action::RunDetached(op) => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    let mut t = crate::task::Task::default();
+                    let (git, root) = (r.repo.git.clone(), r.repo.root.clone());
+                    t.spawn(ctx, move || -> Result<String, String> { op.run(&git, Some(&root), None, &mut |_| {}).map(|_| String::new()).map_err(|e| format!("{} failed:\n{e}", op.title)) });
+                    r.background.push(t);
+                }
+            }
+            Action::Later(job) => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    let mut t = crate::task::Task::default();
+                    t.spawn(ctx, move || -> Result<crate::action::Later, String> { job() });
+                    r.later.push(t);
                 }
             }
             Action::OpenFile(path) => open_file(&path, &self.settings.default_external_editor, &mut self.errors),
@@ -985,7 +1303,11 @@ impl GitemApp {
             Action::Toast(s) => self.toasts.push((s, Instant::now())),
             Action::Error(e) => self.errors.push(e),
             Action::OpenRepo(p) => {
-                self.open_repo(ctx, &p, false);
+                if gitem_core::forge::is_network_path(&p.to_string_lossy()) {
+                    self.open_in_background(ctx, p);
+                } else {
+                    self.open_repo(ctx, &p, false);
+                }
             }
             Action::DeepLink(d) => {
                 if gitem_core::forge::is_network_path(&d.repo) {
@@ -1013,6 +1335,11 @@ impl GitemApp {
             Action::Refresh => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.data.refresh(ctx, &r.repo);
+                }
+            }
+            Action::Retry => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    r.data.retry(ctx, &r.repo);
                 }
             }
             Action::StatusBlame(s) => {
@@ -1091,6 +1418,12 @@ impl GitemApp {
             if let Some(i) = close {
                 self.request_close_repo(i);
             }
+            for o in &self.opening {
+                ui.add(spinner(12.0));
+                let name = o.path.file_name().map_or_else(|| o.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                ui.label(RichText::new(format!("Opening {name}…")).small().color(p.dim)).on_hover_text(o.path.display().to_string());
+                ui.add_space(4.0);
+            }
             ui.add_space(2.0);
             ui.scope(|ui| {
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
@@ -1118,7 +1451,7 @@ impl GitemApp {
         if self.no_repo_settings.take().is_some() {
             return;
         }
-        let git = self.git.clone().unwrap_or_else(|_| GitExe { path: "git not found".into(), source: gitem_core::runner::GitSource::System, log: Default::default(), helper: None, neutral: Default::default() });
+        let git = self.git.clone().unwrap_or_else(|_| GitExe { path: "git not found".into(), source: gitem_core::runner::GitSource::System, log: Default::default(), helper: None, neutral: Default::default(), cancel: None });
         let root = PathBuf::from(".");
         self.no_repo_settings = Some(Box::new(NoRepoSettings { repo: Repo::outside_any(git, root.clone(), root), data: RepoData::default(), view: Default::default() }));
     }
@@ -1198,7 +1531,7 @@ impl GitemApp {
                 None => (None, 0, 0, None, false),
             };
             let label = branch.clone().unwrap_or_else(|| if has_status { "detached HEAD".into() } else { "…".into() });
-            let names: Vec<Branch> = tab.data.local_branches().cloned().collect();
+            let data = &tab.data;
             ui.menu_button((RichText::new(chrome::icon::GIT_BRANCH).color(p.accent), RichText::new(format!("{label}  {}", chrome::icon::CARET_DOWN)).strong()), |ui| {
                 if ui.button("+ New branch…").clicked() {
                     out.push(Action::Form(forms::new_branch(None)));
@@ -1206,7 +1539,7 @@ impl GitemApp {
                 }
                 ui.separator();
                 egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                    for b in &names {
+                    for b in data.local_branches() {
                         if ui.selectable_label(b.is_current, b.name.as_str()).clicked() {
                             if !b.is_current {
                                 out.push(Action::Run(ops::checkout(&b.name)));
@@ -1262,9 +1595,7 @@ impl GitemApp {
 
     fn open_menu(&mut self, ui: &mut Ui, out: &mut Vec<Action>) {
         if ui.button("Open folder…").clicked() {
-            if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                out.push(Action::OpenRepo(d));
-            }
+            crate::widgets::pick(&mut self.folder_pick, ui.ctx(), rfd::FileDialog::new(), true);
             ui.close();
         }
         if ui.button("Clone…").clicked() {
@@ -1313,10 +1644,9 @@ impl GitemApp {
             }
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 300.0).max(0.0) / 2.0);
-                if ui.button("Open folder…").clicked()
-                    && let Some(d) = rfd::FileDialog::new().pick_folder() {
-                        out.push(Action::OpenRepo(d));
-                    }
+                if ui.button("Open folder…").clicked() {
+                    crate::widgets::pick(&mut self.folder_pick, ui.ctx(), rfd::FileDialog::new(), true);
+                }
                 if ui.button("Clone…").clicked() {
                     out.push(Action::Form(forms::clone_form()));
                 }
@@ -1344,9 +1674,13 @@ impl GitemApp {
         });
     }
 
-    fn op_banner(ui: &mut Ui, tab_status: &RepoStatus, out: &mut Vec<Action>, p: &Palette) {
+    fn op_banner(ui: &mut Ui, tab_status: &RepoStatus, ops_busy: bool, out: &mut Vec<Action>, p: &Palette) {
         egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.horizontal(|ui| {
+                // A second Skip would act on a state nobody has looked at yet.
+                if ops_busy {
+                    ui.disable();
+                }
                 let mut text = tab_status.op.label().to_string();
                 if let Some(t) = &tab_status.op_target {
                     text.push_str(&format!(" {t}"));
@@ -1395,24 +1729,57 @@ impl GitemApp {
         let Some(tab) = self.repos.get_mut(self.active) else {
             if let Some(g) = &self.global_running {
                 ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(13.0));
+                    ui.add(spinner(13.0));
                     ui.label(format!("{}: {}", g.title, g.last_line));
+                    // Nothing's on screen yet to lose: a clone that's gone wrong just stops.
+                    if ui.small_button("Cancel").clicked() {
+                        g.cancel.store(true, Ordering::Relaxed);
+                    }
                 });
             }
             return;
         };
         ui.horizontal(|ui| {
-            if let Some(r) = &tab.running {
-                ui.add(egui::Spinner::new().size(13.0));
-                ui.add(egui::Label::new(RichText::new(format!("{}: {}", r.title, r.last_line)).small()).truncate());
-                if r.network && ui.small_button("Cancel").clicked() {
-                    r.cancel.store(true, Ordering::Relaxed);
+            if let Some(r) = &mut tab.running {
+                ui.add(spinner(13.0));
+                if r.asking_to_stop {
+                    // Only a network op leaves nothing half done when it's killed.
+                    ui.label(RichText::new("Stop git now? Files it was changing can be left half updated, and a lock left behind.").small().color(p.warn));
+                    if ui.small_button("Stop it").clicked() {
+                        r.cancel.store(true, Ordering::Relaxed);
+                        r.asking_to_stop = false;
+                    }
+                    if ui.small_button("Keep waiting").clicked() {
+                        r.asking_to_stop = false;
+                    }
+                } else {
+                    ui.add(egui::Label::new(RichText::new(format!("{}: {}", r.title, r.last_line)).small()).truncate());
+                    if r.network {
+                        if ui.small_button("Cancel").clicked() {
+                            r.cancel.store(true, Ordering::Relaxed);
+                        }
+                    } else if r.started.elapsed() >= CANCEL_OFFERED_AFTER {
+                        // A hook that never returns would otherwise hold up everything behind it.
+                        if ui.small_button("Cancel…").clicked() {
+                            r.asking_to_stop = true;
+                        }
+                    } else {
+                        ctx_repaint_at(ui, CANCEL_OFFERED_AFTER.saturating_sub(r.started.elapsed()));
+                    }
                 }
                 if !tab.queue.is_empty() {
                     ui.label(RichText::new(format!("+{} queued", tab.queue.len())).small().color(p.dim));
                 }
+            } else if tab.queue.front().is_some_and(|q| q.op.network) && tab.quiet.is_some() {
+                ui.add(spinner(13.0));
+                ui.label(RichText::new(format!("{}: waiting for the background fetch to finish", tab.queue[0].op.title)).small());
+            } else if let Some(note) = tab.fetch_note.as_ref().filter(|_| self.settings.auto_fetch_minutes > 0) {
+                // Being offline isn't worth a dialog every few minutes.
+                let first = note.lines().next().unwrap_or("");
+                let retry = tab.fetch_wait(self.settings.auto_fetch_minutes).map_or(0, |w| w.as_secs() / 60 + 1);
+                ui.label(RichText::new(format!("Background fetch failed, trying again in about {retry} min")).small().color(p.warn)).on_hover_text(first);
             } else if let Some(g) = &self.global_running {
-                ui.add(egui::Spinner::new().size(13.0));
+                ui.add(spinner(13.0));
                 ui.add(egui::Label::new(RichText::new(format!("{}: {}", g.title, g.last_line)).small()).truncate());
                 if ui.small_button("Cancel").clicked() {
                     g.cancel.store(true, Ordering::Relaxed);
@@ -1427,11 +1794,15 @@ impl GitemApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(s) = tab.data.status.get() {
-                    let (st, un, c) = (s.entries.iter().filter(|e| e.is_staged()).count(), s.entries.iter().filter(|e| e.is_unstaged()).count(), s.conflicts().count());
+                if tab.data.status.get().is_some() {
+                    let n = tab.data.counts();
+                    let (st, un, c) = (n.staged, n.unstaged, n.conflicts);
                     if st + un + c > 0 && ui.small_button(format!("{st} staged, {un} changed{}", if c > 0 { format!(", {c} conflicts") } else { String::new() })).clicked() {
                         out.push(Action::OpenTab(Tab::changes()));
                     }
+                }
+                if tab.watcher.failed.load(Ordering::Relaxed) {
+                    ui.label(RichText::new("Not notified of changes here, so looking every few seconds").small().color(p.faint));
                 }
                 if let Some(f) = tab.data.forge() {
                     ui.label(RichText::new(format!("{} {}", f.kind.label(), f.path)).small().color(p.faint));
@@ -1551,19 +1922,57 @@ impl GitemApp {
         }
         // Errors are shown in full until dismissed: they're often long git output.
         if let Some(e) = self.errors.first().cloned() {
-            let mut close = false;
-            egui::Window::new("Something went wrong").collapsible(false).resizable(true).default_width(560.0).anchor(Align2::CENTER_BOTTOM, [0.0, -40.0]).show(ctx, |ui| {
-                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                    ui.add(egui::Label::new(RichText::new(&e).monospace().small()).selectable(true));
-                });
+            let mut close = self.confirm.is_none() && self.form.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            let waiting = self.errors.len();
+            let (title, details) = error_parts(&e);
+            let help = explain_error(details);
+            let mut fix = None;
+            egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_BOTTOM, [0.0, -40.0]).show(ctx, |ui| {
+                ui.set_max_width(560.0);
+                if waiting > 1 {
+                    ui.label(RichText::new(format!("1 of {waiting}")).small().color(p.dim));
+                }
+                let raw = |ui: &mut Ui| {
+                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(details).monospace().small()).selectable(true));
+                    });
+                };
+                match help {
+                    Some((plain, _)) => {
+                        ui.label(plain);
+                        ui.add_space(4.0);
+                        egui::CollapsingHeader::new(RichText::new("What git said").small().color(p.dim)).show(ui, raw);
+                    }
+                    None => raw(ui),
+                }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    close = ui.button("Dismiss").clicked();
+                    close |= ui.button("Dismiss").clicked();
                     if ui.button("Copy").clicked() {
                         ctx.copy_text(e.clone());
                     }
+                    if let Some((_, f)) = help
+                        && ui.button(f.label()).clicked()
+                    {
+                        fix = Some(f);
+                    }
                 });
             });
+            if let Some(f) = fix {
+                close = true;
+                let repo = self.repos.get(self.active);
+                let branch = repo.and_then(|r| r.data.status.get().and_then(|s| s.branch.clone()));
+                out.push(match f {
+                    ErrorFix::SetUpstream => {
+                        let candidates = repo.map(|r| r.data.remote_branches().map(|b| b.name.clone()).collect()).unwrap_or_default();
+                        Action::Form(forms::set_upstream(branch.unwrap_or_default(), candidates))
+                    }
+                    ErrorFix::PullOptions => Action::Form(forms::pull_form()),
+                    ErrorFix::Stash => Action::Form(forms::stash_form(Vec::new())),
+                    ErrorFix::AddRemote => Action::Form(forms::add_remote()),
+                    ErrorFix::Credentials => Action::OpenTab(Tab::Credentials(Box::default())),
+                });
+            }
             if close {
                 self.errors.remove(0);
             }
@@ -1614,10 +2023,16 @@ impl GitemApp {
     fn poll_global(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
         if let Some(g) = &mut self.global_running {
             let mut done = None;
-            while let Ok(m) = g.rx.try_recv() {
-                match m {
-                    OpMsg::Line(l) => g.last_line = l,
-                    OpMsg::Done(r) => done = Some(r),
+            loop {
+                match g.rx.try_recv() {
+                    Ok(OpMsg::Line(l)) => g.last_line = l,
+                    Ok(OpMsg::Done(r)) => done = Some(r),
+                    Err(TryRecvError::Empty) => break,
+                    // Its thread is gone. Without this the spinner stays and nothing else starts.
+                    Err(TryRecvError::Disconnected) => {
+                        done.get_or_insert_with(|| Err("The operation stopped unexpectedly.".to_string()));
+                        break;
+                    }
                 }
             }
             if let Some(res) = done {
@@ -1682,37 +2097,64 @@ impl GitemApp {
             }
         }
 
+        // What a window that's come back to may have missed, as when a build ran meanwhile
+        // on a drive that sends no notifications.
+        let focused = ctx.input(|i| i.focused);
+        let regained = focused && !std::mem::replace(&mut self.window_focused, focused);
+        self.frame_no += 1;
+        let persist = self.persist;
+
         // Background upkeep for every open repository.
-        for (i, r) in self.repos.iter_mut().enumerate() {
+        for r in self.repos.iter_mut() {
             r.data.poll(&ctx, &r.repo);
+            r.data.persist = persist;
             let mut local = Vec::new();
             r.poll_ops(&ctx, &mut local);
             out.extend(local);
-            r.data.ops_busy = r.running.is_some() || !r.queue.is_empty();
-            let (w, g) = r.watcher.take();
-            if w || g {
+            r.start_quiet_work(&ctx, &self.settings);
+            let job_running = r.data.jobs.load(Ordering::Relaxed) > 0;
+            r.data.ops_busy = r.running.is_some() || !r.queue.is_empty() || job_running;
+            let seen = r.watcher.take();
+            let polling = r.watcher.failed.load(Ordering::Relaxed) && r.last_poll.elapsed() >= POLL_WITHOUT_WATCHER;
+            if polling {
+                r.last_poll = Instant::now();
+                ctx.request_repaint_after(POLL_WITHOUT_WATCHER);
+            }
+            if seen.work || seen.refs {
                 r.data.mark_changed();
             }
-            if g {
+            if seen.refs || polling || regained {
                 r.data.refresh(&ctx, &r.repo);
-            } else if w {
+            } else if seen.work || seen.ignored {
                 r.data.refresh_status(&ctx, &r.repo);
             }
-            let mins = self.settings.auto_fetch_minutes;
-            if mins > 0 && r.last_auto_fetch.elapsed() > Duration::from_secs(mins as u64 * 60) {
-                r.last_auto_fetch = Instant::now();
-                // Nobody asked for this one, so it waits for the repository to be decided
-                // about, and runs no hooks.
-                if !r.data.remotes().is_empty() && !r.repo.trust.restricted() {
-                    r.queue.push_back((ops::fetch(&ops::FetchOpts { all: true, prune: self.settings.prune_on_fetch, ..Default::default() }).background(), None));
-                }
+            // Frames only come with input, so nothing would look at these timers otherwise.
+            if let Some(wait) = r.fetch_wait(self.settings.auto_fetch_minutes) {
+                ctx.request_repaint_after(wait.max(Duration::from_secs(1)));
             }
-            let _ = i;
+            if let Some((_, t)) = r.data.waiting_on() {
+                ctx.request_repaint_after(Duration::from_secs(1).max(t / 60));
+            } else if r.data.status.busy() || r.data.refs.busy() {
+                ctx.request_repaint_after(crate::data::STILL_WAITING);
+            }
+            let root = r.repo.root.clone();
+            r.later.retain_mut(|t| {
+                if !t.poll() {
+                    return true;
+                }
+                if let Some(l) = t.value.take() {
+                    out.push(Action::ForRepo(root.clone(), Box::new(l.into_action())));
+                }
+                if let Some(e) = t.error.take() {
+                    out.push(Action::Error(e));
+                }
+                false
+            });
             r.background.retain_mut(|t| {
                 if !t.poll() {
                     return true;
                 }
-                if let Some(m) = t.value.take() {
+                if let Some(m) = t.value.take().filter(|m| !m.is_empty()) {
                     out.push(Action::Toast(m));
                 }
                 if let Some(e) = t.error.take() {
@@ -1724,6 +2166,12 @@ impl GitemApp {
         }
         self.poll_global(&ctx, &mut out);
         self.poll_orphans();
+        self.poll_opening(&ctx);
+        if self.folder_pick.poll()
+            && let Some(Some(d)) = self.folder_pick.value.take()
+        {
+            out.push(Action::OpenRepo(d));
+        }
         self.shortcuts(&ctx, &mut out);
 
         let bar_frame = egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::symmetric(8, 4));
@@ -1756,8 +2204,27 @@ impl GitemApp {
                 && s.op != RepoOp::None {
                     let frame = egui::Frame::new().fill(pal.banner_fill());
                     let s = s.clone();
-                    egui::Panel::top("op-banner").frame(frame).show(ui, |ui| Self::op_banner(ui, &s, &mut out, &pal));
+                    let ops_busy = data.ops_busy;
+                    egui::Panel::top("op-banner").frame(frame).show(ui, |ui| Self::op_banner(ui, &s, ops_busy, &mut out, &pal));
                 }
+            if let Some(problem) = data.read_failure().map(str::to_string).or_else(|| data.waiting_on().map(|(what, t)| format!("Still waiting: {what} has been running for {} s.", t.as_secs()))) {
+                let frame = egui::Frame::new().fill(pal.banner_fill()).inner_margin(egui::Margin::symmetric(8, 4));
+                let gone = !repo.root.exists();
+                egui::Panel::top("read-banner").frame(frame).show_separator_line(false).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let title = if gone { "This repository's folder is gone. It may have been moved, renamed or deleted." } else if data.read_failure().is_some() { "Git can't read this repository. What's showing may be out of date." } else { "Git isn't answering." };
+                        ui.colored_label(pal.warn, title);
+                        ui.add(egui::Label::new(RichText::new(problem.as_str()).small().monospace().color(pal.dim)).selectable(true));
+                        let label = if data.read_failure().is_some() { "Try again" } else { "Stop and try again" };
+                        if ui.small_button(label).clicked() {
+                            out.push(Action::Retry);
+                        }
+                        if ui.small_button("Copy").clicked() {
+                            out.push(Action::Copy(problem.clone()));
+                        }
+                    });
+                });
+            }
             if repo.trust.restricted() {
                 let frame = egui::Frame::new().fill(pal.banner_fill()).inner_margin(egui::Margin::symmetric(8, 4));
                 egui::Panel::top("trust-banner").frame(frame).show_separator_line(false).show(ui, |ui| {
@@ -1838,6 +2305,7 @@ impl eframe::App for GitemApp {
         #[cfg(windows)]
         if !std::mem::replace(&mut self.styled_window, true) {
             chrome::native_window_style(frame);
+            crate::widgets::set_dialog_parent(frame);
         }
         #[cfg(not(windows))]
         let _ = frame;

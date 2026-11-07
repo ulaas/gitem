@@ -19,6 +19,28 @@ pub fn watch_git_log(log: CommandLog) {
     let _ = GIT_LOG.set(log);
 }
 
+/// Shows the crash as a message, for a window that's about to vanish. Only on the UI thread,
+/// since a worker's panic doesn't end the app, and only in release builds, where there's no
+/// console: a debug build's tests make it panic on purpose, with nobody to press OK.
+#[cfg(windows)]
+fn tell_the_user(thread: &str, report: Option<&Path>) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW};
+    if thread != "main" || (cfg!(debug_assertions) && std::env::var_os("GITEM_CRASH_BOX").is_none()) {
+        return;
+    }
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let saved = report.map_or("A report couldn't be saved.".to_string(), |p| format!("A report was saved here, and nothing was sent anywhere:\n{}", p.display()));
+    let body = wide(&format!("gitem hit a bug and has to close.\n\nA commit message you were writing is saved, and comes back when you reopen this repository.\n\n{saved}"));
+    let title = wide("gitem has to close");
+    // Safe: both strings end in a zero and outlive the call, which blocks until it's answered.
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), body.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+    }
+}
+
+#[cfg(not(windows))]
+fn tell_the_user(_thread: &str, _report: Option<&Path>) {}
+
 /// Writes a report on any panic, then lets the default hook print its message too.
 pub fn install_hook() {
     let default_hook = std::panic::take_hook();
@@ -28,8 +50,9 @@ pub fn install_hook() {
         let commands: Vec<LogEntry> = GIT_LOG.get().and_then(|l| l.try_lock().ok()).map(|l| l.iter().rev().take(LAST_COMMANDS).rev().cloned().collect()).unwrap_or_default();
         let text = report(&thread, &info.to_string(), &Backtrace::force_capture().to_string(), &commands);
         // A failure here has nowhere to go, and must not cause a second panic.
-        let _ = write_report(&settings::config_dir(), util::now_ts(), &text);
+        let saved = write_report(&settings::config_dir(), util::now_ts(), &text).ok();
         default_hook(info);
+        tell_the_user(&thread, saved.as_deref());
     }));
 }
 

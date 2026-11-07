@@ -139,10 +139,9 @@ pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
         cx.copy(d.to_url());
     }
     if item(ui, "Copy as patch") {
-        match cx.repo.patch_text(&DiffSource::Commit(sha.clone())) {
-            Ok(p) => cx.copy(p),
-            Err(e) => cx.error(e.to_string()),
-        }
+        // 16 seconds on a commit of 100,000 files, which would freeze the window.
+        let (repo, sha) = (cx.repo.clone(), sha.clone());
+        cx.out.push(Action::Later(Box::new(move || repo.patch_text(&DiffSource::Commit(sha)).map(crate::action::Later::Copy).map_err(|e| e.to_string()))));
     }
     if let Some(f) = cx.forge() {
         let url = f.commit_url(&sha);
@@ -225,12 +224,21 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         if item(ui, "Auto-rebase current onto this with AI…") {
             let (n, r, cfg) = (name.clone(), cx.repo.clone(), cx.settings.ai.clone());
             let title = format!("Auto-rebase onto {name}");
+            let jobs = cx.data.jobs.clone();
             cx.form(forms::FormDialog::new(title.clone(), "Start").info("Rebases the current branch, sending each conflict to your AI provider. It stops and leaves the rebase to you if the model is unsure, and also once it has resolved a commit's conflicts, so you can read the result before anything is committed from it. You can undo it afterwards, unless your uncommitted changes are in a file the undo has to change: then it stops and changes nothing.").check("unattended", "Don't stop for review: commit the model's answers and carry on", false).on_submit(move |v| {
-                let (n, r, cfg) = (n.clone(), r.clone(), cfg.clone());
+                let (n, mut r, cfg) = (n.clone(), r.clone(), cfg.clone());
                 let review = !v.on("unattended");
+                // Its steps are minutes apart, so nothing else in the app knows one is running.
+                if jobs.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                    return Err("An auto-rebase is already running in this repository.".to_string());
+                }
+                let busy = crate::views::textview::JobGuard::new(jobs.clone());
+                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                r.git.cancel = Some(stop.clone());
                 let undo = crate::views::textview::UndoSlot::default();
                 let slot = undo.clone();
                 let job: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(move || {
+                    let _busy = busy;
                     let key = gitem_core::cred::ai_key(cfg.provider.key_name());
                     let done = gitem_core::autorebase::run(&r, &n, &cfg.custom_instructions, review, &|s, u| gitem_core::ai::complete(&cfg, key.as_deref(), s, u)).map_err(|e| e.to_string())?;
                     if let Ok(mut u) = slot.lock() {
@@ -238,7 +246,7 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
                     }
                     Ok(done.describe(&n))
                 });
-                Ok(vec![Action::OpenTab(Tab::Text(Box::new(crate::views::textview::TextView::with_undo(&title, job, undo))))])
+                Ok(vec![Action::OpenTab(Tab::Text(Box::new(crate::views::textview::TextView::with_undo(&title, job, undo).stoppable(stop))))])
             }));
         }
         if item(ui, "Check for conflicts with current") {
@@ -441,11 +449,12 @@ pub fn worktree_menu(ui: &mut Ui, cx: &mut Cx, w: &Worktree) {
             cx.out.push(Action::GraphFocus(b));
         }
     if !w.is_current && item(ui, "Copy my changes here") {
-        match cx.repo.patch_bytes(&DiffSource::WorkingVsHead) {
-            Ok(p) if p.iter().all(u8::is_ascii_whitespace) => cx.toast("There are no changes to copy."),
-            Ok(p) => cx.run(ops::apply_patch_in(&path, &p)),
-            Err(e) => cx.error(e.to_string()),
-        }
+        let (repo, path) = (cx.repo.clone(), path.clone());
+        cx.out.push(Action::Later(Box::new(move || match repo.patch_bytes(&DiffSource::WorkingVsHead) {
+            Ok(p) if p.iter().all(u8::is_ascii_whitespace) => Ok(crate::action::Later::Toast("There are no changes to copy.".to_string())),
+            Ok(p) => Ok(crate::action::Later::Run(ops::apply_patch_in(&path, &p))),
+            Err(e) => Err(e.to_string()),
+        })));
     }
     if !w.is_main {
         ui.separator();

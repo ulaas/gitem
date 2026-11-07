@@ -115,6 +115,15 @@ impl GitOp {
         self.background = true;
         self
     }
+    /// Nobody is there to answer. Without this, a sign-in that's needed pops up a window every
+    /// few minutes for a fetch nobody asked for: failing is the right thing for it to do.
+    pub fn unattended(mut self) -> Self {
+        for s in &mut self.steps {
+            // Empty and not unset: git would go on to `SSH_ASKPASS`, which is also gitem's window.
+            s.env.extend([("GIT_ASKPASS", ""), ("SSH_ASKPASS_REQUIRE", "never"), ("GCM_INTERACTIVE", "never")].map(|(k, v)| (k.to_string(), v.to_string())));
+        }
+        self
+    }
     fn own_config(mut self) -> Self {
         self.own_config = true;
         self
@@ -767,6 +776,12 @@ pub struct FetchOpts {
     pub all: bool,
     pub prune: bool,
     pub tags: bool,
+}
+
+/// Saves what a read of the working tree would otherwise work out again each time. Reads
+/// can't, since they don't take the index lock.
+pub fn refresh_index() -> GitOp {
+    GitOp::new("Refresh index").step(&["update-index", "-q", "--refresh"]).allow_fail()
 }
 
 pub fn fetch(o: &FetchOpts) -> GitOp {

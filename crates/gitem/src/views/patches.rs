@@ -24,6 +24,9 @@ pub struct PatchesView {
     title: String,
     description: String,
     share: Task<(String, String)>,
+    /// The patch being read from git, for Save: a big one takes as long as `git show` does.
+    saving: Task<Vec<u8>>,
+    listing: Task<Vec<PatchMeta>>,
     /// Delete was clicked and awaits a yes: there's no getting a patch back.
     confirm_delete: bool,
 }
@@ -75,7 +78,42 @@ impl PatchesView {
         }
         if !self.loaded {
             self.loaded = true;
-            self.list = patches::list();
+            self.listing.spawn(ui.ctx(), || -> Result<Vec<PatchMeta>, String> { Ok(patches::list()) });
+        }
+        if self.listing.poll()
+            && let Some(list) = self.listing.value.take()
+        {
+            self.list = list;
+        }
+        if self.saving.poll() {
+            if let Some(e) = self.saving.error.take() {
+                cx.error(e);
+            }
+            match self.saving.value.take() {
+                Some(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => cx.error("That selection has no changes to save."),
+                Some(bytes) => {
+                    let now = util::now_ts();
+                    let meta = PatchMeta {
+                        id: format!("{now}-{}", std::process::id()),
+                        title: self.title.trim().to_string(),
+                        description: self.description.trim().to_string(),
+                        repo: cx.repo.name(),
+                        created: now,
+                        base: cx.status().map(|s| s.head_sha.clone()).unwrap_or_default(),
+                        gist_url: String::new(),
+                    };
+                    match patches::save(&meta, &bytes) {
+                        Ok(()) => {
+                            self.select(&meta.id);
+                            self.create_src = None;
+                            self.description.clear();
+                            self.loaded = false;
+                        }
+                        Err(e) => cx.error(e.to_string()),
+                    }
+                }
+                None => {}
+            }
         }
         ui.horizontal(|ui| {
             if ui.button("New from staged").clicked() {
@@ -90,7 +128,7 @@ impl PatchesView {
                 cx.form(forms::apply_patch_form());
             }
             if self.share.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         ui.separator();
@@ -101,32 +139,12 @@ impl PatchesView {
                 ui.add(crate::widgets::input(&mut self.title).hint_text("Title").desired_width(f32::INFINITY));
                 ui.add(crate::widgets::text_area(&mut self.description).hint_text("Description").desired_rows(2).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!self.title.trim().is_empty(), egui::Button::new("Save")).clicked() {
-                        match cx.repo.patch_bytes(&src) {
-                            Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => cx.error("That selection has no changes to save."),
-                            Ok(bytes) => {
-                                let now = util::now_ts();
-                                let meta = PatchMeta {
-                                    id: format!("{now}-{}", std::process::id()),
-                                    title: self.title.trim().to_string(),
-                                    description: self.description.trim().to_string(),
-                                    repo: cx.repo.name(),
-                                    created: now,
-                                    base: cx.status().map(|s| s.head_sha.clone()).unwrap_or_default(),
-                                    gist_url: String::new(),
-                                };
-                                match patches::save(&meta, &bytes) {
-                                    Ok(()) => {
-                                        self.select(&meta.id);
-                                        self.create_src = None;
-                                        self.description.clear();
-                                        self.loaded = false;
-                                    }
-                                    Err(e) => cx.error(e.to_string()),
-                                }
-                            }
-                            Err(e) => cx.error(e.to_string()),
-                        }
+                    if ui.add_enabled(!self.title.trim().is_empty() && !self.saving.busy(), egui::Button::new("Save")).clicked() {
+                        let src = src.clone();
+                        self.saving.spawn_git(ui.ctx(), cx.repo, move |r| r.patch_bytes(&src));
+                    }
+                    if self.saving.busy() {
+                        ui.add(spinner(14.0));
                     }
                     if ui.button("Cancel").clicked() {
                         self.create_src = None;

@@ -63,7 +63,7 @@ fn steps(h: &mut Harness<GitemApp>, n: usize) {
 
 fn settled(h: &mut Harness<GitemApp>) {
     let t = Instant::now();
-    while gitem::task::running(&h.ctx) > 0 || !h.state().ops_idle() {
+    while gitem::task::running(&h.ctx) > 0 || !h.state().ops_idle() || h.state().repos.iter().any(|r| r.data.status.busy() || r.data.refs.busy()) {
         h.step();
         assert!(t.elapsed() < Duration::from_secs(180), "background work never finished");
         std::thread::sleep(Duration::from_millis(5));
@@ -76,7 +76,7 @@ fn open_repos(h: &Harness<GitemApp>) -> Vec<String> {
 }
 
 fn error_dialog_showing(h: &Harness<GitemApp>) -> bool {
-    h.query_by_label("Something went wrong").is_some()
+    !h.state().errors_showing().is_empty()
 }
 
 fn saved() -> Settings {
@@ -428,4 +428,38 @@ fn a_copy_exiting_keeps_a_setting_another_copy_changed() {
     first.state_mut().on_exit();
     assert_eq!(saved().language, "tr", "the other copy's change is gone");
     assert_eq!(first.state().settings.language, "tr", "and this copy now has it too");
+}
+
+
+/// AS-3: nothing in the window can be saved after a panic, or a power cut, so it's written
+/// while it's being typed.
+#[test]
+fn a_commit_message_being_written_survives_a_crash() {
+    let _t = clean_slate();
+    let d = tempfile::tempdir().unwrap();
+    let root = repo(d.path(), "r");
+    let mut ui = run_app(std::slice::from_ref(&root));
+    ui.state_mut().persist = true;
+    settled(&mut ui);
+    ui.state_mut().repos[0].open_tab(gitem::views::Tab::changes());
+    steps(&mut ui, 3);
+    let ctx = ui.ctx.clone();
+    ui.state_mut().apply_action(&ctx, gitem::action::Action::SetCommitMessage("half written".into()));
+    let t = Instant::now();
+    let drafts = Settings::path().parent().unwrap().join("drafts");
+    while std::fs::read_dir(&drafts).map_or(true, |mut e| e.next().is_none()) {
+        ui.step();
+        assert!(t.elapsed() < Duration::from_secs(60), "no draft written");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The first window is gone without saying goodbye.
+    std::mem::forget(ui);
+    let mut next = run_app(std::slice::from_ref(&root));
+    next.state_mut().persist = true;
+    settled(&mut next);
+    next.state_mut().repos[0].open_tab(gitem::views::Tab::changes());
+    steps(&mut next, 3);
+    let text = next.get_by_role(egui::accesskit::Role::MultilineTextInput).value().unwrap_or_default().to_string();
+    assert_eq!(text, "half written");
+    let _ = std::fs::remove_dir_all(&drafts);
 }

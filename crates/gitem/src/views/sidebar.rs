@@ -7,6 +7,7 @@ use gitem_core::model::*;
 use gitem_core::ops;
 
 use crate::action::Cx;
+use crate::data::Refs;
 use crate::forms;
 use crate::menus;
 use crate::task::Task;
@@ -24,13 +25,32 @@ pub struct Sidebar {
     contributors_shown: usize,
     /// Commits a branch is missing from its upstream, and the reverse, by branch.
     tracking: HashMap<String, Tracking>,
-    /// Branches opened or closed by hand. Otherwise, ones with incoming commits start open.
+    /// Branches opened or closed by hand. Otherwise, only the current branch starts open if
+    /// something is incoming: each open branch runs git for its commits.
     expanded: HashMap<String, bool>,
+    /// Bumped when `expanded` changes.
+    expanded_gen: u64,
+    lists: Option<Lists>,
+}
+
+/// What's listed, by position in the refs. Worked out when the refs, the filter or what's
+/// open changes, not per frame: this is what thousands of refs cost.
+struct Lists {
+    /// What the positions below are positions in. Kept, and compared by identity, since not
+    /// every change to it bumps `refs_gen`: adding a remote doesn't.
+    refs: std::sync::Arc<Refs>,
+    key: (String, u64),
+    /// Local branches that match, and which of those positions are open.
+    branches: Vec<usize>,
+    open_branches: Vec<usize>,
+    /// For each remote, the same.
+    remotes: Vec<(Vec<usize>, Vec<usize>)>,
+    tags: Vec<usize>,
 }
 
 impl Default for Sidebar {
     fn default() -> Self {
-        Self { filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new() }
+        Self { filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None }
     }
 }
 
@@ -79,6 +99,24 @@ impl Sidebar {
         ui.add_space(2.0);
         ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter branches, tags, and more…").desired_width(f32::INFINITY));
         ui.add_space(2.0);
+        // Nothing below means anything until git has answered: a list that's empty because
+        // nobody knows yet mustn't look like a repository with no branches.
+        if !cx.data.refs_known() {
+            match &cx.data.refs.error {
+                Some(e) => {
+                    error_box(ui, &format!("Git couldn't read the branches and tags:\n{e}"), &p);
+                    if ui.button("Try again").clicked() {
+                        cx.out.push(crate::action::Action::Retry);
+                    }
+                }
+                None => spinner_row(ui, "Reading branches and tags…", &p),
+            }
+            return;
+        }
+        for problem in cx.data.refs.get().map(|r| r.problems.as_slice()).unwrap_or_default() {
+            error_box(ui, problem, &p);
+        }
+        self.update_lists(cx);
         egui::ScrollArea::vertical().id_salt("sidebar").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             self.current_commits(ui, cx);
@@ -94,6 +132,52 @@ impl Sidebar {
 
     fn matches(&self, s: &str) -> bool {
         self.filter.is_empty() || s.to_lowercase().contains(&self.filter.to_lowercase())
+    }
+
+    fn is_open(&self, b: &Branch) -> bool {
+        self.expanded.get(&b.name).copied().unwrap_or(b.is_current && !b.upstream_gone && b.upstream.is_some() && b.behind > 0)
+    }
+
+    fn update_lists(&mut self, cx: &Cx) {
+        let Some(refs) = cx.data.refs.value.clone() else { return };
+        let key = (self.filter.clone(), self.expanded_gen);
+        if self.lists.as_ref().is_some_and(|l| l.key == key && std::sync::Arc::ptr_eq(&l.refs, &refs)) {
+            return;
+        }
+        let needle = self.filter.to_lowercase();
+        let hit = |s: &str| needle.is_empty() || s.to_lowercase().contains(&needle);
+        let opened = |of: &[usize]| -> Vec<usize> { of.iter().enumerate().filter(|(_, i)| self.is_open(&refs.branches[**i])).map(|(at, _)| at).collect() };
+        let branches: Vec<usize> = refs.branches.iter().enumerate().filter(|(_, b)| !b.is_remote && hit(&b.name)).map(|(i, _)| i).collect();
+        let open_branches = opened(&branches);
+        let remotes = refs.remotes.iter().map(|r| {
+            let prefix = format!("{}/", r.name);
+            let list: Vec<usize> = refs.branches.iter().enumerate().filter(|(_, b)| b.is_remote && b.name.starts_with(&prefix) && hit(&b.name)).map(|(i, _)| i).collect();
+            let open = opened(&list);
+            (list, open)
+        }).collect();
+        let tags = refs.tags.iter().enumerate().filter(|(_, t)| hit(&t.name)).map(|(i, _)| i).collect();
+        self.lists = Some(Lists { refs, key, branches, open_branches, remotes, tags });
+    }
+
+    /// The listed branches. Closed ones are all one height, so only those on screen are drawn.
+    /// An open one is as tall as what it holds, so those are always drawn.
+    fn branch_list(&mut self, ui: &mut Ui, cx: &mut Cx, refs: &Refs, list: &[usize], open: &[usize], strip: &str) {
+        let mut from = 0;
+        let one = |this: &mut Self, ui: &mut Ui, cx: &mut Cx, at: usize| {
+            let b = &refs.branches[list[at]];
+            this.branch_row(ui, cx, b, b.name.strip_prefix(strip).unwrap_or(&b.name));
+        };
+        for &at in open.iter().chain(std::iter::once(&list.len())) {
+            visible_rows(ui, ROW, at - from, |ui, range| {
+                for i in range {
+                    one(self, ui, cx, from + i);
+                }
+            });
+            if at < list.len() {
+                one(self, ui, cx, at);
+            }
+            from = at + 1;
+        }
     }
 
     fn current_commits(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -120,7 +204,7 @@ impl Sidebar {
                     }
                     resp.context_menu(|ui| menus::commit_menu(ui, cx, c));
                 }
-                if list.len() >= self.commits_limit && load_more_row(ui, COMMITS_PAGE, None, self.commits.busy(), &p) {
+                if list.len() >= self.commits_limit && load_more_row(ui, COMMITS_PAGE, None, self.commits.busy()) {
                     self.commits_limit += COMMITS_PAGE;
                     self.commits_gen = None;
                 }
@@ -131,12 +215,12 @@ impl Sidebar {
 
     fn branches(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        let list: Vec<Branch> = cx.data.local_branches().filter(|b| self.matches(&b.name)).cloned().collect();
-        let action = section(ui, "sb-branches", crate::chrome::icon::GIT_BRANCH, p.series[0], "Branches", &list.len().to_string(), true, &[(crate::chrome::icon::PLUS, "New branch")], &p, |ui| {
-            for b in &list {
-                self.branch_row(ui, cx, b, &b.name);
-            }
+        let Some(lists) = self.lists.take() else { return };
+        let refs = lists.refs.clone();
+        let action = section(ui, "sb-branches", crate::chrome::icon::GIT_BRANCH, p.series[0], "Branches", &lists.branches.len().to_string(), true, &[(crate::chrome::icon::PLUS, "New branch")], &p, |ui| {
+            self.branch_list(ui, cx, &refs, &lists.branches, &lists.open_branches, "");
         });
+        self.lists = Some(lists);
         if action.is_some() {
             cx.form(forms::new_branch(None));
         }
@@ -148,7 +232,7 @@ impl Sidebar {
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
         let text_color = if b.is_current { p.text } else { p.dim };
         // Any branch opens to its commits. Ones with something incoming start open.
-        let open = self.expanded.get(&b.name).copied().unwrap_or(!b.is_remote && !b.upstream_gone && b.upstream.is_some() && b.behind > 0);
+        let open = self.is_open(b);
         {
             let hit = egui::Rect::from_min_size(rect.min, vec2(16.0, ROW));
             let caret = ui.interact(hit, resp.id.with("expand"), Sense::click());
@@ -158,6 +242,7 @@ impl Sidebar {
             ui.painter().text(hit.center(), egui::Align2::CENTER_CENTER, glyph, prop(11.0), if caret.hovered() { p.text } else { p.faint });
             if caret.clicked() {
                 self.expanded.insert(b.name.clone(), !open);
+                self.expanded_gen += 1;
             }
         }
         ui.painter().circle(pos2(rect.left() + 21.0, rect.center().y), 3.5, if b.is_current { p.accent } else { p.panel }, egui::Stroke::new(1.0, if b.is_current { p.accent } else { p.faint }), );
@@ -264,14 +349,14 @@ impl Sidebar {
 
     fn remotes(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        let remotes = cx.data.remotes().to_vec();
-        let action = section(ui, "sb-remotes", crate::chrome::icon::CLOUD, p.series[6], "Remotes", &remotes.len().to_string(), false, &[(crate::chrome::icon::PLUS, "Add remote")], &p, |ui| {
-            for r in &remotes {
+        let Some(lists) = self.lists.take() else { return };
+        let refs = lists.refs.clone();
+        let action = section(ui, "sb-remotes", crate::chrome::icon::CLOUD, p.series[6], "Remotes", &refs.remotes.len().to_string(), false, &[(crate::chrome::icon::PLUS, "Add remote")], &p, |ui| {
+            for (n, r) in refs.remotes.iter().enumerate() {
                 let header = egui::CollapsingHeader::new(RichText::new(&r.name).size(12.5)).id_salt(("remote", &r.name)).show(ui, |ui| {
                     let prefix = format!("{}/", r.name);
-                    let list: Vec<Branch> = cx.data.remote_branches().filter(|b| b.name.starts_with(&prefix) && self.matches(&b.name)).cloned().collect();
-                    for b in &list {
-                        self.branch_row(ui, cx, b, b.name.strip_prefix(&prefix).unwrap_or(&b.name));
+                    if let Some((list, open)) = lists.remotes.get(n) {
+                        self.branch_list(ui, cx, &refs, list, open, &prefix);
                     }
                 });
                 header.header_response.on_hover_text(gitem_core::util::mask_url_credentials(&r.fetch_url)).context_menu(|ui| {
@@ -306,6 +391,7 @@ impl Sidebar {
                 });
             }
         });
+        self.lists = Some(lists);
         if action.is_some() {
             cx.form(forms::add_remote());
         }
@@ -313,17 +399,21 @@ impl Sidebar {
 
     fn tags(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        let list: Vec<Tag> = cx.data.tags().iter().filter(|t| self.matches(&t.name)).cloned().collect();
+        let Some(lists) = self.lists.as_ref() else { return };
+        let (refs, list) = (&lists.refs, &lists.tags);
         let action = section(ui, "sb-tags", crate::chrome::icon::TAG, p.series[3], "Tags", &list.len().to_string(), false, &[(crate::chrome::icon::PLUS, "New tag")], &p, |ui| {
-            for t in &list {
-                let (rect, resp) = row(ui, ROW, false, &p);
-                paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &format!("◆ {}", t.name), prop(12.5), p.dim);
-                let resp = if t.subject.is_empty() { resp } else { resp.on_hover_text(&t.subject) };
-                if resp.clicked() {
-                    cx.inspect(&t.sha);
+            visible_rows(ui, ROW, list.len(), |ui, range| {
+                for i in &list[range] {
+                    let t = &refs.tags[*i];
+                    let (rect, resp) = row(ui, ROW, false, &p);
+                    paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &format!("◆ {}", t.name), prop(12.5), p.dim);
+                    let resp = if t.subject.is_empty() { resp } else { resp.on_hover_text(&t.subject) };
+                    if resp.clicked() {
+                        cx.inspect(&t.sha);
+                    }
+                    resp.context_menu(|ui| menus::tag_menu(ui, cx, t));
                 }
-                resp.context_menu(|ui| menus::tag_menu(ui, cx, t));
-            }
+            });
         });
         if action.is_some() {
             cx.form(forms::new_tag(None));
@@ -378,10 +468,9 @@ impl Sidebar {
     fn contributor_list(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         section(ui, "sb-contrib", crate::chrome::icon::USERS_THREE, p.series[2], "Contributors", "", false, &[], &p, |ui| {
-            if self.contributors_gen != Some(cx.data.refs_gen) {
+            if self.contributors_gen != Some(cx.data.refs_gen) && !self.contributors.busy() {
                 self.contributors_gen = Some(cx.data.refs_gen);
-                let r = cx.repo.clone();
-                self.contributors.spawn(ui.ctx(), move || r.contributors("HEAD", false));
+                self.contributors.spawn_git(ui.ctx(), cx.repo, |r| r.people("HEAD"));
             }
             if let Some(list) = self.contributors.value.take() {
                 let matching: Vec<&Contributor> = list.iter().filter(|c| self.matches(&c.name)).collect();
@@ -395,7 +484,7 @@ impl Sidebar {
                     }
                 }
                 let left = matching.len().saturating_sub(self.contributors_shown);
-                if left > 0 && load_more_row(ui, CONTRIBUTORS_PAGE, Some(left), false, &p) {
+                if left > 0 && load_more_row(ui, CONTRIBUTORS_PAGE, Some(left), false) {
                     self.contributors_shown += CONTRIBUTORS_PAGE;
                 }
                 self.contributors.value = Some(list);
@@ -472,7 +561,7 @@ fn listed_commits(ui: &mut Ui, cx: &mut Cx, commits: Option<&Vec<Commit>>, total
     }
     let left = total.map(|t| t.saturating_sub(list.len()));
     let more = left.map_or(list.len() >= limit, |l| l > 0);
-    more && load_more_row(ui, step, left, busy, &p)
+    more && load_more_row(ui, step, left, busy)
 }
 
 /// A collapsible section: a tall header that lights up on hover, with icon buttons on

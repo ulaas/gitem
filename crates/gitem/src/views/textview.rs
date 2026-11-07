@@ -12,20 +12,55 @@ type Job = Box<dyn FnOnce() -> Result<String, String> + Send>;
 /// Filled in by a job that can be undone.
 pub type UndoSlot = std::sync::Arc<std::sync::Mutex<Option<gitem_core::ops::GitOp>>>;
 
+/// Counts a long job as running in its repository, until its thread ends in any way.
+pub struct JobGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl JobGuard {
+    pub fn new(jobs: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        jobs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(jobs)
+    }
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub struct TextView {
     title: String,
     job: Option<Job>,
     text: Task<String>,
     undo: Option<UndoSlot>,
+    /// Stops the job's git commands. It stops at the next one, as an AI request can't be
+    /// called back, so what it leaves is a rebase paused where the banner can pick it up.
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Drop for TextView {
+    fn drop(&mut self) {
+        if let Some(s) = &self.stop {
+            s.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 impl TextView {
     pub fn new(title: &str, job: Job) -> Self {
-        Self { title: title.to_string(), job: Some(job), text: Task::default(), undo: None }
+        Self { title: title.to_string(), job: Some(job), text: Task::default(), undo: None, stop: None }
     }
 
     pub fn with_undo(title: &str, job: Job, undo: UndoSlot) -> Self {
-        Self { undo: Some(undo), ..Self::new(title, job) }
+        let mut view = Self::new(title, job);
+        view.undo = Some(undo);
+        view
+    }
+
+    /// Adds a Stop button, and closing the tab stops it too.
+    pub fn stoppable(mut self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
     }
 
     pub fn key(&self) -> String {
@@ -50,6 +85,11 @@ impl TextView {
         }
         let Some(t) = self.text.get().cloned() else {
             spinner_row(ui, "Asking your AI provider...", &p);
+            if let Some(s) = &self.stop
+                && ui.small_button("Stop").on_hover_text("Stops before the next git command. A rebase under way stays paused, with the banner to continue or abort it.").clicked()
+            {
+                s.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             return;
         };
         ui.horizontal(|ui| {

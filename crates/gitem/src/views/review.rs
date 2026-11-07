@@ -132,7 +132,7 @@ impl ReviewView {
                 });
             }
             if busy {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
             if ui.button("Orient").on_hover_text("Ask AI for a sensible reading order").clicked() {
                 let src = self.source();

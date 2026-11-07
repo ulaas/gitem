@@ -1,6 +1,7 @@
 //! Read-only repository queries. Mutations live in [`crate::ops`].
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::diff::{FileDiff, parse_unified};
 use crate::model::*;
@@ -16,6 +17,9 @@ pub struct Repo {
     pub common_dir: PathBuf,
     /// What its config can run, and whether that's allowed. See [`crate::trust`].
     pub trust: crate::trust::RepoTrust,
+    /// Remote names as last read by [`Repo::remotes`], shared by clones. Every `log` needs
+    /// them to label its refs, and asking git each time doubled the processes it took.
+    remote_names: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 /// A revision as a command-line argument. Anything starting with a dash would be read as
@@ -133,12 +137,12 @@ impl Repo {
         if trust.restricted() {
             git.neutral = trust.neutral.clone();
         }
-        Ok(Self { git, root, git_dir, common_dir, trust })
+        Ok(Self { git, root, git_dir, common_dir, trust, remote_names: Arc::default() })
     }
 
     /// For commands that need no repository, such as `diff --no-index` outside any.
     pub fn outside_any(git: GitExe, root: PathBuf, git_dir: PathBuf) -> Self {
-        Self { git, root, common_dir: git_dir.clone(), git_dir, trust: Default::default() }
+        Self { git, root, common_dir: git_dir.clone(), git_dir, trust: Default::default(), remote_names: Arc::default() }
     }
 
     /// The user has answered. The answer is kept, so it isn't asked again until the list changes.
@@ -349,7 +353,10 @@ impl Repo {
             a.push(format!("-L{s},{e}:{p}"));
             a.push("-s".into());
         }
-        a.push("--date-order".into());
+        // It walks the whole history before printing anything, so only for those who need it.
+        if q.date_order {
+            a.push("--date-order".into());
+        }
         for r in &q.revs {
             a.push(rev_arg(r)?.to_string());
         }
@@ -378,6 +385,9 @@ impl Repo {
     }
 
     fn remote_names(&self) -> Vec<String> {
+        if let Some(known) = self.remote_names.lock().ok().and_then(|n| n.clone()) {
+            return known;
+        }
         self.run(&["remote"]).map(|o| o.text().lines().map(String::from).collect()).unwrap_or_default()
     }
 
@@ -437,7 +447,11 @@ impl Repo {
     }
 
     pub fn remotes(&self) -> Result<Vec<Remote>> {
-        Ok(parse::parse_remotes(&self.run(&["remote", "-v"])?.text()))
+        let remotes = parse::parse_remotes(&self.run(&["remote", "-v"])?.text());
+        if let Ok(mut names) = self.remote_names.lock() {
+            *names = Some(remotes.iter().map(|r| r.name.clone()).collect());
+        }
+        Ok(remotes)
     }
 
     pub fn stashes(&self) -> Result<Vec<Stash>> {
@@ -454,6 +468,10 @@ impl Repo {
     }
 
     pub fn submodules(&self) -> Result<Vec<Submodule>> {
+        // A shell script running seven git commands, for an answer that's almost always none.
+        if !self.root.join(".gitmodules").exists() {
+            return Ok(Vec::new());
+        }
         let o = self.git.run_raw(Some(&self.root), &["submodule", "status"])?;
         if !o.ok() {
             return Ok(Vec::new());
@@ -504,21 +522,28 @@ impl Repo {
         Ok(std::fs::read(self.root.join(path))?)
     }
 
+    /// The files git tracks, at a revision or in the index. Not untracked ones, which take
+    /// ten times as long to look for here and which `status` lists already.
+    /// Whether a file on disk looks binary, from its first few kilobytes.
+    pub fn worktree_file_is_binary(&self, path: &str) -> bool {
+        use std::io::Read;
+        let mut head = [0u8; 8000];
+        std::fs::File::open(self.root.join(path)).and_then(|mut f| f.read(&mut head)).is_ok_and(|n| crate::util::is_binary(&head[..n]))
+    }
+
     pub fn tracked_files(&self, rev: Option<&str>) -> Result<Vec<String>> {
         let o = match rev {
             Some(r) => self.run(&["ls-tree", "-r", "--name-only", "-z", rev_arg(r)?])?,
-            None => self.run(&["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?,
+            None => self.run(&["ls-files", "-z", "--cached", "--deduplicate"])?,
         };
         Ok(o.text().split('\0').filter(|s| !s.is_empty()).map(String::from).collect())
     }
 
     pub fn commit_files(&self, sha: &str) -> Result<Vec<FileChange>> {
         let sha = rev_arg(sha)?;
-        let ns = self.run(&["show", "--format=", "-M", "-m", "--first-parent", "--name-status", "-z", sha])?;
-        let mut files = parse::parse_name_status(&ns.text());
-        let st = self.run(&["show", "--format=", "-M", "-m", "--first-parent", "--numstat", "-z", sha])?;
-        merge_numstat(&mut files, &st.text());
-        Ok(files)
+        // One command for both, since each would detect renames all over again.
+        let o = self.run(&["show", "--format=", "-M", "-m", "--first-parent", "--raw", "--numstat", "-z", sha])?;
+        Ok(parse::parse_raw_numstat(&o.text()))
     }
 
     pub fn compare_files(&self, a: &str, b: &str, three_dot: bool) -> Result<Vec<FileChange>> {
@@ -803,7 +828,7 @@ impl Repo {
         let items = vec![
             HealthItem { label: "Commit-graph cache".into(), detail: "Speeds up history walks and the commit graph.".into(), config: vec![("core.commitGraph".into(), "true".into()), ("fetch.writeCommitGraph".into(), "true".into())], enabled: is_on("fetch.writeCommitGraph") },
             HealthItem { label: "Untracked cache".into(), detail: "Speeds up status by remembering untracked folders.".into(), config: vec![("core.untrackedCache".into(), "true".into())], enabled: is_on("core.untrackedCache") },
-            HealthItem { label: "File system monitor".into(), detail: "Lets status skip scanning files that didn't change.".into(), config: vec![("core.fsmonitor".into(), "true".into())], enabled: is_on("core.fsmonitor") },
+            HealthItem { label: "File system monitor".into(), detail: "Lets status skip scanning files that didn't change, in your terminal and editor. gitem turns it off for its own reads, since it starts a program named by the repository's config.".into(), config: vec![("core.fsmonitor".into(), "true".into())], enabled: is_on("core.fsmonitor") },
             HealthItem { label: "Large-repository index".into(), detail: "Index format for repositories with many files.".into(), config: vec![("feature.manyFiles".into(), "true".into())], enabled: is_on("feature.manyFiles") },
             HealthItem { label: "Sparse index".into(), detail: "Smaller index when using sparse checkout.".into(), config: vec![("index.sparse".into(), "true".into())], enabled: is_on("index.sparse") },
             HealthItem { label: "Scheduled maintenance".into(), detail: "Git keeps this repository optimized in the background.".into(), config: vec![("maintenance.auto".into(), "true".into()), ("maintenance.strategy".into(), "incremental".into())], enabled: self.config_get("maintenance.strategy").is_some() },
@@ -994,6 +1019,13 @@ impl Repo {
         Ok(self.run(&["count-objects", "-vH"])?.text())
     }
 
+    /// The operation in progress, read from `.git` without running anything.
+    pub fn current_op(&self) -> RepoOp {
+        let mut st = RepoStatus::default();
+        self.fill_op(&mut st);
+        st.op
+    }
+
     pub fn ignore_path(&self) -> PathBuf {
         self.root.join(".gitignore")
     }
@@ -1029,16 +1061,42 @@ impl Repo {
 
     /// Default base branch: origin/HEAD, else main/master/develop if present.
     pub fn default_branch(&self) -> Option<String> {
-        if let Ok(o) = self.git.run_raw(Some(&self.root), &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-            && o.ok() {
-                return Some(o.text().trim().to_string());
-            }
+        if let Some(b) = self.origin_head() {
+            return Some(b);
+        }
         for c in ["main", "master", "develop", "trunk"] {
             if self.git.run_raw(Some(&self.root), &["rev-parse", "--verify", "--quiet", c]).map(|o| o.ok()).unwrap_or(false) {
                 return Some(c.to_string());
             }
         }
         None
+    }
+
+    fn origin_head(&self) -> Option<String> {
+        self.git.run_raw(Some(&self.root), &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).ok().filter(|o| o.ok()).map(|o| o.text().trim().to_string())
+    }
+
+    /// The same answer, given the branches already read, so without asking git about each name.
+    pub fn default_branch_among(&self, branches: &[Branch]) -> Option<String> {
+        self.origin_head().or_else(|| ["main", "master", "develop", "trunk"].iter().find(|c| branches.iter().any(|b| !b.is_remote && b.name == **c)).map(|c| c.to_string()))
+    }
+
+    /// What `log` costs for a list of people, for those who don't need dates or line counts.
+    pub fn people(&self, rev: &str) -> Result<Vec<Contributor>> {
+        let raw = self.git.run_raw(Some(&self.root), &["shortlog", "-sne", rev_arg(rev)?])?;
+        if !raw.ok() {
+            return Ok(Vec::new());
+        }
+        let me = self.config_get("user.email").unwrap_or_default().to_lowercase();
+        let mut map: HashMap<String, Contributor> = HashMap::new();
+        for (commits, name, email) in parse::parse_shortlog(&raw.text()) {
+            let key = email.to_lowercase();
+            let e = map.entry(key.clone()).or_insert_with(|| Contributor { name, email, is_you: key == me, ..Default::default() });
+            e.commits += commits;
+        }
+        let mut v: Vec<Contributor> = map.into_values().collect();
+        v.sort_by(|a, b| b.commits.cmp(&a.commits).then_with(|| a.name.cmp(&b.name)));
+        Ok(v)
     }
 
     pub fn is_ancestor(&self, a: &str, b: &str) -> bool {

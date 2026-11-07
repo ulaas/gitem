@@ -188,7 +188,7 @@ fn changes_frames(tree: bool) {
         let mut h = harness_with(&f, f.git.clone(), gitem_core::settings::Settings { changes_tree: tree, ..Default::default() });
         settle(&mut h);
         h.state_mut().repos[0].open_tab(Tab::changes());
-        h.state_mut().repos[0].data.status.value = Some(untracked(n));
+        h.state_mut().repos[0].data.status.value = Some(untracked(n).into());
         h.state_mut().repos[0].data.mark_changed();
         h.step();
         h.step();
@@ -270,6 +270,26 @@ fn pf2_long_lines() {
     }
 }
 
+/// A screen of long lines, which is what per-line caching is for.
+#[test]
+#[ignore = "measurement"]
+fn pf2_many_long_lines() {
+    let f = Fx::new();
+    let line = minified(50_000);
+    let text: String = (0..200).map(|i| format!("{i}{line}\n")).collect();
+    f.write("min.js", "x\n");
+    f.commit("base");
+    f.write("min.js", &text);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("min.js", None, None));
+    wait_quiet(&mut h);
+    println!("PF-2 File view, a screen of 50 KB lines: {:.2} ms per frame", frame_ms(&mut h, 30));
+    h.state_mut().repos[0].open_tab(Tab::diff(DiffSource::Unstaged, Some("min.js".into())));
+    wait_quiet(&mut h);
+    println!("PF-2 Diff view, a screen of 50 KB lines: {:.2} ms per frame", frame_ms(&mut h, 30));
+}
+
 #[test]
 #[ignore = "measurement"]
 fn pf10_big_commit() {
@@ -310,6 +330,7 @@ fn pf13_pf20_log() {
     repo.log(&q).unwrap();
     println!("PF-20 one log: {}", summary(&f.git, before));
     println!("PF-32 contributors, 60,000 commits: {:.0} ms", best_ms(|| drop(repo.contributors("HEAD", false).unwrap())));
+    println!("PF-32 people, as the sidebar now reads them: {:.0} ms", best_ms(|| drop(repo.people("HEAD").unwrap())));
 }
 
 /// A checked-out tree with many tracked files in many folders, and no untracked ones.
@@ -540,6 +561,26 @@ fn pf4_selection() {
     println!("PF-4 storm when it has drained: {}", summary(&g, from));
 }
 
+/// AS-11, with a git that takes 4 seconds to answer the first question, standing in for an
+/// unreachable share: nothing here may touch a network.
+#[test]
+#[ignore = "measurement"]
+fn as11_slow_session_repo() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit("base");
+    let d = tempfile::tempdir().unwrap();
+    let g = slow_git("rev-parse", 4000, &d.path().join("slow.log"));
+    let s = gitem_core::settings::Settings { git_path: g.path.to_string_lossy().into_owned(), open_repos: vec![f.root.to_string_lossy().replace('\\', "/")], ..Default::default() };
+    s.save().unwrap();
+    let ctx = egui::Context::default();
+    let t = Instant::now();
+    let app = GitemApp::new(&ctx, &[]);
+    println!("AS-11 start with a session repository that takes 4 s to answer: window after {:.2} s", t.elapsed().as_secs_f64());
+    drop(app);
+    let _ = std::fs::remove_file(gitem_core::settings::Settings::path());
+}
+
 #[test]
 #[ignore = "measurement"]
 fn pf22_pf23_lists() {
@@ -570,6 +611,15 @@ fn pf16_files_sidebar() {
     let mut h = harness_with(&f, f.git.clone(), gitem_core::settings::Settings { sidebar_files: true, ..Default::default() });
     settle(&mut h);
     println!("PF-16 Files sidebar, 20,000 files, folders closed: {:.2} ms per frame", frame_ms(&mut h, 30));
+    use egui_kittest::kittest::Queryable;
+    for name in ["a0", "a0/b0", "a1"] {
+        if let Some(row) = h.query_by_label(name) {
+            row.click();
+        }
+        h.step();
+        h.step();
+    }
+    println!("PF-16 Files sidebar, 20,000 files, a few folders open: {:.2} ms per frame", frame_ms(&mut h, 30));
 }
 
 #[test]
@@ -585,6 +635,25 @@ fn pf15_big_file() {
     h.state_mut().repos[0].open_tab(Tab::file("big.txt", None, None));
     wait_quiet(&mut h);
     println!("PF-15 File view, {} MB file: loaded in {:.1} s, {:.2} ms per frame", body.len() / 1_000_000, t.elapsed().as_secs_f64(), frame_ms(&mut h, 30));
+}
+
+/// Status slowed by a tree whose files were all touched, then the same after a refresh.
+#[test]
+#[ignore = "measurement"]
+fn pf24_touched_files() {
+    let f = Fx::new();
+    big_tree(&f, 20_000);
+    let repo = Repo::open(f.git.clone(), &f.root).unwrap();
+    // Earlier, not later: git never trusts a timestamp newer than the index it's reading.
+    let later = std::time::SystemTime::now() - Duration::from_secs(600);
+    for i in 0..20_000 {
+        let p = f.root.join(format!("a{}/b{}/f{i}.txt", i % 100, i % 1000));
+        let file = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+        file.set_modified(later).unwrap();
+    }
+    println!("PF-24 status, 20,000 files touched: {:.0} ms", best_ms(|| drop(repo.status().unwrap())));
+    ops::refresh_index().background().run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap();
+    println!("PF-24 status, after refreshing the index: {:.0} ms", best_ms(|| drop(repo.status().unwrap())));
 }
 
 #[test]
@@ -619,4 +688,11 @@ fn pf30_pf31_views() {
     h.state_mut().repos[0].open_tab(Tab::merge("m.txt"));
     wait_quiet(&mut h);
     println!("PF-31 merge view, 20,000 stable lines closed: {:.2} ms per frame", frame_ms(&mut h, 30));
+    use egui_kittest::kittest::Queryable;
+    if let Some(open) = h.query_by_label_contains("unchanged") {
+        open.click();
+        h.step();
+        h.step();
+        println!("PF-31 merge view, 20,000 stable lines open: {:.2} ms per frame", frame_ms(&mut h, 30));
+    }
 }

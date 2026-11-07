@@ -177,6 +177,9 @@ fn file_glyph(name: &str) -> &'static str {
     }
 }
 
+/// The tree, the folders open, the filter, and whether only changed files show.
+type RowsKey = (u64, u64, String, bool);
+
 #[derive(Default)]
 pub struct FilesView {
     tree: Task<FileTree>,
@@ -185,17 +188,25 @@ pub struct FilesView {
     filter: String,
     changed_only: bool,
     selected: Option<String>,
+    /// Which tree this is, and when a folder last opened or closed.
+    tree_gen: u64,
+    expanded_gen: u64,
+    /// The rows for what's below. Walking a tree of 100,000 files is most of a frame.
+    rows: Option<(RowsKey, std::sync::Arc<Vec<Row>>)>,
 }
 
 impl FilesView {
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        self.tree.poll();
-        if self.built_for != Some(cx.data.status_gen) {
-            self.built_for = Some(cx.data.status_gen);
-            let repo = cx.repo.clone();
+        if self.tree.poll() {
+            self.tree_gen += 1;
+        }
+        // One at a time, or a slow list under steady changes piles up. The generation stays
+        // behind meanwhile, so a change during this one starts another when it lands.
+        if self.built_for != Some(cx.data.listing_gen) && !self.tree.busy() {
+            self.built_for = Some(cx.data.listing_gen);
             let entries = cx.status().map(|s| s.entries.clone()).unwrap_or_default();
-            self.tree.spawn(ui.ctx(), move || -> gitem_core::Result<FileTree> { Ok(FileTree::build(repo.tracked_files(None)?, &entries)) });
+            self.tree.spawn_git(ui.ctx(), cx.repo, move |repo| -> gitem_core::Result<FileTree> { Ok(FileTree::build(repo.tracked_files(None)?, &entries)) });
         }
 
         ui.add_space(4.0);
@@ -204,6 +215,7 @@ impl FilesView {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if chrome::icon_button(ui, icon::ARROWS_IN_LINE_VERTICAL, "Collapse folders", "", false, &p).clicked() {
                     self.expanded.clear();
+                    self.expanded_gen += 1;
                 }
                 if chrome::icon_button(ui, icon::GIT_DIFF, "Changed files only", "Hide everything without changes", self.changed_only, &p).clicked() {
                     self.changed_only = !self.changed_only;
@@ -215,10 +227,18 @@ impl FilesView {
 
         let query = self.filter.trim().to_string();
         let Some(tree) = self.tree.get() else {
-            spinner_row(ui, "Loading files...", &p);
+            match &self.tree.error {
+                Some(e) => error_box(ui, e, &p),
+                None => spinner_row(ui, "Loading files...", &p),
+            }
             return;
         };
-        let rows = if query.is_empty() { tree.rows(&self.expanded, self.changed_only) } else { tree.filtered(&query, self.changed_only) };
+        let key = (self.tree_gen, self.expanded_gen, query.clone(), self.changed_only);
+        if self.rows.as_ref().is_none_or(|(k, _)| *k != key) {
+            let rows = if query.is_empty() { tree.rows(&self.expanded, self.changed_only) } else { tree.filtered(&query, self.changed_only) };
+            self.rows = Some((key, std::sync::Arc::new(rows)));
+        }
+        let Some(rows) = self.rows.as_ref().map(|(_, r)| r.clone()) else { return };
         if rows.is_empty() {
             let (title, hint) = if !query.is_empty() {
                 ("No matching files", "Check the spelling, or try fewer letters.")
@@ -262,6 +282,7 @@ impl FilesView {
             if !self.expanded.remove(&path) {
                 self.expanded.insert(path);
             }
+            self.expanded_gen += 1;
         }
         if picked.is_some() {
             self.selected = picked;

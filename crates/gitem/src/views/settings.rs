@@ -86,6 +86,8 @@ pub struct SettingsView {
     editors_looked: bool,
     /// The editor setting last checked, and whether it can be started.
     editor_check: Option<(String, bool)>,
+    git_pick: Task<Option<std::path::PathBuf>>,
+    editor_pick: Task<Option<std::path::PathBuf>>,
 }
 
 // ---- building blocks ---------------------------------------------------------
@@ -437,6 +439,16 @@ impl SettingsView {
     }
 
     fn git(&mut self, ui: &mut Ui, cx: &mut Cx, s: &mut Settings, p: &Palette) {
+        if self.git_pick.poll()
+            && let Some(Some(f)) = self.git_pick.value.take()
+        {
+            s.git_path = f.to_string_lossy().into_owned();
+        }
+        if self.editor_pick.poll()
+            && let Some(Some(f)) = self.editor_pick.value.take()
+        {
+            s.default_external_editor = f.to_string_lossy().into_owned();
+        }
         group(ui, "Git executable", p, |g| {
             g.row("In use", "", |ui| {
                 let source = match cx.repo.git.source {
@@ -450,10 +462,8 @@ impl SettingsView {
             g.stacked("Custom path", "Leave blank to search: a git folder beside gitem, then PATH, then the usual install folders. Restart to apply.", |ui| {
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Browse…").clicked()
-                            && let Some(f) = rfd::FileDialog::new().pick_file()
-                        {
-                            s.git_path = f.to_string_lossy().into_owned();
+                        if ui.button("Browse…").clicked() {
+                            crate::widgets::pick(&mut self.git_pick, ui.ctx(), rfd::FileDialog::new(), false);
                         }
                         ui.add(input(&mut s.git_path).hint_text(cx.repo.git.path.display().to_string()).desired_width(f32::INFINITY));
                     });
@@ -496,9 +506,7 @@ impl SettingsView {
                             if cfg!(windows) {
                                 dialog = dialog.add_filter("Programs", &["exe", "cmd", "bat"]);
                             }
-                            if let Some(f) = dialog.pick_file() {
-                                s.default_external_editor = f.to_string_lossy().into_owned();
-                            }
+                            crate::widgets::pick(&mut self.editor_pick, ui.ctx(), dialog, false);
                         }
                         ui.add(input(&mut s.default_external_editor).hint_text("Reveal files in the file manager").desired_width(f32::INFINITY));
                     });
@@ -704,7 +712,7 @@ impl SettingsView {
             g.row("Connection", "Sends a one-word request.", |ui| {
                 test = ui.add_enabled(!self.ai_test.busy(), egui::Button::new("Test connection")).clicked();
                 if self.ai_test.busy() {
-                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.add(spinner(14.0));
                 }
             });
             if test {

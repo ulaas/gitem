@@ -95,7 +95,13 @@ impl ComposerView {
             }
         }
         self.settle_run(cx);
-        let Some(st) = cx.status().cloned() else { return };
+        let Some(st) = cx.status().cloned() else {
+            match &cx.data.status.error {
+                Some(e) => error_box(ui, e, &cx.pal.clone()),
+                None => spinner_row(ui, "Reading status…", &cx.pal.clone()),
+            }
+            return;
+        };
         let changed: Vec<String> = st.entries.iter().filter(|e| e.conflict.is_none()).map(|e| e.path.clone()).collect();
         // A file can leave the status for a moment (stash and pop, an edit undone and redone).
         // It stays in its group, marked, and isn't committed while it has no changes.
@@ -128,7 +134,7 @@ impl ComposerView {
                 });
             }
             if busy {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
             ui.separator();
             // A commit now would end a merge or cherry-pick early. A rebase stopped for you,

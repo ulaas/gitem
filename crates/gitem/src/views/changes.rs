@@ -1,8 +1,10 @@
 //! Working-tree changes: stage and unstage, commit box with AI message, conflicts,
 //! and controls for operations in progress.
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use egui::{RichText, Ui};
+use egui::{RichText, Ui, vec2};
 use gitem_core::model::*;
 use gitem_core::ops;
 use gitem_core::repo::DiffSource;
@@ -46,6 +48,39 @@ struct TreeCache {
     nodes: [Node; 3],
 }
 
+/// Every row is this tall, so a list of any length only costs what's on screen.
+const ROW_H: f32 = 22.0;
+
+/// A line of the list, in the order drawn.
+#[derive(Clone, Copy)]
+enum Line {
+    Heading(Section),
+    /// A position in the status list.
+    File(Section, usize),
+    /// A position in the section's tree rows.
+    Tree(Section, usize),
+}
+
+/// The list as worked out from the status, kept until something it depends on changes.
+struct ListCache {
+    key: (u64, String, bool, u64),
+    lines: Vec<Line>,
+    trees: [Vec<Row>; 3],
+    shown: [usize; 3],
+}
+
+/// How long typing can pause before the draft goes to disk.
+const DRAFT_AFTER: Duration = Duration::from_secs(2);
+
+/// Where the commit message being written for this repository is kept, so a crash or a power
+/// cut doesn't cost it.
+fn draft_path(root: &std::path::Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    root.to_string_lossy().hash(&mut h);
+    gitem_core::settings::config_dir().join("drafts").join(format!("{:016x}.txt", h.finish()))
+}
+
 #[derive(Default)]
 pub struct ChangesView {
     pub message: String,
@@ -69,9 +104,24 @@ pub struct ChangesView {
     selected: HashSet<String>,
     init: bool,
     tree: Option<TreeCache>,
+    list: Option<ListCache>,
+    /// Bumped when a folder opens or closes.
+    fold_gen: u64,
     /// Closed folders in the tree, per section: everything starts open, so a change
     /// never hides inside a folder nobody chose to close.
     collapsed: [HashSet<String>; 3],
+    /// What the box held when the AI was asked. Anything else there since is the user's.
+    ai_asked_with: String,
+    /// The AI's message, when the user has typed in the box since asking for it.
+    ai_offer: Option<String>,
+    /// The status when "Stash with AI message" was pressed.
+    ai_stash_gen: u64,
+    /// HEAD after a commit finished, to compare with `submitted`.
+    head_now: Task<String>,
+    amend_message: Task<String>,
+    /// The message as last written to disk, and when the box last differed from it.
+    draft_saved: String,
+    draft_changed: Option<Instant>,
 }
 
 fn change_of(e: &StatusEntry, staged: bool) -> FileChange {
@@ -98,10 +148,24 @@ impl ChangesView {
             self.init = true;
             self.sign = cx.settings.commit_sign;
             self.signoff = cx.settings.commit_signoff;
+            if cx.data.persist && self.message.is_empty()
+                && let Ok(draft) = std::fs::read_to_string(draft_path(&cx.repo.root))
+            {
+                self.message = draft.clone();
+                self.draft_saved = draft;
+                cx.toast("Restored the commit message you were writing.");
+            }
         }
+        self.save_draft(ui.ctx(), cx);
         if self.ai.poll() {
             if let Some(m) = self.ai.value.take() {
-                self.message = ai::clean_message(&m);
+                let m = ai::clean_message(&m);
+                // A reply that took a minute mustn't replace what's been typed meanwhile.
+                if self.message == self.ai_asked_with {
+                    self.message = m;
+                } else {
+                    self.ai_offer = Some(m);
+                }
             }
             if let Some(e) = self.ai.error.take() {
                 cx.error(e);
@@ -110,27 +174,56 @@ impl ChangesView {
         if self.ai_stash.poll() {
             if let Some(m) = self.ai_stash.value.take() {
                 let message = ai::clean_message(&m).lines().next().unwrap_or("").to_string();
-                cx.run(ops::stash_push(&ops::StashOpts { message, include_untracked: true, ..Default::default() }));
+                let op = ops::stash_push(&ops::StashOpts { message: message.clone(), include_untracked: true, ..Default::default() });
+                // This stashes everything in the tree, which may not be what was there when
+                // the button was pressed: this only runs when the tab is next drawn.
+                if self.ai_stash_gen == cx.data.status_gen {
+                    cx.run(op);
+                } else {
+                    cx.out.push(Action::Confirm { title: "Files changed since you asked".into(), body: format!("Stash everything in the working tree now, as \"{message}\"? That includes changes made after you pressed the button."), label: "Stash".into(), op });
+                }
             }
             if let Some(e) = self.ai_stash.error.take() {
                 cx.error(e);
             }
         }
         // A rejected commit (say, by a hook) must leave the message in the box.
-        if self.submitted.is_some() && !cx.data.ops_busy
-            && let Some((msg, head)) = self.submitted.take() {
-                let now = cx.repo.resolve("HEAD").unwrap_or_default();
-                if now != head {
-                    if self.message == msg {
-                        self.message.clear();
-                    }
-                    self.amend = false;
+        if self.head_now.poll() {
+            let now = self.head_now.value.take().unwrap_or_default();
+            if let Some((msg, head)) = self.submitted.take()
+                && now != head
+            {
+                if self.message == msg {
+                    self.message.clear();
                 }
+                self.amend = false;
             }
-        let Some(st) = cx.status().cloned() else {
-            spinner_row(ui, "Reading status…", &p);
+        }
+        if self.submitted.is_some() && !cx.data.ops_busy && !self.head_now.busy() {
+            self.head_now.spawn_git(ui.ctx(), cx.repo, |r| r.resolve("HEAD"));
+        }
+        if self.amend_message.poll()
+            && let Some(m) = self.amend_message.value.take()
+            && self.amend
+            && self.message.trim().is_empty()
+        {
+            self.message = m;
+            self.prefilled = self.message.clone();
+        }
+        let Some(st) = cx.data.status.value.clone() else {
+            // Git may have failed rather than be slow, and then this isn't coming.
+            match &cx.data.status.error {
+                Some(e) => {
+                    error_box(ui, &format!("Git couldn't read the status of this repository:\n{e}"), &p);
+                    if ui.button("Try again").clicked() {
+                        cx.out.push(Action::Retry);
+                    }
+                }
+                None => spinner_row(ui, "Reading status…", &p),
+            }
             return;
         };
+        let st: &RepoStatus = &st;
         // During a merge or similar, git prepares the commit message.
         if st.op != RepoOp::None && self.applied_prepared_for != Some(st.op) && self.message.is_empty() {
             if let Some(m) = cx.repo.prepared_message() {
@@ -143,115 +236,154 @@ impl ChangesView {
             self.applied_prepared_for = None;
         }
 
-        egui::Panel::bottom("commit-box").resizable(true).default_size(190.0).show(ui, |ui| self.commit_box(ui, cx, &st));
+        egui::Panel::bottom("commit-box").resizable(true).default_size(190.0).show(ui, |ui| self.commit_box(ui, cx, st));
 
-        egui::ScrollArea::vertical().id_salt("changes-list").auto_shrink([false, false]).show(ui, |ui| {
-            let as_tree = cx.settings.changes_tree;
-            let matches = |e: &StatusEntry, f: &str| f.is_empty() || e.path.to_lowercase().contains(&f.to_lowercase());
-            let f = self.filter.clone();
-            if as_tree {
-                self.update_tree(cx.data.status_gen, &st, &f);
-            }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if as_tree {
-                        self.fold_button(ui, &p);
-                    }
-                    if chrome::icon_button(ui, icon::TREE_VIEW, "Show as tree", "Group changed files by folder", as_tree, &p).clicked() {
-                        cx.out.push(Action::Settings(Box::new(move |s| s.changes_tree = !as_tree)));
-                    }
-                    ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter files").desired_width(f32::INFINITY));
-                });
-            });
-            self.batch_bar(ui, cx, &st);
-
-            // Conflicts first: they block everything else.
-            let conflicts: Vec<&StatusEntry> = st.conflicts().filter(|e| matches(e, &f)).collect();
-            if !conflicts.is_empty() {
-                section(ui, &format!("Merge conflicts ({})", conflicts.len()), &p);
-                ui.spacing_mut().item_spacing.y = 0.0;
+        let as_tree = cx.settings.changes_tree;
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if as_tree {
-                    self.tree_rows(ui, cx, &st, Section::Conflicts);
-                } else {
-                    for e in conflicts {
-                        conflict_row(ui, cx, e, None);
-                    }
+                    self.fold_button(ui, &p);
                 }
+                if chrome::icon_button(ui, icon::TREE_VIEW, "Show as tree", "Group changed files by folder", as_tree, &p).clicked() {
+                    cx.out.push(Action::Settings(Box::new(move |s| s.changes_tree = !as_tree)));
+                }
+                ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter files").desired_width(f32::INFINITY));
+            });
+        });
+        self.update_list(cx.data.status_gen, st, as_tree);
+        self.batch_bar(ui, cx, st);
+        ui.add_space(2.0);
+
+        let Some(list) = self.list.take() else { return };
+        if st.is_clean() {
+            egui::ScrollArea::vertical().id_salt("changes-list").auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                self.heading(ui, cx, st, Section::Staged, 0);
+                self.heading(ui, cx, st, Section::Unstaged, 0);
                 ui.spacing_mut().item_spacing.y = 4.0;
-            }
-
-            let staged: Vec<&StatusEntry> = st.entries.iter().filter(|e| e.is_staged() && matches(e, &f)).collect();
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                section(ui, &format!("Staged ({})", staged.len()), &p);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !staged.is_empty() {
-                        if ui.small_button("Unstage all").clicked() {
-                            if st.op == RepoOp::None {
-                                cx.run(ops::unstage_all(!st.head_sha.is_empty()));
-                            } else {
-                                // `reset` would cancel the operation. This also leaves conflicts as they are.
-                                let paths: Vec<String> = st.entries.iter().filter(|e| e.is_staged()).map(|e| e.path.clone()).collect();
-                                cx.run(ops::unstage_during_op(&paths));
-                            }
-                        }
-                        if ui.small_button("View all").clicked() {
-                            cx.diff(DiffSource::Staged, None);
-                        }
-                    }
-                });
-            });
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if as_tree {
-                self.tree_rows(ui, cx, &st, Section::Staged);
-            } else {
-                for e in &staged {
-                    staged_row(ui, cx, e, &st, &mut self.selected, None);
-                }
-            }
-            ui.spacing_mut().item_spacing.y = 4.0;
-
-            let unstaged: Vec<&StatusEntry> = st.entries.iter().filter(|e| e.is_unstaged() && matches(e, &f)).collect();
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                section(ui, &format!("Unstaged ({})", unstaged.len()), &p);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !unstaged.is_empty() {
-                        if ui.small_button("Stage all").clicked() {
-                            cx.run(ops::stage_all());
-                        }
-                        if ui.small_button("Stash…").clicked() {
-                            cx.form(forms::stash_form(Vec::new()));
-                        }
-                        if ui.add_enabled(!self.ai_stash.busy(), egui::Button::new("Stash with AI message").small()).clicked() {
-                            let (repo, cfg) = (cx.repo.clone(), cx.settings.ai.clone());
-                            self.ai_stash.spawn(ui.ctx(), move || -> Result<String, String> {
-                                let diff = repo.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?;
-                                let (s, u) = ai::stash_prompt(&diff);
-                                let key = cred::ai_key(cfg.provider.key_name());
-                                ai::complete(&cfg, key.as_deref(), &s, &u).map_err(|e| e.to_string())
-                            });
-                        }
-                        if ui.small_button("View all").clicked() {
-                            cx.diff(DiffSource::Unstaged, None);
-                        }
-                    }
-                });
-            });
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if as_tree {
-                self.tree_rows(ui, cx, &st, Section::Unstaged);
-            } else {
-                for e in &unstaged {
-                    unstaged_row(ui, cx, e, &mut self.selected, None);
-                }
-            }
-            ui.spacing_mut().item_spacing.y = 4.0;
-            if st.is_clean() {
                 empty_state(ui, "Working tree clean", "Changes appear here as you edit files.", &p);
+            });
+        } else {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::vertical().id_salt("changes-list").auto_shrink([false, false]).show_rows(ui, ROW_H, list.lines.len(), |ui, range| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for at in range {
+                    self.line(ui, cx, st, &list, at);
+                }
+            });
+        }
+        self.list = Some(list);
+    }
+
+    fn line(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, list: &ListCache, at: usize) {
+        match list.lines[at] {
+            Line::Heading(section) => self.heading(ui, cx, st, section, list.shown[section as usize]),
+            Line::File(section, index) => {
+                let Some(e) = st.entries.get(index) else {
+                    ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), egui::Sense::hover());
+                    return;
+                };
+                match section {
+                    Section::Conflicts => conflict_row(ui, cx, e, None),
+                    Section::Staged => staged_row(ui, cx, e, st, &mut self.selected, None),
+                    Section::Unstaged => unstaged_row(ui, cx, e, &mut self.selected, None),
+                }
+            }
+            Line::Tree(section, row) => self.tree_row(ui, cx, st, &list.trees[section as usize], section, row),
+        }
+    }
+
+    /// A section's title and its actions, the same height as a file.
+    fn heading(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section, shown: usize) {
+        let p = cx.pal.clone();
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), egui::Sense::hover());
+        let mut ui = ui.new_child(egui::UiBuilder::new().id_salt(("changes-heading", section as usize)).max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let ui = &mut ui;
+        let title = match section {
+            Section::Conflicts => "Merge conflicts",
+            Section::Staged => "Staged",
+            Section::Unstaged => "Unstaged",
+        };
+        ui.label(RichText::new(format!("{title} ({shown})").to_uppercase()).size(11.0).color(p.faint).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match section {
+            Section::Conflicts => {}
+            Section::Staged => {
+                if shown > 0 {
+                    if ui.small_button("Unstage all").clicked() {
+                        if st.op == RepoOp::None {
+                            cx.run(ops::unstage_all(!st.head_sha.is_empty()));
+                        } else {
+                            // `reset` would cancel the operation. This also leaves conflicts as they are.
+                            let paths: Vec<String> = st.entries.iter().filter(|e| e.is_staged()).map(|e| e.path.clone()).collect();
+                            cx.run(ops::unstage_during_op(&paths));
+                        }
+                    }
+                    if ui.small_button("View all").clicked() {
+                        cx.diff(DiffSource::Staged, None);
+                    }
+                }
+            }
+            Section::Unstaged => {
+                if shown > 0 {
+                    if ui.small_button("Stage all").clicked() {
+                        cx.run(ops::stage_all());
+                    }
+                    if ui.small_button("Stash…").clicked() {
+                        cx.form(forms::stash_form(Vec::new()));
+                    }
+                    if ui.add_enabled(!self.ai_stash.busy(), egui::Button::new("Stash with AI message").small()).clicked() {
+                        self.ai_stash_gen = cx.data.status_gen;
+                        let (repo, cfg) = (cx.repo.clone(), cx.settings.ai.clone());
+                        self.ai_stash.spawn(ui.ctx(), move || -> Result<String, String> {
+                            let diff = repo.diff_for_ai(&DiffSource::WorkingVsHead).map_err(|e| e.to_string())?;
+                            let (s, u) = ai::stash_prompt(&diff);
+                            let key = cred::ai_key(cfg.provider.key_name());
+                            ai::complete(&cfg, key.as_deref(), &s, &u).map_err(|e| e.to_string())
+                        });
+                    }
+                    if ui.small_button("View all").clicked() {
+                        cx.diff(DiffSource::Unstaged, None);
+                    }
+                }
             }
         });
+    }
+
+    /// Worked out when the status, the filter or a folder changes, not on every frame: at
+    /// 100,000 files that alone would be most of a frame.
+    fn update_list(&mut self, status_gen: u64, st: &RepoStatus, as_tree: bool) {
+        let f = self.filter.clone();
+        let key = (status_gen, f.clone(), as_tree, self.fold_gen);
+        if self.list.as_ref().is_some_and(|l| l.key == key) {
+            return;
+        }
+        self.selected.retain(|s| st.entries.iter().any(|e| e.path == *s));
+        if as_tree {
+            self.update_tree(status_gen, st, &f);
+        }
+        let needle = f.to_lowercase();
+        let matches = |e: &StatusEntry| needle.is_empty() || e.path.to_lowercase().contains(&needle);
+        let (mut lines, mut trees, mut shown) = (Vec::new(), [Vec::new(), Vec::new(), Vec::new()], [0, 0, 0]);
+        for section in Section::ALL {
+            let i = section as usize;
+            let files: Vec<usize> = st.entries.iter().enumerate().filter(|(_, e)| section.holds(e) && matches(e)).map(|(n, _)| n).collect();
+            shown[i] = files.len();
+            // Conflicts have a heading only when there are any: they block everything else.
+            if section != Section::Conflicts || !files.is_empty() {
+                lines.push(Line::Heading(section));
+            }
+            match self.tree.as_ref().filter(|_| as_tree) {
+                Some(tree) => {
+                    // A filter looks for files, so nothing it finds stays hidden in a closed folder.
+                    trees[i] = tree.nodes[i].rows(if f.is_empty() { Some(&self.collapsed[i]) } else { None });
+                    lines.extend((0..trees[i].len()).map(|row| Line::Tree(section, row)));
+                }
+                None => lines.extend(files.into_iter().map(|n| Line::File(section, n))),
+            }
+        }
+        self.list = Some(ListCache { key, lines, trees, shown });
     }
 
     /// Rebuild the trees only when the status or the filter changed.
@@ -264,11 +396,39 @@ impl ChangesView {
         self.tree = Some(TreeCache { status_gen, filter: filter.to_string(), nodes });
     }
 
+    /// Writes the message after a pause in typing, and removes the file when it's gone.
+    fn save_draft(&mut self, ctx: &egui::Context, cx: &Cx) {
+        if !cx.data.persist {
+            return;
+        }
+        let unsaved = self.unsaved().is_some();
+        let want = if unsaved { self.message.as_str() } else { "" };
+        if want == self.draft_saved {
+            self.draft_changed = None;
+            return;
+        }
+        let since = *self.draft_changed.get_or_insert_with(Instant::now);
+        if since.elapsed() < DRAFT_AFTER {
+            ctx.request_repaint_after(DRAFT_AFTER);
+            return;
+        }
+        let path = draft_path(&cx.repo.root);
+        // A failure costs nothing but this safety net, which is no reason to interrupt anyone.
+        let _ = if want.is_empty() {
+            std::fs::remove_file(&path)
+        } else {
+            path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, want))
+        };
+        self.draft_saved = want.to_string();
+        self.draft_changed = None;
+    }
+
     /// Closes every folder, or opens them all again if any is closed.
     fn fold_button(&mut self, ui: &mut Ui, p: &crate::theme::Palette) {
         let any_closed = self.collapsed.iter().any(|c| !c.is_empty());
         let (glyph, name) = if any_closed { (icon::ARROWS_OUT_LINE_VERTICAL, "Expand folders") } else { (icon::ARROWS_IN_LINE_VERTICAL, "Collapse folders") };
         if chrome::icon_button(ui, glyph, name, "", false, p).clicked() {
+            self.fold_gen += 1;
             if any_closed {
                 self.collapsed.iter_mut().for_each(HashSet::clear);
             } else if let Some(tree) = &self.tree {
@@ -279,37 +439,34 @@ impl ChangesView {
         }
     }
 
-    fn tree_rows(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section) {
-        let Some(tree) = &self.tree else { return };
+    fn tree_row(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, rows: &[Row], section: Section, at: usize) {
         let i = section as usize;
-        // A filter looks for files, so nothing it finds stays hidden in a closed folder.
-        let filtering = !tree.filter.is_empty();
-        let rows = tree.nodes[i].rows(if filtering { None } else { Some(&self.collapsed[i]) });
-        let mut toggled = None;
-        for (at, r) in rows.iter().enumerate() {
-            match r.kind {
-                RowKind::File(index) => {
-                    let Some(e) = st.entries.get(index) else { continue };
-                    let leaf = Some((r.depth, r.name.as_str()));
-                    match section {
-                        Section::Conflicts => conflict_row(ui, cx, e, leaf),
-                        Section::Staged => staged_row(ui, cx, e, st, &mut self.selected, leaf),
-                        Section::Unstaged => unstaged_row(ui, cx, e, &mut self.selected, leaf),
-                    }
+        let r = &rows[at];
+        let filtering = !self.filter.is_empty();
+        match r.kind {
+            RowKind::File(index) => {
+                let Some(e) = st.entries.get(index) else {
+                    ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), egui::Sense::hover());
+                    return;
+                };
+                let leaf = Some((r.depth, r.name.as_str()));
+                match section {
+                    Section::Conflicts => conflict_row(ui, cx, e, leaf),
+                    Section::Staged => staged_row(ui, cx, e, st, &mut self.selected, leaf),
+                    Section::Unstaged => unstaged_row(ui, cx, e, &mut self.selected, leaf),
                 }
-                RowKind::Dir { open, count } => {
-                    let resp = folder_row(ui, r, open, count, cx.pal);
-                    if resp.clicked() {
-                        toggled = Some(r.path.clone());
+            }
+            RowKind::Dir { open, count } => {
+                let resp = folder_row(ui, r, open, count, cx.pal);
+                if resp.clicked() {
+                    if !self.collapsed[i].remove(&r.path) {
+                        self.collapsed[i].insert(r.path.clone());
                     }
-                    resp.context_menu(|ui| folder_menu(ui, cx, st, section, &rows, at, count, filtering));
+                    self.fold_gen += 1;
                 }
+                resp.context_menu(|ui| folder_menu(ui, cx, st, section, rows, at, count, filtering));
             }
         }
-        if let Some(path) = toggled
-            && !self.collapsed[i].remove(&path) {
-                self.collapsed[i].insert(path);
-            }
     }
 
     fn commit_box(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus) {
@@ -324,7 +481,7 @@ impl ChangesView {
                     self.generate(ui.ctx(), cx);
                 }
                 if busy {
-                    ui.add(egui::Spinner::new().size(13.0));
+                    ui.add(spinner(13.0));
                 }
                 if ui.small_button("Review with AI").on_hover_text("Look for problems in these changes").clicked() {
                     let extra = cx.settings.ai.custom_instructions.clone();
@@ -344,11 +501,9 @@ impl ChangesView {
         });
         let len = self.message.lines().next().unwrap_or("").chars().count();
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut self.amend, "Amend").changed() && self.amend && self.message.trim().is_empty()
-                && let Ok(c) = cx.repo.commit("HEAD") {
-                    self.message = c.message();
-                    self.prefilled = self.message.clone();
-                }
+            if ui.checkbox(&mut self.amend, "Amend").changed() && self.amend && self.message.trim().is_empty() {
+                self.amend_message.spawn_git(ui.ctx(), cx.repo, |r| r.commit("HEAD").map(|c| c.message()));
+            }
             ui.checkbox(&mut self.signoff, "Sign-off");
             ui.checkbox(&mut self.sign, "GPG/SSH sign");
             ui.checkbox(&mut self.no_verify, "Skip hooks");
@@ -363,7 +518,7 @@ impl ChangesView {
                 if self.people_gen != Some(cx.data.refs_gen) {
                     self.people_gen = Some(cx.data.refs_gen);
                     let repo = cx.repo.clone();
-                    self.people.spawn(ui.ctx(), move || repo.contributors("HEAD", false));
+                    self.people.spawn(ui.ctx(), move || repo.people("HEAD"));
                 }
                 if self.people.busy() {
                     spinner_row(ui, "Reading history…", &p);
@@ -386,9 +541,20 @@ impl ChangesView {
                 ui.label(RichText::new(format!("{len}/72")).small().color(if len > 72 { p.warn } else { p.faint }));
             });
         });
-        let staged_n = st.entries.iter().filter(|e| e.is_staged()).count();
-        let unstaged_n = st.entries.iter().filter(|e| e.is_unstaged()).count();
-        let can = !cx.data.ops_busy && self.submitted.is_none() && !self.message.trim().is_empty() && st.conflicts().next().is_none() && (staged_n > 0 || self.amend || st.op == RepoOp::Merge || unstaged_n > 0);
+        if let Some(offer) = self.ai_offer.clone() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("The AI's message is ready, and you've typed since asking.").small().color(p.dim)).on_hover_text(offer.as_str());
+                if ui.small_button("Use it").clicked() {
+                    self.message = offer;
+                    self.ai_offer = None;
+                } else if ui.small_button("Keep mine").clicked() {
+                    self.ai_offer = None;
+                }
+            });
+        }
+        let counts = cx.data.counts();
+        let (staged_n, unstaged_n) = (counts.staged, counts.unstaged);
+        let can = !cx.data.ops_busy && self.submitted.is_none() && !self.message.trim().is_empty() && counts.conflicts == 0 && (staged_n > 0 || self.amend || st.op == RepoOp::Merge || unstaged_n > 0);
         ui.horizontal(|ui| {
             let label = if self.amend {
                 "Amend commit".to_string()
@@ -413,7 +579,6 @@ impl ChangesView {
 
     /// Actions for files picked with Ctrl+click.
     fn batch_bar(&mut self, ui: &mut Ui, cx: &mut Cx, st: &RepoStatus) {
-        self.selected.retain(|s| st.entries.iter().any(|e| e.path == *s));
         if self.selected.is_empty() {
             return;
         }
@@ -457,13 +622,16 @@ impl ChangesView {
             author: Some(self.author.trim().to_string()).filter(|s| !s.is_empty()),
             all: false,
         }));
-        let head = cx.repo.resolve("HEAD").unwrap_or_default();
+        // The status is read after every write, so this is HEAD as of the last one.
+        let head = cx.status().map(|s| s.head_sha.clone()).unwrap_or_default();
         self.submitted = Some((self.message.clone(), head));
     }
 
     fn generate(&mut self, ctx: &egui::Context, cx: &Cx) {
         let repo = cx.repo.clone();
         let cfg = cx.settings.ai.clone();
+        self.ai_asked_with = self.message.clone();
+        self.ai_offer = None;
         self.ai.spawn(ctx, move || -> Result<String, String> {
             let mut diff = repo.diff_for_ai(&DiffSource::Staged).map_err(|e| e.to_string())?;
             if diff.trim().is_empty() {
@@ -480,7 +648,7 @@ impl ChangesView {
 }
 
 fn folder_row(ui: &mut Ui, r: &Row, open: bool, count: usize, p: &crate::theme::Palette) -> egui::Response {
-    let (rect, resp) = row(ui, 22.0, false, p);
+    let (rect, resp) = row(ui, ROW_H, false, p);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, r.name.as_str()));
     tree_guides(ui, rect, r.depth, p);
     let x = rect.left() + r.depth as f32 * TREE_INDENT;
@@ -533,7 +701,7 @@ fn folder_menu(ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, section: Section, rows
 fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf) {
     let p = cx.pal.clone();
     let code = e.conflict.clone().unwrap_or_default();
-    let (rect, resp) = row(ui, 24.0, false, &p);
+    let (rect, resp) = row(ui, ROW_H, false, &p);
     let (depth, shown) = leaf.unwrap_or((0, &e.path));
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, e.path.as_str()));
     if leaf.is_some() {

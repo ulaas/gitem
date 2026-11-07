@@ -28,6 +28,7 @@ pub struct HomeView {
     summaries: Task<Vec<RepoSummary>>,
     summaries_for: Option<String>,
     workspace_idx: usize,
+    scan_pick: Task<Option<std::path::PathBuf>>,
 }
 
 impl HomeView {
@@ -99,7 +100,7 @@ impl HomeView {
         section(ui, "Start", &p);
         ui.horizontal_wrapped(|ui| {
             if ui.button("Start work…").on_hover_text("Create a branch, optionally in a new worktree").clicked() {
-                let base = cx.repo.default_branch().unwrap_or_else(|| "HEAD".to_string());
+                let base = cx.data.refs.get().and_then(|r| r.default_branch.clone()).unwrap_or_else(|| "HEAD".to_string());
                 let repo_name = cx.repo.name();
                 let parent = cx.repo.root.parent().map(|x| x.to_path_buf()).unwrap_or_default();
                 cx.form(
@@ -139,7 +140,13 @@ impl HomeView {
         let p = cx.pal.clone();
         section(ui, "Recent branches", &p);
         let branches: Vec<Branch> = cx.data.local_branches().take(8).cloned().collect();
-        if branches.is_empty() {
+        if !cx.data.refs_known() {
+            // Not "no branches": nobody knows yet, or git couldn't say.
+            match &cx.data.refs.error {
+                Some(e) => error_box(ui, e, &p),
+                None => spinner_row(ui, "Reading branches…", &p),
+            }
+        } else if branches.is_empty() {
             ui.label(RichText::new("No branches yet").color(p.dim));
         }
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -204,21 +211,23 @@ impl HomeView {
         ui.horizontal(|ui| {
             if ui.small_button("Fetch all").clicked() {
                 for r in &w.repos {
-                    // One of these may never have been opened here, and a fetch can start
-                    // what its config names. So the same check as opening it, and no fetch
-                    // until that's decided.
-                    if Repo::open(cx.repo.git.clone(), std::path::Path::new(r)).is_ok_and(|x| x.trust.restricted()) {
-                        cx.error(format!("Not fetching {r}: its config names programs that you haven't said can run. Open it to decide."));
-                        continue;
-                    }
-                    let op = ops::fetch(&ops::FetchOpts { all: true, prune: cx.settings.prune_on_fetch, ..Default::default() });
-                    let mut wrapped = ops::GitOp::new(format!("Fetch {r}")).net();
-                    for s in op.steps {
-                        let mut args = vec!["-C".to_string(), r.clone()];
-                        args.extend(s.args);
-                        wrapped = wrapped.step_v(args);
-                    }
-                    cx.out.push(Action::RunGlobal { op: wrapped, open_after: None });
+                    let (git, r, prune) = (cx.repo.git.clone(), r.clone(), cx.settings.prune_on_fetch);
+                    cx.out.push(Action::Later(Box::new(move || {
+                        // One of these may never have been opened here, and a fetch can start
+                        // what its config names. So the same check as opening it, and no fetch
+                        // until that's decided.
+                        if Repo::open(git, std::path::Path::new(&r)).is_ok_and(|x| x.trust.restricted()) {
+                            return Err(format!("Not fetching {r}: its config names programs that you haven't said can run. Open it to decide."));
+                        }
+                        let op = ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() });
+                        let mut wrapped = ops::GitOp::new(format!("Fetch {r}")).net();
+                        for s in op.steps {
+                            let mut args = vec!["-C".to_string(), r.clone()];
+                            args.extend(s.args);
+                            wrapped = wrapped.step_v(args);
+                        }
+                        Ok(crate::action::Later::RunGlobal(wrapped))
+                    })));
                 }
             }
             if ui.small_button("Add current repository").clicked() {
@@ -232,8 +241,11 @@ impl HomeView {
                 })));
                 self.summaries_for = None;
             }
-            if ui.small_button("Scan a folder…").clicked()
-                && let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            if ui.add_enabled(!self.scan_pick.busy(), egui::Button::new("Scan a folder…").small()).clicked() {
+                crate::widgets::pick(&mut self.scan_pick, ui.ctx(), rfd::FileDialog::new(), true);
+            }
+            if self.scan_pick.poll()
+                && let Some(Some(dir)) = self.scan_pick.value.take() {
                     let found = gitem_core::repo::find_repos(&dir, 3);
                     let name = w.name.clone();
                     cx.toast(format!("Found {} repositories", found.len()));
@@ -254,7 +266,7 @@ impl HomeView {
                 cx.out.push(Action::Settings(Box::new(move |s| s.workspaces.retain(|x| x.name != name))));
             }
             if self.summaries.busy() {
-                ui.add(egui::Spinner::new().size(13.0));
+                ui.add(spinner(13.0));
             }
         });
         if let Some(list) = self.summaries.get() {

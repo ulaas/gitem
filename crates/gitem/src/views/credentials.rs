@@ -310,7 +310,7 @@ impl CredentialsView {
                 self.test.spawn(ui.ctx(), move || -> Result<String, String> { Ok(cred::ssh_test(&host)) });
             }
             if self.test.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         if let Some(t) = self.test.get() {

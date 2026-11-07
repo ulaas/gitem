@@ -10,7 +10,7 @@ use gitem_core::repo::{BlameOpts, DiffOpts, DiffSource};
 use gitem_core::util;
 use regex::Regex;
 
-use crate::action::{Action, Cx};
+use crate::action::{Action, Cx, Later};
 use crate::menus;
 use crate::syntax::{self, Spans};
 use crate::task::Task;
@@ -25,9 +25,23 @@ enum Annot {
     Changes,
 }
 
+/// Over this, blame is off unless asked for. At 32 MB it takes a minute and a good part of
+/// a gigabyte, for lines nobody could read through anyway.
+const MAX_BLAME_BYTES: usize = 10_000_000;
+
+/// A long line's colours are worth keeping between frames. Below this, egui's own cache is enough.
+const LONG_LINE: usize = 1_000;
+const MAX_LONG_JOBS: usize = 400;
+
 struct FileData {
     lines: Vec<String>,
     binary: bool,
+    /// The file is too big for blame to run by itself.
+    blame_skipped: bool,
+    /// The rows in order when lenses show. Empty when there are none.
+    lens_rows: Vec<Row>,
+    /// The widest line as drawn. Worked out once: there can be a million lines.
+    max_chars: usize,
     syntax: Vec<Spans>,
     blame: Vec<BlameLine>,
     /// 0-based new-file line -> change kind compared with HEAD.
@@ -47,6 +61,7 @@ struct Lens {
     sha: String,
 }
 
+#[derive(Clone, Copy)]
 enum Row {
     Lens(usize),
     Line(usize),
@@ -73,6 +88,11 @@ pub struct FileView {
     ignore_ws: bool,
     moves: bool,
     code_lens: Option<bool>,
+    /// Blame anyway, for a file over the limit.
+    force_blame: bool,
+    /// Long lines' jobs, by line: they're what a frame of a minified file spends its time on.
+    /// Jobs and not galleys, which are tied to the font atlas of the moment.
+    long_jobs: HashMap<(usize, u32), egui::text::LayoutJob>,
 }
 
 fn symbol_regex() -> Regex {
@@ -104,6 +124,22 @@ fn build_lenses(lines: &[String], blame: &[BlameLine]) -> Vec<Lens> {
     out
 }
 
+fn lens_rows(n: usize, lens: &[Lens]) -> Vec<Row> {
+    if lens.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = Vec::with_capacity(n + lens.len());
+    let mut li = 0;
+    for i in 0..n {
+        while li < lens.len() && lens[li].line == i {
+            rows.push(Row::Lens(li));
+            li += 1;
+        }
+        rows.push(Row::Line(i));
+    }
+    rows
+}
+
 impl FileView {
     pub fn new(path: &str, rev: Option<String>, line: Option<u32>) -> Self {
         Self {
@@ -126,6 +162,8 @@ impl FileView {
             ignore_ws: false,
             moves: false,
             code_lens: None,
+            force_blame: false,
+            long_jobs: HashMap::new(),
         }
     }
 
@@ -142,26 +180,35 @@ impl FileView {
     }
 
     fn load(&mut self, ctx: &egui::Context, cx: &Cx) {
-        let repo = cx.repo.clone();
         let (path, rev) = (self.path.clone(), self.rev.clone());
         let opts = BlameOpts { ignore_ws: self.ignore_ws, moves: self.moves, copies: false };
         let dark = cx.pal.dark;
-        self.data.spawn(ctx, move || -> Result<FileData, String> {
+        let force_blame = self.force_blame;
+        self.long_jobs.clear();
+        self.data.spawn_git(ctx, cx.repo, move |repo| -> Result<FileData, String> {
+            let empty = |binary| FileData { lines: Vec::new(), binary, blame_skipped: false, lens_rows: Vec::new(), max_chars: 0, syntax: Vec::new(), blame: Vec::new(), changes: HashMap::new(), deletions: HashMap::new(), newest: 0, oldest: 0, lens: Vec::new() };
+            // A huge binary doesn't need reading to be told it's one.
+            if rev.is_none() && repo.worktree_file_is_binary(&path) {
+                return Ok(empty(true));
+            }
             let bytes = match &rev {
                 Some(r) => repo.file_at(r, &path),
                 None => repo.worktree_file(&path),
             }
             .map_err(|e| e.to_string())?;
-            let binary = util::is_binary(&bytes);
-            if binary {
-                return Ok(FileData { lines: Vec::new(), binary, syntax: Vec::new(), blame: Vec::new(), changes: HashMap::new(), deletions: HashMap::new(), newest: 0, oldest: 0, lens: Vec::new() });
+            if util::is_binary(&bytes) {
+                return Ok(empty(true));
             }
+            let blame_skipped = bytes.len() > MAX_BLAME_BYTES && !force_blame;
             let text = util::text(&bytes);
+            drop(bytes);
             let lines = util::split_lines(&text);
+            drop(text);
+            let max_chars = lines.iter().map(|l| l.len().min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
             let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
             let syntax = syntax::highlight(&path, &refs, dark);
             // An untracked file simply has no blame; everything else surfaces errors.
-            let blame = repo.blame(&path, rev.as_deref(), opts).unwrap_or_default();
+            let blame = if blame_skipped { Vec::new() } else { repo.blame(&path, rev.as_deref(), opts).unwrap_or_default() };
             let (mut changes, mut deletions) = (HashMap::new(), HashMap::new());
             if rev.is_none() {
                 let opts = DiffOpts { context: 0, ..Default::default() };
@@ -187,7 +234,8 @@ impl FileView {
             let newest = committed.clone().map(|b| b.author_time).max().unwrap_or(0);
             let oldest = committed.map(|b| b.author_time).min().unwrap_or(0);
             let lens = build_lenses(&lines, &blame);
-            Ok(FileData { lines, binary, syntax, blame, changes, deletions, newest, oldest, lens })
+            let lens_rows = lens_rows(lines.len(), &lens);
+            Ok(FileData { lines, binary: false, blame_skipped, lens_rows, max_chars, syntax, blame, changes, deletions, newest, oldest, lens })
         });
     }
 
@@ -213,8 +261,10 @@ impl FileView {
             }
         }
         let key = format!("{:?}{}{}{}", self.rev, self.ignore_ws, self.moves, pal.dark);
-        // Worktree files follow edits; revisions are immutable.
-        let stale_worktree = self.rev.is_none() && self.loaded_gen != cx.data.status_gen;
+        // Worktree files follow edits; revisions are immutable. Edits wait for a load under
+        // way, and start another when it lands, or a slow blame under steady changes piles
+        // up. Asking for something else replaces it.
+        let stale_worktree = self.rev.is_none() && self.loaded_gen != cx.data.status_gen && !self.data.busy();
         if key != self.loaded_key || stale_worktree {
             self.loaded_key = key;
             self.loaded_gen = cx.data.status_gen;
@@ -235,6 +285,15 @@ impl FileView {
         if d.binary {
             empty_state(ui, "Binary file", "This file can't be shown as text.", &pal);
         } else {
+            if d.blame_skipped {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("This file is over 10 MB, so blame is off. It can take minutes.").small().color(pal.dim));
+                    if ui.small_button("Blame it anyway").clicked() {
+                        self.force_blame = true;
+                        self.load(&ui.ctx().clone(), cx);
+                    }
+                });
+            }
             self.lines(ui, cx, &d, code_lens);
         }
         self.data.value = Some(d);
@@ -307,7 +366,7 @@ impl FileView {
                 self.find_open = !self.find_open;
             }
             if self.data.busy() || self.nav.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         ui.horizontal(|ui| {
@@ -338,18 +397,25 @@ impl FileView {
 
     fn compare_menu(&self, ui: &mut Ui, cx: &mut Cx) {
         let cur = self.rev.clone().unwrap_or_else(|| "HEAD".to_string());
+        // These walk the history, which can take a while.
         if ui.button("With previous revision").clicked() {
-            match cx.repo.prev_revision(&self.path, &cur) {
-                Some((prev, _)) => cx.diff(DiffSource::Range(prev, cur.clone()), Some(&self.path)),
-                None => cx.toast("This is the first revision of the file."),
-            }
+            let (repo, path, cur) = (cx.repo.clone(), self.path.clone(), cur.clone());
+            cx.out.push(Action::Later(Box::new(move || {
+                Ok(match repo.prev_revision(&path, &cur) {
+                    Some((prev, _)) => Later::Diff(DiffSource::Range(prev, cur), Some(path)),
+                    None => Later::Toast("This is the first revision of the file.".to_string()),
+                })
+            })));
             ui.close();
         }
         if ui.button("With next revision").clicked() {
-            match cx.repo.next_revision(&self.path, &cur) {
-                Some(next) => cx.diff(DiffSource::Range(cur.clone(), next), Some(&self.path)),
-                None => cx.toast("This is the latest revision of the file."),
-            }
+            let (repo, path, cur) = (cx.repo.clone(), self.path.clone(), cur.clone());
+            cx.out.push(Action::Later(Box::new(move || {
+                Ok(match repo.next_revision(&path, &cur) {
+                    Some(next) => Later::Diff(DiffSource::Range(cur, next), Some(path)),
+                    None => Later::Toast("This is the latest revision of the file.".to_string()),
+                })
+            })));
             ui.close();
         }
         if ui.button("With working tree").clicked() {
@@ -404,22 +470,13 @@ impl FileView {
         let lineno_w = digits * char_w + 16.0;
         let text_x = gutter_annot + lineno_w + 6.0;
 
-        let mut rows: Vec<Row> = Vec::with_capacity(d.lines.len() + d.lens.len());
-        let mut li = 0;
-        for i in 0..d.lines.len() {
-            if code_lens {
-                while li < d.lens.len() && d.lens[li].line == i {
-                    rows.push(Row::Lens(li));
-                    li += 1;
-                }
-            }
-            rows.push(Row::Line(i));
-        }
-        let max_chars = d.lines.iter().map(|l| l.len().min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
-        let width = (text_x + max_chars as f32 * char_w + 320.0).max(ui.available_width() - 8.0);
+        // With no lenses showing, rows are simply lines, however many there are.
+        let with_lens = code_lens && !d.lens_rows.is_empty();
+        let total_rows = if with_lens { d.lens_rows.len() } else { d.lines.len() };
+        let width = (text_x + d.max_chars as f32 * char_w + 320.0).max(ui.available_width() - 8.0);
         let mut sa = egui::ScrollArea::both().id_salt(("file", &self.path)).auto_shrink([false, false]);
         if let Some(t) = self.scroll_to.take() {
-            let pos = rows.iter().position(|r| matches!(r, Row::Line(i) if *i == t)).unwrap_or(0);
+            let pos = if with_lens { d.lens_rows.iter().position(|r| matches!(r, Row::Line(i) if *i == t)).unwrap_or(0) } else { t };
             sa = sa.vertical_scroll_offset((pos as f32 * row_h - 80.0).max(0.0));
         }
         let span = (d.newest - d.oldest).max(1) as f32;
@@ -434,11 +491,11 @@ impl FileView {
 
         let sel = self.selected_range();
         ui.spacing_mut().item_spacing.y = 0.0;
-        sa.show_rows(ui, row_h, rows.len(), |ui, range| {
+        sa.show_rows(ui, row_h, total_rows, |ui, range| {
             ui.set_min_width(width);
             ui.spacing_mut().item_spacing.y = 0.0;
             for ri in range {
-                match rows[ri] {
+                match if with_lens { d.lens_rows[ri] } else { Row::Line(ri) } {
                     Row::Lens(k) => {
                         let lens = &d.lens[k];
                         let (rect, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
@@ -549,7 +606,15 @@ impl FileView {
 
         // Code
         let line = &d.lines[i];
-        let job = code_job(line, font, pal.text, d.syntax.get(i), None, Color32::TRANSPARENT);
+        let job = if line.len() >= LONG_LINE {
+            // A screen of these fits many times over, and each can be hundreds of kilobytes.
+            if self.long_jobs.len() >= MAX_LONG_JOBS {
+                self.long_jobs.clear();
+            }
+            self.long_jobs.entry((i, font.to_bits())).or_insert_with(|| code_job(line, font, pal.text, d.syntax.get(i), None, Color32::TRANSPARENT)).clone()
+        } else {
+            code_job(line, font, pal.text, d.syntax.get(i), None, Color32::TRANSPARENT)
+        };
         let g = ui.painter().layout_job(job);
         let code_w = g.size().x;
         let code_rect = Rect::from_min_max(pos2(rect.left() + text_x, rect.top()), rect.max).intersect(ui.clip_rect());

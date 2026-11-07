@@ -82,7 +82,7 @@ impl HistoryView {
                 cx.open(Tab::visual(&self.path));
             }
             if self.commits.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         ui.separator();

@@ -10,7 +10,7 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 pub type Spans = Vec<(usize, usize, Color32)>;
 
 /// Files above this size are shown without highlighting to stay responsive.
-const MAX_BYTES: usize = 800_000;
+pub const MAX_BYTES: usize = 800_000;
 
 struct Sets {
     syntax: SyntaxSet,
@@ -38,7 +38,9 @@ fn syntax_for<'a>(s: &'a SyntaxSet, path: &str) -> &'a SyntaxReference {
 
 /// Highlight consecutive lines of one logical text.
 pub fn highlight(path: &str, lines: &[&str], dark: bool) -> Vec<Spans> {
-    let total: usize = lines.iter().map(|l| l.len()).sum();
+    // Only what can be drawn: colouring a whole 5 MB line takes many seconds.
+    let shown = |l: &&str| gitem_core::util::prefix(l, crate::widgets::MAX_SHOWN_LINE_BYTES).len();
+    let total: usize = lines.iter().map(shown).sum();
     if total > MAX_BYTES {
         return vec![Vec::new(); lines.len()];
     }
@@ -47,6 +49,7 @@ pub fn highlight(path: &str, lines: &[&str], dark: bool) -> Vec<Spans> {
     let mut h = HighlightLines::new(syntax_for(&st.syntax, path), theme);
     let mut out = Vec::with_capacity(lines.len());
     for l in lines {
+        let l = &gitem_core::util::prefix(l, crate::widgets::MAX_SHOWN_LINE_BYTES);
         let with_nl = format!("{l}\n");
         let mut spans = Vec::new();
         if let Ok(parts) = h.highlight_line(&with_nl, &st.syntax) {

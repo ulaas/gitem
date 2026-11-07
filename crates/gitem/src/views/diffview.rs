@@ -1,6 +1,7 @@
 //! The visual diff tool: side-by-side or unified, syntax highlighting, word diff,
 //! hunk and line staging, whitespace and algorithm options, image comparison.
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use egui::{Align2, Color32, Rect, RichText, Sense, Ui, pos2, vec2};
 use gitem_core::diff::{self, FileDiff, LineKind, PatchMode, SideRow};
@@ -25,8 +26,21 @@ enum Mode {
 /// Below this each half of a side-by-side diff has room for little but its line numbers.
 const MIN_SPLIT_WIDTH: f32 = 560.0;
 
+/// A line this long isn't compared word by word: that's quadratic, and it can't all be drawn.
+const MAX_WORD_DIFF_LINE: usize = 20_000;
+
+/// A long line's colours are worth keeping between frames. Below this, egui's own cache is enough.
+const LONG_LINE: usize = 1_000;
+const MAX_LONG_JOBS: usize = 400;
+
 #[derive(Default)]
 struct Prepared {
+    /// Worked out once, as they mean walking every line of the file's diff.
+    additions: usize,
+    deletions: usize,
+    /// Unified rows: a hunk's header, then each of its lines.
+    unified: Vec<(usize, Option<usize>)>,
+    unified_chars: usize,
     side: Vec<SideRow>,
     /// (hunk, line index) -> changed byte ranges within that line.
     words: HashMap<(usize, usize), Vec<(usize, usize)>>,
@@ -41,7 +55,8 @@ fn prepare(f: &FileDiff, dark: bool) -> Prepared {
     let mut words = HashMap::new();
     for r in &side {
         if let (Some(li), Some(ri), Some((_, lt)), Some((_, rt))) = (r.left_idx, r.right_idx, &r.left, &r.right)
-            && r.left_kind == Some(LineKind::Del) && r.right_kind == Some(LineKind::Add) {
+            && r.left_kind == Some(LineKind::Del) && r.right_kind == Some(LineKind::Add)
+            && lt.len().max(rt.len()) <= MAX_WORD_DIFF_LINE {
                 let (o, n) = diff::word_diff(lt, rt);
                 // A line replaced wholesale gains nothing from word highlights.
                 if o.iter().map(|x| x.1 - x.0).sum::<usize>() * 10 < lt.len() * 9 || n.iter().map(|x| x.1 - x.0).sum::<usize>() * 10 < rt.len() * 9 {
@@ -52,14 +67,50 @@ fn prepare(f: &FileDiff, dark: bool) -> Prepared {
     }
     let mut syn = HashMap::new();
     let path = f.display_path().to_string();
+    // The limit is for the whole diff, not each hunk: a diff can have thousands of hunks.
+    let mut budget = syntax::MAX_BYTES;
     for (hi, h) in f.hunks.iter().enumerate() {
         let lines: Vec<&str> = h.lines.iter().map(|l| l.text.as_str()).collect();
+        let size: usize = lines.iter().map(|l| l.len().min(MAX_SHOWN_LINE_BYTES)).sum();
+        if size > budget {
+            break;
+        }
+        budget -= size;
         for (li, s) in syntax::highlight(&path, &lines, dark).into_iter().enumerate() {
             syn.insert((hi, li), s);
         }
     }
     let max_chars = side.iter().flat_map(|r| [r.left.as_ref(), r.right.as_ref()]).flatten().map(|x| shown_chars(&x.1)).max().unwrap_or(0);
-    Prepared { side, words, syntax: syn, max_chars }
+    let mut unified = Vec::new();
+    for (hi, h) in f.hunks.iter().enumerate() {
+        unified.push((hi, None));
+        unified.extend((0..h.lines.len()).map(|li| (hi, Some(li))));
+    }
+    let unified_chars = f.hunks.iter().flat_map(|h| &h.lines).map(|l| l.text.len().min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
+    Prepared { additions: f.additions(), deletions: f.deletions(), unified, unified_chars, side, words, syntax: syn, max_chars }
+}
+
+fn change_for(f: &FileDiff) -> gitem_core::FileChange {
+    let status = if f.is_new {
+        gitem_core::FileStatus::Added
+    } else if f.is_deleted {
+        gitem_core::FileStatus::Deleted
+    } else if f.is_rename {
+        gitem_core::FileStatus::Renamed
+    } else {
+        gitem_core::FileStatus::Modified
+    };
+    gitem_core::FileChange { path: f.display_path().to_string(), orig_path: None, status, additions: Some(f.additions() as u32), deletions: Some(f.deletions() as u32) }
+}
+
+/// A loaded diff. Each file is made ready for showing when it's first shown: a commit of
+/// 20,000 files has 20,000 of these, and one screen.
+#[derive(Default)]
+struct Loaded {
+    files: Vec<Arc<FileDiff>>,
+    /// One row per file, in the same order, for the list.
+    rows: Vec<gitem_core::FileChange>,
+    prepared: HashMap<usize, Arc<Prepared>>,
 }
 
 #[derive(Default)]
@@ -67,12 +118,22 @@ struct ImagePair {
     old: Option<egui::TextureHandle>,
     new: Option<egui::TextureHandle>,
     loaded_for: Option<String>,
+    /// Both versions read and decoded, on their way to becoming textures.
+    decoding: Task<(Option<egui::ColorImage>, Option<egui::ColorImage>)>,
 }
 
 pub struct DiffView {
     pub src: DiffSource,
     pub path: Option<String>,
-    files: Task<Vec<(FileDiff, Prepared)>>,
+    files: Task<Loaded>,
+    /// The file being made ready, and the load it belongs to.
+    preparing: Task<(usize, Arc<Prepared>)>,
+    /// Which files match the filter, and for what filter over which load.
+    filtered: Option<(String, u64, Vec<usize>)>,
+    load_no: u64,
+    /// Long lines' jobs, by hunk, line and font size. Jobs and not galleys, which are tied
+    /// to the font atlas of the moment.
+    long_jobs: HashMap<(usize, usize, usize, u32), egui::text::LayoutJob>,
     loaded_status_gen: u64,
     mode: Mode,
     /// How far the side-by-side text is scrolled sideways.
@@ -87,6 +148,7 @@ pub struct DiffView {
     dark: Option<bool>,
     needs_load: bool,
     file_filter: String,
+    preparing_for: Option<usize>,
     /// Unpinned diffs are replaced by the next one opened from a list.
     pub pinned: bool,
 }
@@ -97,6 +159,10 @@ impl DiffView {
             src,
             path,
             files: Task::default(),
+            preparing: Task::default(),
+            filtered: None,
+            load_no: 0,
+            long_jobs: HashMap::new(),
             loaded_status_gen: u64::MAX,
             mode: Mode::Split,
             split_x: 0.0,
@@ -110,6 +176,7 @@ impl DiffView {
             dark: None,
             needs_load: true,
             file_filter: String::new(),
+            preparing_for: None,
             pinned: false,
         }
     }
@@ -119,8 +186,8 @@ impl DiffView {
         if let Some(e) = &self.files.error {
             return Some(Err(e.clone()));
         }
-        let files = self.files.get()?;
-        let lines = files.iter().flat_map(|(f, _)| &f.hunks).flat_map(|h| &h.lines).filter(|l| matches!(l.kind, LineKind::Add | LineKind::Del));
+        let loaded = self.files.get()?;
+        let lines = loaded.files.iter().flat_map(|f| &f.hunks).flat_map(|h| &h.lines).filter(|l| matches!(l.kind, LineKind::Add | LineKind::Del));
         Some(Ok(lines.map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")))
     }
 
@@ -151,7 +218,6 @@ impl DiffView {
     }
 
     fn reload(&mut self, ctx: &egui::Context, cx: &Cx) {
-        let repo = cx.repo.clone();
         let (src, path) = (self.src.clone(), self.path.clone());
         let mut opts = self.opts;
         if self.full_file {
@@ -164,16 +230,30 @@ impl DiffView {
         let dark = cx.pal.dark;
         self.dark = Some(dark);
         self.selected_lines.clear();
-        self.files.spawn(ctx, move || -> Result<Vec<(FileDiff, Prepared)>, String> {
-            let files = repo.diff(&src, path.as_deref(), &opts).map_err(|e| e.to_string())?;
-            Ok(files.into_iter().map(|f| { let p = prepare(&f, dark); (f, p) }).collect())
+        self.preparing.stop();
+        self.long_jobs.clear();
+        self.load_no += 1;
+        // The file on screen comes ready with the load, so a reload swaps it in one piece.
+        let selected = self.selected_file;
+        self.files.spawn_git(ctx, cx.repo, move |repo| -> Result<Loaded, String> {
+            let files: Vec<Arc<FileDiff>> = repo.diff(&src, path.as_deref(), &opts).map_err(|e| e.to_string())?.into_iter().map(Arc::new).collect();
+            let rows = files.iter().map(|f| change_for(f)).collect();
+            let at = if selected < files.len() { selected } else { 0 };
+            let prepared = files.get(at).map(|f| (at, Arc::new(prepare(f, dark)))).into_iter().collect();
+            Ok(Loaded { files, rows, prepared })
         });
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         self.files.poll();
+        if self.preparing.poll()
+            && let (Some((at, p)), Some(loaded)) = (self.preparing.value.take(), self.files.value.as_mut())
+        {
+            loaded.prepared.insert(at, p);
+        }
         let live = matches!(self.src, DiffSource::Unstaged | DiffSource::Staged | DiffSource::WorkingVsHead | DiffSource::WorkingVs(_) | DiffSource::Untracked);
-        let status_changed = live && self.loaded_status_gen != cx.data.status_gen;
+        // A load under way finishes first, and this starts another when it lands.
+        let status_changed = live && self.loaded_status_gen != cx.data.status_gen && !self.files.busy();
         if self.needs_load || status_changed || self.dark != Some(cx.pal.dark) {
             self.needs_load = false;
             self.loaded_status_gen = cx.data.status_gen;
@@ -186,52 +266,58 @@ impl DiffView {
         if let Some(e) = &self.files.error {
             error_box(ui, e, cx.pal);
         }
-        let Some(files) = self.files.value.take() else {
+        let Some(loaded) = self.files.value.take() else {
             spinner_row(ui, "Computing diff…", cx.pal);
             return;
         };
-        if files.is_empty() {
+        if loaded.files.is_empty() {
             let hint = if self.opts.ws != WsMode::None { "Only whitespace changed, or the file matches its source." } else { "These two versions are identical." };
             empty_state(ui, "No differences", hint, cx.pal);
         } else {
-            if files.len() > 1 {
-                egui::Panel::left("diff-files").resizable(true).default_size(240.0).show(ui, |ui| self.file_list(ui, cx, &files));
+            if loaded.files.len() > 1 {
+                egui::Panel::left("diff-files").resizable(true).default_size(240.0).show(ui, |ui| self.file_list(ui, cx, &loaded));
             }
-            if self.selected_file >= files.len() {
+            if self.selected_file >= loaded.files.len() {
                 self.selected_file = 0;
             }
-            let (f, prepared) = &files[self.selected_file];
-            self.content(ui, cx, f, prepared);
+            let f = loaded.files[self.selected_file].clone();
+            match loaded.prepared.get(&self.selected_file).cloned() {
+                Some(prepared) => self.content(ui, cx, &f, &prepared),
+                None => {
+                    if !self.preparing.busy() || self.preparing_for != Some(self.selected_file) {
+                        self.preparing_for = Some(self.selected_file);
+                        let (at, dark) = (self.selected_file, cx.pal.dark);
+                        self.preparing.spawn(ui.ctx(), move || -> Result<(usize, Arc<Prepared>), String> { Ok((at, Arc::new(prepare(&f, dark)))) });
+                    }
+                    spinner_row(ui, "Getting this file ready…", cx.pal);
+                }
+            }
         }
-        self.files.value = Some(files);
+        self.files.value = Some(loaded);
     }
 
-    fn file_list(&mut self, ui: &mut Ui, cx: &mut Cx, files: &[(FileDiff, Prepared)]) {
+    fn file_list(&mut self, ui: &mut Ui, cx: &mut Cx, loaded: &Loaded) {
         let p = cx.pal.clone();
         ui.add(crate::widgets::input(&mut self.file_filter).hint_text("Filter files").desired_width(f32::INFINITY));
-        egui::ScrollArea::vertical().id_salt("diff-file-list").auto_shrink([false, false]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
+        if self.filtered.as_ref().is_none_or(|(q, n, _)| *q != self.file_filter || *n != self.load_no) {
             let q = self.file_filter.to_lowercase();
-            for (i, (f, _)) in files.iter().enumerate() {
-                if !q.is_empty() && !f.display_path().to_lowercase().contains(&q) {
-                    continue;
-                }
-                let status = if f.is_new {
-                    gitem_core::FileStatus::Added
-                } else if f.is_deleted {
-                    gitem_core::FileStatus::Deleted
-                } else if f.is_rename {
-                    gitem_core::FileStatus::Renamed
-                } else {
-                    gitem_core::FileStatus::Modified
-                };
-                let ch = gitem_core::FileChange { path: f.display_path().to_string(), orig_path: None, status, additions: Some(f.additions() as u32), deletions: Some(f.deletions() as u32) };
-                if file_row(ui, &ch, i == self.selected_file, &p).on_hover_text(f.display_path()).clicked() {
+            let hits = loaded.rows.iter().enumerate().filter(|(_, c)| q.is_empty() || c.path.to_lowercase().contains(&q)).map(|(i, _)| i).collect();
+            self.filtered = Some((self.file_filter.clone(), self.load_no, hits));
+        }
+        let Some((_, _, hits)) = self.filtered.take() else { return };
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::ScrollArea::vertical().id_salt("diff-file-list").auto_shrink([false, false]).show_rows(ui, 22.0, hits.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for i in hits[range].iter().copied() {
+                let ch = &loaded.rows[i];
+                if file_row(ui, ch, i == self.selected_file, &p).on_hover_text(ch.path.as_str()).clicked() {
                     self.selected_file = i;
                     self.selected_lines.clear();
+                    self.scroll_to_row = None;
                 }
             }
         });
+        self.filtered = Some((self.file_filter.clone(), self.load_no, hits));
     }
 
     fn toolbar(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -298,7 +384,7 @@ impl DiffView {
             }
             toggle(ui, &mut self.pinned, "Keep open", "Keep this tab when opening another diff");
             if self.files.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         if reload {
@@ -307,8 +393,8 @@ impl DiffView {
     }
 
     fn jump(&mut self, dir: i32) {
-        let Some(files) = self.files.get() else { return };
-        let Some((_, pr)) = files.get(self.selected_file) else { return };
+        let Some(loaded) = self.files.get() else { return };
+        let Some(pr) = loaded.prepared.get(&self.selected_file) else { return };
         let headers: Vec<usize> = pr.side.iter().enumerate().filter(|(_, r)| r.is_hunk_header).map(|(i, _)| i).collect();
         if headers.is_empty() {
             return;
@@ -332,13 +418,13 @@ impl DiffView {
 
     /// Whether every hunk with a selected line can be turned back into an exact patch.
     fn selection_is_exact(&self) -> bool {
-        let Some((f, _)) = self.files.get().and_then(|files| files.get(self.selected_file)) else { return true };
+        let Some(f) = self.files.get().and_then(|l| l.files.get(self.selected_file)) else { return true };
         self.selected_lines.iter().all(|(h, _)| f.hunks.get(*h).is_none_or(diff::hunk_is_exact))
     }
 
     fn apply_selected_lines(&mut self, cx: &mut Cx) {
-        let Some(files) = self.files.get() else { return };
-        let Some((f, _)) = files.get(self.selected_file) else { return };
+        let Some(loaded) = self.files.get() else { return };
+        let Some(f) = loaded.files.get(self.selected_file) else { return };
         let (mode, reverse, title) = if self.src == DiffSource::Unstaged { (PatchMode::Forward, false, "Stage lines") } else { (PatchMode::Reverse, true, "Unstage lines") };
         for (h, lines) in self.selected_by_hunk() {
             if let Some(patch) = diff::build_patch(f, h, Some(&lines), mode) {
@@ -349,8 +435,8 @@ impl DiffView {
     }
 
     fn discard_selected_lines(&mut self, cx: &mut Cx) {
-        let Some(files) = self.files.get() else { return };
-        let Some((f, _)) = files.get(self.selected_file) else { return };
+        let Some(loaded) = self.files.get() else { return };
+        let Some(f) = loaded.files.get(self.selected_file) else { return };
         // One confirmation covering every hunk, applied from the bottom up.
         let mut op = ops::GitOp::new("Discard lines");
         for (h, lines) in self.selected_by_hunk() {
@@ -397,8 +483,8 @@ impl DiffView {
         ui.horizontal(|ui| {
             let name = if f.is_rename { format!("{} → {}", f.old_path, f.new_path) } else { f.display_path().to_string() };
             ui.label(RichText::new(name).strong());
-            ui.label(RichText::new(format!("+{}", f.additions())).color(pal.add_fg).monospace());
-            ui.label(RichText::new(format!("-{}", f.deletions())).color(pal.del_fg).monospace());
+            ui.label(RichText::new(format!("+{}", pr.additions)).color(pal.add_fg).monospace());
+            ui.label(RichText::new(format!("-{}", pr.deletions)).color(pal.del_fg).monospace());
             if let Some(s) = f.similarity {
                 ui.label(RichText::new(format!("{s}% similar")).small().color(pal.faint));
             }
@@ -470,7 +556,14 @@ impl DiffView {
         if let Some(t) = text {
             let spans = key.and_then(|k| pr.syntax.get(&k));
             let words = key.and_then(|k| pr.words.get(&k)).map(|v| v.as_slice());
-            let job = code_job(t, font, pal.text, spans, words, word_bg);
+            // A screen of these fits many times over, and each can be hundreds of kilobytes.
+            if self.long_jobs.len() >= MAX_LONG_JOBS {
+                self.long_jobs.clear();
+            }
+            let job = match key.filter(|_| t.len() >= LONG_LINE) {
+                Some((h, l)) => self.long_jobs.entry((self.selected_file, h, l, font.to_bits())).or_insert_with(|| code_job(t, font, pal.text, spans, words, word_bg)).clone(),
+                None => code_job(t, font, pal.text, spans, words, word_bg),
+            };
             let g = ui.painter().layout_job(job);
             let clip = Rect::from_min_max(pos2(rect.left() + gutter, rect.top()), rect.max).intersect(ui.clip_rect());
             ui.painter().with_clip_rect(clip).galley(pos2(rect.left() + gutter + 4.0 - scroll_x, rect.center().y - g.size().y / 2.0), g, pal.text);
@@ -539,15 +632,7 @@ impl DiffView {
         let font = cx.settings.editor_font_size;
         let row_h = (font * 1.45).ceil();
         let gutter = 96.0;
-        // Flat row list: hunk headers plus every line.
-        let mut rows: Vec<(usize, Option<usize>)> = Vec::new();
-        for (hi, h) in f.hunks.iter().enumerate() {
-            rows.push((hi, None));
-            for li in 0..h.lines.len() {
-                rows.push((hi, Some(li)));
-            }
-        }
-        let max_chars = f.hunks.iter().flat_map(|h| &h.lines).map(|l| l.text.len().min(MAX_SHOWN_LINE_BYTES + 64)).max().unwrap_or(0);
+        let (rows, max_chars) = (&pr.unified, pr.unified_chars);
         let char_w = ui.fonts_mut(|fx| fx.glyph_width(&mono(font), 'm'));
         let width = ((max_chars as f32 * char_w) + gutter + 24.0).max(ui.available_width() - 10.0);
         let mut sa = egui::ScrollArea::both().id_salt(("unified", self.selected_file)).auto_shrink([false, false]);
@@ -609,28 +694,38 @@ impl DiffView {
         let key = format!("{:?}:{path}", self.src);
         if self.images.loaded_for.as_deref() != Some(&key) {
             self.images = ImagePair { loaded_for: Some(key), ..Default::default() };
-            let load = |bytes: Option<Vec<u8>>, name: &str, ui: &Ui| -> Option<egui::TextureHandle> {
-                let b = bytes.filter(|b| b.len() < MAX_INLINE_IMAGE)?;
-                let img = decode_image(&b)?;
-                Some(ui.ctx().load_texture(name, img, egui::TextureOptions::LINEAR))
-            };
-            let (old_rev, new_rev): (Option<String>, Option<String>) = match &self.src {
-                DiffSource::Commit(s) => (Some(format!("{s}^")), Some(s.clone())),
-                DiffSource::Range(a, b) => (Some(a.clone()), Some(b.clone())),
-                DiffSource::MergeBase(a, b) => (cx.repo.merge_base(a, b).ok(), Some(b.clone())),
-                DiffSource::Staged => (Some("HEAD".into()), Some(String::new())),
-                DiffSource::Unstaged => (Some(String::new()), None),
-                DiffSource::WorkingVsHead => (Some("HEAD".into()), None),
-                DiffSource::WorkingVs(r) => (Some(r.clone()), None),
-                _ => (None, None),
-            };
-            let old = old_rev.and_then(|r| cx.repo.file_at(&r, &f.old_path).ok());
-            let new = match new_rev {
-                Some(r) => cx.repo.file_at(&r, &path).ok(),
-                None => cx.repo.worktree_file(&path).ok(),
-            };
-            self.images.old = load(old, "diff-old", ui);
-            self.images.new = load(new, "diff-new", ui);
+            let (src, old_path, new_path) = (self.src.clone(), f.old_path.clone(), path.clone());
+            // Up to 32 MB each to read and decode, which is no job for a frame.
+            self.images.decoding.spawn_git(ui.ctx(), cx.repo, move |repo| -> Result<(Option<egui::ColorImage>, Option<egui::ColorImage>), String> {
+                let (old_rev, new_rev): (Option<String>, Option<String>) = match &src {
+                    DiffSource::Commit(s) => (Some(format!("{s}^")), Some(s.clone())),
+                    DiffSource::Range(a, b) => (Some(a.clone()), Some(b.clone())),
+                    DiffSource::MergeBase(a, b) => (repo.merge_base(a, b).ok(), Some(b.clone())),
+                    DiffSource::Staged => (Some("HEAD".into()), Some(String::new())),
+                    DiffSource::Unstaged => (Some(String::new()), None),
+                    DiffSource::WorkingVsHead => (Some("HEAD".into()), None),
+                    DiffSource::WorkingVs(r) => (Some(r.clone()), None),
+                    _ => (None, None),
+                };
+                let old = old_rev.and_then(|r| repo.file_at(&r, &old_path).ok());
+                let new = match new_rev {
+                    Some(r) => repo.file_at(&r, &new_path).ok(),
+                    None => repo.worktree_file(&new_path).ok(),
+                };
+                let decode = |bytes: Option<Vec<u8>>| bytes.filter(|b| b.len() < MAX_INLINE_IMAGE).and_then(|b| decode_image(&b));
+                Ok((decode(old), decode(new)))
+            });
+        }
+        if self.images.decoding.poll()
+            && let Some((old, new)) = self.images.decoding.value.take()
+        {
+            let load = |img: Option<egui::ColorImage>, name: &str| img.map(|i| ui.ctx().load_texture(name, i, egui::TextureOptions::LINEAR));
+            self.images.old = load(old, "diff-old");
+            self.images.new = load(new, "diff-new");
+        }
+        if self.images.decoding.busy() {
+            spinner_row(ui, "Loading images…", &pal);
+            return;
         }
         ui.columns(2, |c| {
             for (col, (tex, name)) in [(self.images.old.as_ref(), "Before"), (self.images.new.as_ref(), "After")].into_iter().enumerate() {

@@ -42,6 +42,13 @@ pub enum Action {
     /// Network or other slow work off the UI thread. Its message becomes a toast
     /// and the repository refreshes afterwards.
     Background(Box<dyn FnOnce() -> Result<String, String> + Send>),
+    /// Slow work off the UI thread that ends in something to do, by the repository that was
+    /// active when it was asked for.
+    Later(Box<dyn FnOnce() -> Result<Later, String> + Send>),
+    /// Run outside the queue: it ends when something else does, such as a tool the user has open.
+    RunDetached(GitOp),
+    /// Give up on any read that's stuck, and read the repository again.
+    Retry,
     /// Open a working-tree file in the configured editor, or reveal it.
     OpenFile(PathBuf),
     /// Run an op outside any repo (clone, init); then open the path on success.
@@ -67,6 +74,27 @@ pub enum Action {
     BranchPr(Option<(u64, String)>),
     /// Apply an action to a specific repository, whichever one is showing now.
     ForRepo(PathBuf, Box<Action>),
+}
+
+/// What slow work comes back with. Plain data, since it's made on another thread.
+pub enum Later {
+    Copy(String),
+    Toast(String),
+    Run(GitOp),
+    RunGlobal(GitOp),
+    Diff(DiffSource, Option<String>),
+}
+
+impl Later {
+    pub fn into_action(self) -> Action {
+        match self {
+            Later::Copy(s) => Action::Copy(s),
+            Later::Toast(s) => Action::Toast(s),
+            Later::Run(op) => Action::Run(op),
+            Later::RunGlobal(op) => Action::RunGlobal { op, open_after: None },
+            Later::Diff(src, path) => Action::OpenTab(Tab::diff(src, path)),
+        }
+    }
 }
 
 /// Everything a view needs for one frame.
@@ -132,7 +160,7 @@ impl Cx<'_> {
     }
 
     pub fn status(&self) -> Option<&RepoStatus> {
-        self.data.status.get()
+        self.data.status.get().map(|s| &**s)
     }
 
     pub fn current_branch(&self) -> Option<String> {

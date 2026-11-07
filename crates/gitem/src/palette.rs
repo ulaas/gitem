@@ -170,9 +170,9 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Show", "All Changes vs HEAD", |cx| cx.diff(DiffSource::WorkingVsHead, None)));
     v.push(item("Git", "Undo Last Commit", |cx| cx.run(ops::undo_commit())));
     v.push(item("Git", "Apply Copied Patch…", |cx| cx.form(apply_copied_patch_form())));
-    v.push(item("Git", "Copy Working Changes as Patch", |cx| match cx.repo.patch_text(&DiffSource::WorkingVsHead) {
-        Ok(p) => cx.copy(p),
-        Err(e) => cx.error(e.to_string()),
+    v.push(item("Git", "Copy Working Changes as Patch", |cx| {
+        let repo = cx.repo.clone();
+        cx.out.push(Action::Later(Box::new(move || repo.patch_text(&DiffSource::WorkingVsHead).map(crate::action::Later::Copy).map_err(|e| e.to_string()))));
     }));
     v.push(item("Git", "Publish Repository…", |cx| {
         let branch = cx.current_branch().unwrap_or_else(|| "main".to_string());
@@ -189,7 +189,8 @@ pub fn commands() -> Vec<Item> {
     }));
     v.push(item("Show", "Open Directory Compare…", |cx| {
         cx.form(forms::FormDialog::new("Directory compare", "Open").text("a", "From", "HEAD~1").text("b", "To", "HEAD").on_submit(|v| {
-            Ok(vec![Action::Run(ops::difftool_dir(&v.text("a"), &v.text("b")))])
+            // Outside the queue: it lasts for as long as the tool stays open.
+            Ok(vec![Action::RunDetached(ops::difftool_dir(&v.text("a"), &v.text("b")))])
         }));
     }));
     v.push(item("Remote", "Open Repository on Remote", |cx| match cx.forge().map(|f| f.web_url()) {
@@ -425,6 +426,9 @@ fn divider(ui: &mut Ui, p: &Palette) {
     ui.painter().rect_filled(r, 0.0, p.border);
 }
 
+/// The query, then the generations of the refs, status, and file and commit lists.
+type RankKey = (String, u64, u64, u64);
+
 #[derive(Default)]
 pub struct PaletteState {
     pub query: String,
@@ -440,6 +444,10 @@ pub struct PaletteState {
     scroll_to_selected: bool,
     opened_at: Option<f64>,
     pointer_at_open: Option<egui::Pos2>,
+    /// The ranked list, and what it was worked out from.
+    ranked: Option<(RankKey, Vec<Hit>)>,
+    /// Bumped when the file or commit list arrives.
+    data_gen: u64,
 }
 
 impl PaletteState {
@@ -483,8 +491,15 @@ impl PaletteState {
         if matches!(mode, Mode::All | Mode::Files) {
             if !self.started {
                 self.started = true;
-                let r = cx.repo.clone();
-                self.files.spawn(ctx, move || r.tracked_files(None));
+                // `status` has the untracked ones already, and looking for them again would
+                // be the slow part.
+                let untracked: Vec<String> = cx.status().map(|s| s.entries.iter().filter(|e| e.worktree == gitem_core::FileStatus::Untracked).map(|e| e.path.clone()).collect()).unwrap_or_default();
+                self.files.spawn_git(ctx, cx.repo, move |r| {
+                    r.tracked_files(None).map(|mut files| {
+                        files.extend(untracked);
+                        files
+                    })
+                });
             }
             // Repositories can hold many thousands of files: only rescan on a new query.
             let key = format!("{mode:?} {q}");
@@ -527,8 +542,9 @@ impl PaletteState {
     /// Draws the palette. Returns true when it should close.
     pub fn show(&mut self, ctx: &egui::Context, cx: &mut Cx) -> bool {
         let p = cx.pal.clone();
-        self.files.poll();
-        self.commits.poll();
+        if self.files.poll() | self.commits.poll() {
+            self.data_gen += 1;
+        }
         let now = ctx.input(|i| i.time);
         let t = ((now - *self.opened_at.get_or_insert(now)) / 0.14).clamp(0.0, 1.0) as f32;
         let ease = 1.0 - (1.0 - t).powi(3);
@@ -556,8 +572,14 @@ impl PaletteState {
 
         let text = self.query.clone();
         let (mode, q) = Mode::parse(&text);
-        let items = self.collect(ctx, cx, mode, q);
-        let mut hits = rank(items, q, &cx.settings.palette_recent);
+        let key = (text.clone(), cx.data.refs_gen, cx.data.status_gen, self.data_gen);
+        let mut hits = match self.ranked.take() {
+            Some((k, hits)) if k == key => hits,
+            _ => {
+                let items = self.collect(ctx, cx, mode, q);
+                rank(items, q, &cx.settings.palette_recent)
+            }
+        };
         let n = hits.len();
         const PAGE: usize = 8;
         self.selected = self.selected.min(n.saturating_sub(1));
@@ -597,6 +619,10 @@ impl PaletteState {
         if self.query != text {
             self.selected = 0;
             self.scroll_to_selected = true;
+        }
+        if self.query == text && chosen.is_none_or(|i| i >= hits.len()) {
+            self.ranked = Some((key, hits));
+            return resp.backdrop_response.clicked();
         }
         if let Some(i) = chosen
             && i < hits.len()

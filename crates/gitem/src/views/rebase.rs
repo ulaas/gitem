@@ -144,7 +144,7 @@ impl RebaseView {
                     self.load(&ui.ctx().clone(), cx);
                 }
                 if self.loaded.busy() {
-                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.add(spinner(14.0));
                 }
             });
             ui.horizontal(|ui| {

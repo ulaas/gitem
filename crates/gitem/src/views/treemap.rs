@@ -59,7 +59,7 @@ impl TreemapView {
             ui.selectable_value(&mut self.mode, Mode::Activity, "Files by recent commits");
             ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter by path").desired_width(220.0));
             if self.files.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         if let Some(e) = &self.files.error {

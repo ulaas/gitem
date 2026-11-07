@@ -58,6 +58,9 @@ pub struct GraphView {
     scroll_to: Option<usize>,
     query: String,
     matches: Task<HashSet<String>>,
+    /// A ref being looked up to jump to, and the name asked for.
+    jump: Task<(String, String)>,
+    egui_ctx: egui::Context,
     match_list: Vec<usize>,
     match_pos: usize,
     filter_to_matches: bool,
@@ -89,6 +92,8 @@ impl Default for GraphView {
         Self {
             data: Task::default(),
             loaded_gen: u64::MAX,
+            jump: Task::default(),
+            egui_ctx: egui::Context::default(),
             loaded_status_gen: u64::MAX,
             limit: 0,
             filters: Filters { remotes: true, tags: true, stashes: true, ..Default::default() },
@@ -122,7 +127,7 @@ impl Default for GraphView {
 }
 
 fn build_query(f: &Filters, limit: usize, stash_shas: &[String], cur: Option<&str>) -> LogQuery {
-    let mut q = LogQuery { limit, exclude_stash: true, no_merges: f.no_merges, first_parent: f.first_parent, ..Default::default() };
+    let mut q = LogQuery { limit, exclude_stash: true, no_merges: f.no_merges, first_parent: f.first_parent, date_order: true, ..Default::default() };
     if let Some(s) = &f.solo {
         q.revs.push(s.clone());
         return q;
@@ -235,9 +240,9 @@ impl GraphView {
             self.match_list.clear();
             return;
         }
-        let repo = cx.repo.clone();
         let opts = (self.match_all, self.match_case, self.regex);
-        self.matches.spawn(ctx, move || -> Result<HashSet<String>, String> {
+        // A new search replaces the last one, whose git stops: `change:` can run for minutes.
+        self.matches.spawn_git(ctx, cx.repo, move |repo| -> Result<HashSet<String>, String> {
             let mut lq = parse_search(&q);
             lq.limit = 5000;
             lq.all_match = opts.0;
@@ -263,7 +268,10 @@ impl GraphView {
                 self.run_search(ui.ctx(), cx);
             }
             if self.matches.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
+                if ui.small_button("Stop").on_hover_text("Stop this search").clicked() {
+                    self.matches.stop();
+                }
             }
             if !self.match_list.is_empty() || self.matches.get().is_some() {
                 ui.label(RichText::new(format!("{} of {}", if self.match_list.is_empty() { 0 } else { self.match_pos + 1 }, self.match_list.len())).color(p.dim));
@@ -367,7 +375,7 @@ impl GraphView {
                 self.finder = Some(String::new());
             }
             if self.data.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         changed
@@ -386,7 +394,10 @@ impl GraphView {
         // The WIP row only depends on dirtiness, so plain status churn doesn't reload.
         let dirty = cx.status().is_some_and(|s| !s.entries.is_empty());
         let status_changed = self.loaded_status_gen != cx.data.status_gen && (dirty != self.wip);
-        if self.loaded_gen != cx.data.refs_gen || status_changed {
+        // The first load waits for what it depends on: stashes, HEAD, and whether the tree is
+        // dirty. Otherwise each of those arriving reloads the whole graph.
+        let ready = (cx.data.refs.get().is_some() || cx.data.refs.error.is_some()) && (cx.status().is_some() || cx.data.status.error.is_some());
+        if ready && (self.loaded_gen != cx.data.refs_gen || status_changed) {
             self.loaded_gen = cx.data.refs_gen;
             self.loaded_status_gen = cx.data.status_gen;
             self.reload(&ctx, cx);
@@ -412,6 +423,8 @@ impl GraphView {
         if changed || std::mem::take(&mut self.pending_reload) {
             self.reload(&ctx, cx);
         }
+        self.egui_ctx = ctx.clone();
+        self.land_jump(cx);
         self.keys(ui, cx);
         self.ref_finder(ui, cx);
         self.stats.poll();
@@ -466,7 +479,20 @@ impl GraphView {
     }
 
     fn jump_to_ref(&mut self, name: &str, cx: &mut Cx) {
-        let Ok(sha) = cx.repo.resolve(name) else { return };
+        let name = name.to_string();
+        self.jump.spawn_git(&self.egui_ctx, cx.repo, move |r| r.resolve(&name).map(|sha| (name, sha)));
+    }
+
+    fn land_jump(&mut self, cx: &mut Cx) {
+        if !self.jump.poll() {
+            return;
+        }
+        self.jump.error = None;
+        let Some((name, sha)) = self.jump.value.take() else { return };
+        if sha.is_empty() {
+            return;
+        }
+        let name = name.as_str();
         match self.data.get().and_then(|g| g.index.get(&sha).copied()) {
             Some(i) => {
                 self.scroll_to = Some(i);

@@ -220,7 +220,7 @@ pub fn load_more_bar(ui: &mut Ui, id: &str, shown: usize, noun: &str, step: usiz
                     choice = Some(LoadMore::More);
                 }
                 if busy {
-                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.add(spinner(14.0));
                 }
             });
         });
@@ -229,7 +229,7 @@ pub fn load_more_bar(ui: &mut Ui, id: &str, shown: usize, noun: &str, step: usiz
 }
 
 /// A row at the end of a sidebar list. `left` is how many remain, when that's known.
-pub fn load_more_row(ui: &mut Ui, step: usize, left: Option<usize>, busy: bool, p: &Palette) -> bool {
+pub fn load_more_row(ui: &mut Ui, step: usize, left: Option<usize>, busy: bool) -> bool {
     let count = left.map_or(step, |l| l.min(step));
     let label = match left {
         Some(l) if l > step => format!("Load {} more of {}", grouped(count), grouped(l)),
@@ -241,7 +241,7 @@ pub fn load_more_row(ui: &mut Ui, step: usize, left: Option<usize>, busy: bool, 
         ui.add_space(8.0);
         clicked = ui.add_enabled(!busy, egui::Button::new(RichText::new(label).size(11.5))).clicked();
         if busy {
-            ui.add(egui::Spinner::new().size(12.0).color(p.dim));
+            ui.add(spinner(12.0));
         }
     });
     ui.add_space(4.0);
@@ -322,6 +322,22 @@ pub fn row_button(ui: &mut Ui, row: &Response, glyph: &str, name: &str, selected
     }
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, prop(13.0), p.text);
     resp.clicked()
+}
+
+/// Rows of one height inside a longer scrolling list, where `show_rows` can't help because
+/// other things scroll with them. Only those on screen are drawn. Needs no item spacing.
+pub fn visible_rows(ui: &mut Ui, row_h: f32, n: usize, draw: impl FnOnce(&mut Ui, std::ops::Range<usize>)) {
+    let top = ui.cursor().top();
+    let clip = ui.clip_rect();
+    let first = (((clip.top() - top) / row_h).floor().max(0.0) as usize).min(n);
+    let last = (((clip.bottom() - top) / row_h).ceil().max(0.0) as usize).clamp(first, n);
+    if first > 0 {
+        ui.add_space(first as f32 * row_h);
+    }
+    draw(ui, first..last);
+    if last < n {
+        ui.add_space((n - last) as f32 * row_h);
+    }
 }
 
 /// Width of one level of a tree list.
@@ -412,6 +428,54 @@ pub fn code_job(text: &str, size: f32, base: Color32, spans: Option<&Spans>, wor
     job
 }
 
+/// The main window, which file pickers belong to, so they can't end up behind it.
+#[cfg(windows)]
+static DIALOG_PARENT: OnceLock<isize> = OnceLock::new();
+
+#[cfg(windows)]
+pub fn set_dialog_parent(frame: &eframe::Frame) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(h) = frame.window_handle()
+        && let RawWindowHandle::Win32(w) = h.as_raw()
+    {
+        let _ = DIALOG_PARENT.set(w.hwnd.get());
+    }
+}
+
+/// Makes a stored window handle something `rfd` can take.
+#[cfg(windows)]
+struct DialogParent(std::num::NonZeroIsize);
+
+#[cfg(windows)]
+impl raw_window_handle::HasWindowHandle for DialogParent {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let raw = raw_window_handle::RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(self.0));
+        // The main window lasts as long as the process, and only `rfd` reads this, at once.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
+    }
+}
+
+#[cfg(windows)]
+impl raw_window_handle::HasDisplayHandle for DialogParent {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        Ok(raw_window_handle::DisplayHandle::windows())
+    }
+}
+
+/// Runs a file picker on its own thread, so the window keeps drawing and its git keeps
+/// reporting. The choice lands in `task`, and `None` means it was cancelled.
+pub fn pick(task: &mut crate::task::Task<Option<std::path::PathBuf>>, ctx: &egui::Context, dialog: rfd::FileDialog, folder: bool) {
+    if task.busy() {
+        return;
+    }
+    #[cfg(windows)]
+    let dialog = match DIALOG_PARENT.get().and_then(|h| std::num::NonZeroIsize::new(*h)) {
+        Some(h) => dialog.set_parent(&DialogParent(h)),
+        None => dialog,
+    };
+    task.spawn(ctx, move || -> Result<Option<std::path::PathBuf>, String> { Ok(if folder { dialog.pick_folder() } else { dialog.pick_file() }) });
+}
+
 pub fn time_label(ts: i64, relative: bool) -> String {
     if relative { util::relative_time(ts, util::now_ts()) } else { util::format_date(ts) }
 }
@@ -454,9 +518,35 @@ pub fn error_box(ui: &mut Ui, msg: &str, p: &Palette) {
 /// How the accessible label of every `error_box` starts.
 pub const ERROR_LABEL: &str = "Error: ";
 
+/// Frames per second a spinner asks for. egui's own asks for all the display can do, which
+/// costs a tenth of a core at 120 Hz for as long as a blame takes.
+const SPINNER_FPS: u64 = 15;
+
+/// A spinner that doesn't keep the whole window drawing at full speed for what can be minutes.
+pub fn spinner(size: f32) -> impl egui::Widget {
+    move |ui: &mut Ui| {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+        if ui.is_rect_visible(rect) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000 / SPINNER_FPS));
+            let color = ui.visuals().strong_text_color();
+            let radius = rect.height() / 2.0 - 2.0;
+            let time = ui.input(|i| i.time);
+            let start = time * std::f64::consts::TAU;
+            let end = start + 240f64.to_radians() * ((time / 3.0).sin() * 0.5 + 0.75);
+            let points: Vec<egui::Pos2> = (0..=16).map(|i| {
+                let angle = start + (end - start) * i as f64 / 16.0;
+                let (sin, cos) = angle.sin_cos();
+                rect.center() + radius * vec2(cos as f32, sin as f32)
+            }).collect();
+            ui.painter().add(egui::Shape::line(points, Stroke::new(1.5, color)));
+        }
+        resp
+    }
+}
+
 pub fn spinner_row(ui: &mut Ui, text: &str, p: &Palette) {
     ui.horizontal(|ui| {
-        ui.add(egui::Spinner::new().size(14.0));
+        ui.add(spinner(14.0));
         ui.label(RichText::new(text).color(p.dim));
     });
 }

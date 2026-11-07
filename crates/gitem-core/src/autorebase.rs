@@ -61,6 +61,18 @@ pub fn undo_op(sum: &Summary) -> GitOp {
 /// read it first. Continuing from the banner finishes the rebase.
 pub fn run(repo: &Repo, onto: &str, instructions: &str, review: bool, complete: &dyn Fn(&str, &str) -> Result<String>) -> Result<Summary> {
     let mut sum = Summary { start: repo.resolve("HEAD")?, ..Default::default() };
+    match run_steps(repo, onto, instructions, review, complete, &mut sum) {
+        // Once the rebase has started, where it began is what undoing it needs.
+        Err(e) if repo.current_op() != RepoOp::None => {
+            sum.paused = Some(format!("it stopped: {e}"));
+            Ok(sum)
+        }
+        Err(e) => Err(e),
+        Ok(()) => Ok(sum),
+    }
+}
+
+fn run_steps(repo: &Repo, onto: &str, instructions: &str, review: bool, complete: &dyn Fn(&str, &str) -> Result<String>, sum: &mut Summary) -> Result<()> {
     let root = Some(repo.root.as_path());
     let first = ops::rebase(&ops::RebaseOpts { onto: onto.to_string(), autostash: true, ..Default::default() }).run(&repo.git, root, None, &mut |_| {});
     if let Err(e) = first {
@@ -73,7 +85,7 @@ pub fn run(repo: &Repo, onto: &str, instructions: &str, review: bool, complete: 
         let st = repo.status()?;
         if !matches!(st.op, RepoOp::Rebase | RepoOp::RebaseInteractive) {
             sum.end = repo.resolve("HEAD")?;
-            return Ok(sum);
+            return Ok(());
         }
         let conflicts: Vec<String> = st.conflicts().map(|e| e.path.clone()).collect();
         for path in &conflicts {
@@ -86,13 +98,13 @@ pub fn run(repo: &Repo, onto: &str, instructions: &str, review: bool, complete: 
                 }
                 Err(why) => {
                     sum.paused = Some(format!("{path}: {why}"));
-                    return Ok(sum);
+                    return Ok(());
                 }
             }
         }
         if review && !conflicts.is_empty() {
             sum.paused = Some(format!("the AI resolved {}. Read the result before continuing: nothing has been committed from it yet.", conflicts.join(", ")));
-            return Ok(sum);
+            return Ok(());
         }
         // The step's own commit message is reused, so no editor is wanted.
         let opts = RunOpts { env: vec![("GIT_EDITOR".to_string(), "true".to_string())], is_write: true, ..Default::default() };
@@ -100,17 +112,18 @@ pub fn run(repo: &Repo, onto: &str, instructions: &str, review: bool, complete: 
         let o = repo.git.run_opts(root, &args, &opts, &mut |_| {})?;
         if !o.ok() && repo.status()?.conflicts().next().is_none() {
             sum.paused = Some(o.stderr.lines().next().unwrap_or("git stopped the rebase").to_string());
-            return Ok(sum);
+            return Ok(());
         }
     }
     sum.paused = Some("too many steps".to_string());
-    Ok(sum)
+    Ok(())
 }
 
 fn resolve_file(repo: &Repo, path: &str, instructions: &str, complete: &dyn Fn(&str, &str) -> Result<String>) -> std::result::Result<(), String> {
     if repo.ai_ignored(path) {
         return Err("your AI ignore rules keep this file out of AI requests, so it wasn't sent".to_string());
     }
+    let asked_about = repo.unmerged_signature(path);
     let (b, o, t) = (repo.stage_content(1, path), repo.stage_content(2, path), repo.stage_content(3, path));
     if o.is_empty() || t.is_empty() {
         return Err("one side deleted this file, which needs your decision".to_string());
@@ -138,6 +151,11 @@ fn resolve_file(repo: &Repo, path: &str, instructions: &str, complete: &dyn Fn(&
     let merged = doc.render("ours", "theirs");
     if has_conflict_markers(&merged) {
         return Err("the AI's answer still had conflict markers".to_string());
+    }
+    // The model can take minutes, and nothing stops someone aborting meanwhile. This answer
+    // is for that conflict alone, and mustn't land on whatever the file has become.
+    if !matches!(repo.current_op(), RepoOp::Rebase | RepoOp::RebaseInteractive) || repo.unmerged_signature(path) != asked_about {
+        return Err("the rebase moved on while waiting for the AI, so its answer wasn't used".to_string());
     }
     std::fs::write(repo.root.join(path), merged).map_err(|e| e.to_string())
 }

@@ -95,7 +95,7 @@ fn settled(h: &mut Harness<GitemApp>) {
     for _ in 0..3 {
         h.step();
     }
-    while gitem::task::running(&h.ctx) > 0 || !h.state().ops_idle() {
+    while gitem::task::running(&h.ctx) > 0 || !h.state().ops_idle() || h.state().repos.iter().any(|r| r.data.status.busy() || r.data.refs.busy()) {
         h.step();
         assert!(t.elapsed() < Duration::from_secs(180), "background work never finished");
         std::thread::sleep(Duration::from_millis(5));
@@ -189,7 +189,8 @@ fn answering_yes_runs_them_and_hides_the_banner() {
     settled(&mut ui);
     click_button(&mut ui, "Let them run");
     h.stat_dirty();
-    ui.state_mut().apply_action(&egui::Context::default(), Action::Refresh);
+    let ctx = ui.ctx.clone();
+    ui.state_mut().apply_action(&ctx, Action::Refresh);
     settled(&mut ui);
     assert!(!asking(&ui));
     assert!(ui.query_by_label_contains("Programs from this repository's config").is_none());
@@ -329,7 +330,7 @@ fn a_link_that_fails_to_open_does_nothing_to_the_repository_on_screen() {
     let ctx = ui.ctx.clone();
     ui.state_mut().apply_action(&ctx, Action::DeepLink(DeepLink { repo: gone.to_string_lossy().into_owned(), commit: Some("abcd".into()), file: Some("a.txt".into()), line: None }));
     settled(&mut ui);
-    assert!(ui.query_by_label_contains("isn't a git repository").is_some(), "it says so");
+    assert!(ui.query_by_label_contains("doesn't exist").is_some(), "it says so");
     assert_eq!(ui.state().repos[0].dock.iter_all_tabs().count(), tabs_before, "no File tab");
     assert!(ui.state().repos[0].inspect.sha.is_none(), "nothing being inspected");
 }
@@ -454,4 +455,24 @@ fn only_web_links_can_be_clicked_through() {
     };
     assert!(!clicked("file:///C:/Windows/System32/calc.exe"));
     assert!(clicked("https://example.invalid/pr/1"), "the check above would pass for anything if this failed");
+}
+
+
+/// Phase 4 read this from code, because it needs a timer.
+#[test]
+fn a_scheduled_fetch_waits_for_an_answer() {
+    let _t = clean_slate();
+    let h = Hostile::new();
+    q(&h.root, &["remote", "add", "origin", "https://example.invalid/r.git"]);
+    let mut ui = run_app(std::slice::from_ref(&h.root));
+    settled(&mut ui);
+    assert!(asking(&ui));
+    ui.state_mut().settings.auto_fetch_minutes = 5;
+    ui.state_mut().repos[0].make_fetch_due();
+    for _ in 0..30 {
+        ui.step();
+    }
+    settled(&mut ui);
+    let log = ui.state().repos[0].repo.git.log.lock().unwrap();
+    assert!(!log.iter().any(|e| e.command.starts_with("git fetch")), "it ran on an undecided repository");
 }

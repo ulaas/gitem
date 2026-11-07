@@ -89,8 +89,8 @@ impl SearchView {
     fn fetch_search(&mut self, ctx: &egui::Context, cx: &Cx) {
         let mut q = parse_search(&self.query);
         q.limit = self.limit;
-        let repo = cx.repo.clone();
-        self.results.spawn(ctx, move || repo.log(&q));
+        // A new search replaces the last one, whose git stops: `change:` can run for minutes.
+        self.results.spawn_git(ctx, cx.repo, move |repo| repo.log(&q));
     }
 
     fn run_compare(&mut self, ctx: &egui::Context, cx: &Cx) {
@@ -160,7 +160,10 @@ impl SearchView {
             }
             ui.label("?").on_hover_text(HELP);
             if self.results.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
+                if ui.small_button("Stop").on_hover_text("Stop this search").clicked() {
+                    self.results.stop();
+                }
             }
         });
         if let Some(e) = &self.results.error {
@@ -204,7 +207,7 @@ impl SearchView {
                 self.run_compare(&ctx, cx);
             }
             if self.compare.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         if let Some(e) = &self.compare.error {

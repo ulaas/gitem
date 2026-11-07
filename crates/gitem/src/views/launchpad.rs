@@ -190,7 +190,7 @@ impl LaunchpadView {
                 }
             }
             if self.prs.busy() || self.issues.busy() || self.action.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
         ui.separator();
@@ -527,7 +527,7 @@ impl LaunchpadView {
                 });
             }
             if self.ai_text.busy() || self.create.busy() {
-                ui.add(egui::Spinner::new().size(14.0));
+                ui.add(spinner(14.0));
             }
         });
     }

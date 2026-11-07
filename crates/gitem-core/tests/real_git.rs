@@ -663,7 +663,7 @@ fn signature_and_describe_and_tree() {
     assert_eq!(f.repo.describe(&s).as_deref(), Some("v0"));
     assert_eq!(f.repo.tracked_files(Some(&s)).unwrap(), vec!["a/b.txt"]);
     f.write("u.txt", "1\n");
-    assert_eq!(f.repo.tracked_files(None).unwrap().len(), 2);
+    assert_eq!(f.repo.tracked_files(None).unwrap(), vec!["a/b.txt"], "untracked files come from status");
 }
 
 #[test]
@@ -1366,4 +1366,142 @@ fn tokens_in_urls_stay_out_of_titles_previews_and_the_console() {
     let entry = log.iter().rev().find(|e| e.command.contains("clone")).expect("the clone is in the console");
     assert!(!entry.command.contains("FAKETOKEN"), "{}", entry.command);
     assert!(entry.command.contains("127.0.0.1:1"), "{}", entry.command);
+}
+
+
+#[test]
+fn commit_files_reads_status_and_counts_in_one_command() {
+    let f = Fx::new();
+    let body: String = (0..30).map(|i| format!("line {i}\n")).collect();
+    f.write("a.txt", &body);
+    f.write("gone.txt", "bye\n");
+    f.commit_all("base");
+    f.run(ops::GitOp::new("mv").step(&["mv", "a.txt", "b.txt"]));
+    f.write("b.txt", &format!("{body}more\n"));
+    f.write("new file.txt", "1\n2\n");
+    std::fs::remove_file(f.repo.root.join("gone.txt")).unwrap();
+    let sha = f.commit_all("change");
+    let before = f.repo.git.log.lock().unwrap().len();
+    let files = f.repo.commit_files(&sha).unwrap();
+    assert_eq!(f.repo.git.log.lock().unwrap().len() - before, 1);
+    let by = |p: &str| files.iter().find(|c| c.path == p).unwrap_or_else(|| panic!("no {p} in {files:?}"));
+    assert_eq!(files.len(), 3);
+    assert_eq!(by("b.txt").status, FileStatus::Renamed);
+    assert_eq!(by("b.txt").orig_path.as_deref(), Some("a.txt"));
+    assert_eq!((by("b.txt").additions, by("b.txt").deletions), (Some(1), Some(0)));
+    assert_eq!((by("new file.txt").status, by("new file.txt").additions), (FileStatus::Added, Some(2)));
+    assert_eq!((by("gone.txt").status, by("gone.txt").deletions), (FileStatus::Deleted, Some(1)));
+}
+
+#[test]
+fn commit_files_marks_binary_files_as_having_no_counts() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit_all("base");
+    std::fs::write(f.repo.root.join("b.bin"), [0u8, 1, 2, 0, 3]).unwrap();
+    let sha = f.commit_all("binary");
+    let files = f.repo.commit_files(&sha).unwrap();
+    assert_eq!((files[0].path.as_str(), files[0].additions), ("b.bin", None));
+}
+
+#[test]
+fn a_cancelled_git_stops_and_runs_nothing_more() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit_all("base");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut repo = f.repo.clone();
+    repo.git.cancel = Some(stop);
+    let before = f.repo.git.log.lock().unwrap().len();
+    assert!(repo.status().is_err());
+    assert_eq!(f.repo.git.log.lock().unwrap().len(), before, "it never started");
+}
+
+#[test]
+fn people_are_read_from_shortlog_with_the_same_answer_as_the_full_list() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit_all("one");
+    f.write("a.txt", "b\n");
+    f.commit_all("two");
+    let quick = f.repo.people("HEAD").unwrap();
+    let full = f.repo.contributors("HEAD", false).unwrap();
+    assert_eq!(quick.len(), full.len());
+    assert_eq!((quick[0].name.as_str(), quick[0].email.as_str(), quick[0].commits, quick[0].is_you), (full[0].name.as_str(), full[0].email.as_str(), full[0].commits, full[0].is_you));
+}
+
+/// Labels on a log come from the remotes read last, not a command per log.
+#[test]
+fn a_log_uses_the_remote_names_it_already_has() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit_all("base");
+    f.repo.remotes().unwrap();
+    let before = f.repo.git.log.lock().unwrap().len();
+    f.repo.log(&LogQuery { limit: 1, revs: vec!["HEAD".into()], ..Default::default() }).unwrap();
+    let log = f.repo.git.log.lock().unwrap();
+    let ran: Vec<&str> = log.iter().skip(before).map(|e| e.command.as_str()).collect();
+    assert_eq!(ran.len(), 1, "{ran:?}");
+}
+
+#[test]
+fn only_the_graph_pays_for_date_order() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit_all("base");
+    let last = |f: &Fx| f.repo.git.log.lock().unwrap().back().unwrap().command.clone();
+    f.repo.remotes().unwrap();
+    f.repo.log(&LogQuery { limit: 1, revs: vec!["HEAD".into()], ..Default::default() }).unwrap();
+    assert!(!last(&f).contains("--date-order"));
+    f.repo.log(&LogQuery { limit: 1, revs: vec!["HEAD".into()], date_order: true, ..Default::default() }).unwrap();
+    assert!(last(&f).contains("--date-order"));
+}
+
+/// CG-26: an AI answer takes minutes, and someone can abort or move on while it's coming.
+#[test]
+fn an_auto_rebase_answer_is_not_written_after_the_rebase_moved_on() {
+    let f = Fx::new();
+    f.write("c.txt", "base\n");
+    f.commit_all("base");
+    f.run(ops::GitOp::new("b").step(&["switch", "-q", "-c", "work"]));
+    f.write("c.txt", "mine\n");
+    f.commit_all("mine");
+    f.run(ops::GitOp::new("b").step(&["switch", "-q", "main"]));
+    f.write("c.txt", "upstream\n");
+    f.commit_all("upstream");
+    f.run(ops::GitOp::new("b").step(&["switch", "-q", "work"]));
+    let repo = f.repo.clone();
+    let abort_first = move |_: &str, _: &str| -> gitem_core::Result<String> {
+        ops::GitOp::new("abort").step(&["rebase", "--abort"]).run(&repo.git, Some(&repo.root), None, &mut |_| {}).unwrap();
+        Ok("what the model said".to_string())
+    };
+    let done = gitem_core::autorebase::run(&f.repo, "main", "", false, &abort_first).unwrap();
+    assert!(done.paused.as_deref().unwrap_or_default().contains("moved on"), "{:?}", done.paused);
+    assert_eq!(std::fs::read_to_string(f.repo.root.join("c.txt")).unwrap().replace("\r\n", "\n"), "mine\n", "the answer wasn't written");
+}
+
+/// Undo needs where it began, whichever step went wrong.
+#[test]
+fn an_auto_rebase_that_fails_midway_still_says_where_it_began() {
+    let f = Fx::new();
+    f.write("c.txt", "base\n");
+    f.commit_all("base");
+    f.run(ops::GitOp::new("b").step(&["switch", "-q", "-c", "work"]));
+    f.write("c.txt", "mine\n");
+    let start = f.commit_all("mine");
+    f.run(ops::GitOp::new("b").step(&["switch", "-q", "main"]));
+    f.write("c.txt", "upstream\n");
+    f.commit_all("upstream");
+    f.run(ops::GitOp::new("b").step(&["switch", "-q", "work"]));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut repo = f.repo.clone();
+    repo.git.cancel = Some(stop.clone());
+    let halt = move |_: &str, _: &str| -> gitem_core::Result<String> {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok("what the model said".to_string())
+    };
+    let done = gitem_core::autorebase::run(&repo, "main", "", false, &halt).unwrap();
+    assert_eq!(done.start, start);
+    assert!(done.paused.is_some());
+    assert!(matches!(f.repo.current_op(), RepoOp::Rebase | RepoOp::RebaseInteractive), "left for the banner to pick up");
 }
