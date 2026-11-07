@@ -711,8 +711,13 @@ pub fn scan_form() -> FormDialog {
 }
 
 pub fn clone_form() -> FormDialog {
+    clone_form_for("")
+}
+
+/// With its address filled in, for someone to read and change before anything's fetched.
+pub fn clone_form_for(url: &str) -> FormDialog {
     FormDialog::new("Clone repository", "Clone")
-        .text("url", "URL", "")
+        .text("url", "URL", url)
         .hint("https://github.com/owner/repo.git")
         .path("parent", "Into folder", "", true)
         .text("name", "Folder name (optional)", "")

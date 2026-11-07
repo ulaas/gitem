@@ -66,6 +66,8 @@ pub enum Action {
     StatusBlame(String),
     Settings(Box<dyn FnOnce(&mut Settings) + Send>),
     OpenPalette,
+    /// Ask where a repository is, as Ctrl+O does.
+    PickFolder,
     /// Open a `gitem://` link.
     DeepLink(gitem_core::forge::DeepLink),
     /// Show again the question about what this repository's config may run.

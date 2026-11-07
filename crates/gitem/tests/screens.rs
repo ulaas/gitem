@@ -258,6 +258,52 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
     let set = move |s: &mut Settings| {
         s.theme = theme;
     };
+    if wanted("norepo") {
+        // Nothing open: the welcome page, its palette, and its two pages.
+        let mut settings = Settings { details_on_open: false, theme, recent_repos: vec![f.root.to_string_lossy().replace('\\', "/")], ..Default::default() };
+        settings.custom_hosts = vec![];
+        let ctx = egui::Context::default();
+        let mut app = GitemApp::with_settings(&ctx, settings);
+        app.git = Ok(f.git.clone());
+        let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1280.0, 800.0)).with_max_steps(5);
+        let mut fonts = false;
+        let mut h = builder.build_ui_state(
+            move |ui, app: &mut GitemApp| {
+                if !std::mem::replace(&mut fonts, true) {
+                    gitem::theme::install_fonts(ui.ctx());
+                }
+                app.frame(ui);
+            },
+            app,
+        );
+        settle_a_moment(&mut h);
+        out.save(&mut h, "norepo-welcome");
+        h.state_mut().open_palette_with("");
+        settle_a_moment(&mut h);
+        out.save(&mut h, "norepo-palette");
+        h.state_mut().open_palette_with("/x");
+        settle_a_moment(&mut h);
+        out.save(&mut h, "norepo-palette-files");
+        h.state_mut().open_palette_with("");
+        click(&mut h, "Pull Requests I'm In");
+        settle_a_moment(&mut h);
+        out.save(&mut h, "norepo-everything");
+    }
+    if wanted("rail") {
+        let mut h = f.harness(move |s: &mut Settings| {
+            s.theme = theme;
+            s.rail_labels = true;
+        }, vec![]);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "rail-names");
+        let mut h = f.harness(move |s: &mut Settings| {
+            s.theme = theme;
+            s.rail_labels = true;
+            s.rail_full = true;
+        }, vec![]);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "rail-names-all");
+    }
     if wanted("form") {
         let mut h = f.harness(set, vec![]);
         h.state_mut().repos[0].open_tab(Tab::graph());

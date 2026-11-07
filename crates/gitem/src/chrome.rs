@@ -11,6 +11,8 @@ use crate::widgets::prop;
 
 pub const TITLE_BAR_HEIGHT: f32 = 34.0;
 pub const RAIL_WIDTH: f32 = 44.0;
+/// With each view's name beside its icon, for those who turn that on.
+pub const RAIL_LABELLED_WIDTH: f32 = 132.0;
 const RAIL_ITEM: f32 = 34.0;
 const CONTROL_WIDTH: f32 = 46.0;
 /// Clear title bar kept for moving the window, however many repositories are open.
@@ -473,8 +475,12 @@ fn group_tint(group: usize, p: &Palette) -> Color32 {
     crate::theme::readable(p.series[[0, 2, 3, 6][group % 4]], p.text, p.bg, 3.0)
 }
 
-fn rail_button(ui: &mut Ui, item: &RailItem, tint: Color32, active: bool, p: &Palette) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(RAIL_WIDTH, RAIL_ITEM), Sense::click());
+pub fn rail_width(labels: bool) -> f32 {
+    if labels { RAIL_LABELLED_WIDTH } else { RAIL_WIDTH }
+}
+
+fn rail_button(ui: &mut Ui, item: &RailItem, tint: Color32, active: bool, labels: bool, p: &Palette) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(rail_width(labels), RAIL_ITEM), Sense::click());
     let name = crate::i18n::t(item.name);
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     if ui.is_rect_visible(rect) {
@@ -487,7 +493,13 @@ fn rail_button(ui: &mut Ui, item: &RailItem, tint: Color32, active: bool, p: &Pa
             ui.painter().rect_filled(tile, 5.0, p.hover);
         }
         let color = if active { tint } else if resp.hovered() { p.text } else { tint.gamma_multiply(0.8) };
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, item.glyph, prop(20.0), color);
+        if labels {
+            ui.painter().text(pos2(rect.left() + RAIL_WIDTH / 2.0, rect.center().y), Align2::CENTER_CENTER, item.glyph, prop(20.0), color);
+            let ink = if active || resp.hovered() { p.text } else { p.dim };
+            ui.painter().with_clip_rect(rect).text(pos2(rect.left() + RAIL_WIDTH - 2.0, rect.center().y), Align2::LEFT_CENTER, name, prop(12.5), ink);
+        } else {
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, item.glyph, prop(20.0), color);
+        }
         crate::widgets::focus_ring(ui, &resp, p);
     }
     tooltip(resp, name, item.tip, p)
@@ -527,15 +539,16 @@ const KEPT_ON_RAIL: [&str; 2] = ["Console", "Settings"];
 
 /// The views rail. `is_focused` lights up the icon of the tab in front; a click returns
 /// the view to open, and whether it came from the More list. With `full`, every view has
-/// its own icon, and the top part scrolls if the window is too short for them.
-pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, p: &Palette) -> Option<(Tab, bool)> {
+/// its own icon, and the top part scrolls if the window is too short for them. With `labels`,
+/// each has its name beside it.
+pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, labels: bool, p: &Palette) -> Option<(Tab, bool)> {
     let mut clicked = None;
     let mut from_more = false;
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     let bottom: Vec<&'static RailItem> = rail_bottom().iter().filter(|i| full || KEPT_ON_RAIL.contains(&i.name)).collect();
     let pinned = bottom.len() as f32 * RAIL_ITEM + 9.0;
     let height = (ui.available_height() - pinned).max(RAIL_ITEM);
-    ui.allocate_ui_with_layout(vec2(RAIL_WIDTH, height), egui::Layout::top_down(egui::Align::Min), |ui| {
+    ui.allocate_ui_with_layout(vec2(rail_width(labels), height), egui::Layout::top_down(egui::Align::Min), |ui| {
         let groups = rail_top();
         let shown: &[&'static [RailItem]] = if full { &groups } else { &groups[..1] };
         let content = shown.iter().map(|g| g.len() as f32 * RAIL_ITEM + 9.0).sum::<f32>() + if full { 0.0 } else { RAIL_ITEM };
@@ -543,10 +556,10 @@ pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, p: 
             ui.add_space(4.0);
             for (i, group) in shown.iter().enumerate() {
                 if i > 0 {
-                    separator(ui, p);
+                    separator(ui, labels, p);
                 }
                 for item in group.iter() {
-                    if rail_button(ui, item, group_tint(i, p), is_focused(item), p).clicked() {
+                    if rail_button(ui, item, group_tint(i, p), is_focused(item), labels, p).clicked() {
                         clicked = Some(item);
                     }
                 }
@@ -554,7 +567,7 @@ pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, p: 
             if !full {
                 let hidden_on = rail_top().into_iter().skip(1).flatten().chain(rail_bottom().iter().filter(|i| !KEPT_ON_RAIL.contains(&i.name))).any(is_focused);
                 let more = RailItem { glyph: icon::DOTS_THREE_CIRCLE, name: "More", tip: "Every other view", make: Tab::home, is: |_| false };
-                let resp = rail_button(ui, &more, p.dim, hidden_on, p);
+                let resp = rail_button(ui, &more, p.dim, hidden_on, labels, p);
                 egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).show(|ui| {
                     if let Some(item) = more_list(ui, is_focused, p) {
                         clicked = Some(item);
@@ -574,7 +587,7 @@ pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, p: 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.add_space(4.0);
         for item in bottom.iter().rev() {
-            if rail_button(ui, item, p.dim, is_focused(item), p).clicked() {
+            if rail_button(ui, item, p.dim, is_focused(item), labels, p).clicked() {
                 clicked = Some(item);
             }
         }
@@ -582,8 +595,8 @@ pub fn rail(ui: &mut Ui, is_focused: &dyn Fn(&RailItem) -> bool, full: bool, p: 
     clicked.map(|i| ((i.make)(), from_more))
 }
 
-fn separator(ui: &mut Ui, p: &Palette) {
-    let (rect, _) = ui.allocate_exact_size(vec2(RAIL_WIDTH, 9.0), Sense::hover());
+fn separator(ui: &mut Ui, labels: bool, p: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(vec2(rail_width(labels), 9.0), Sense::hover());
     let y = rect.center().y;
     ui.painter().line_segment([pos2(rect.left() + 12.0, y), pos2(rect.right() - 12.0, y)], Stroke::new(1.0, p.border));
 }

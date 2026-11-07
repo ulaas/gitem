@@ -117,6 +117,9 @@ pub struct Settings {
     pub details_on_open: bool,
     /// Every view on the rail, rather than the usual few and a More list.
     pub rail_full: bool,
+    /// A wider rail with each view's name beside its icon.
+    #[serde(default)]
+    pub rail_labels: bool,
     /// No moving spinners or animated transitions.
     pub reduce_motion: bool,
     /// Blue and orange diffs in place of green and red.
@@ -271,6 +274,7 @@ impl Default for Settings {
             theme: ThemeChoice::Dark,
             details_on_open: true,
             rail_full: false,
+            rail_labels: false,
             reduce_motion: false,
             colorblind_diff: false,
             show_experimental: false,

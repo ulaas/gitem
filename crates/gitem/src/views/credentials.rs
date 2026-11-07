@@ -43,6 +43,8 @@ pub struct CredentialsView {
     pending_delete: Option<String>,
     revealed_at: Option<Instant>,
     last_frame: u64,
+    /// With no repository open: what's about this repository, or reads through it, stays out.
+    no_repo: bool,
 }
 
 /// A revealed secret goes away by itself, in case the screen is left or being shared.
@@ -103,6 +105,11 @@ fn mask_name(name: &str) -> String {
 }
 
 impl CredentialsView {
+    /// What works with no repository: saved secrets and SSH keys.
+    pub fn outside_repo() -> Self {
+        Self { no_repo: true, ..Self::default() }
+    }
+
     /// On its commit signing page, for screenshots.
     pub fn on_signing() -> Self {
         Self { page: Page::Signing, ..Self::default() }
@@ -136,8 +143,10 @@ impl CredentialsView {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.page, Page::Vault, "Stored secrets");
             ui.selectable_value(&mut self.page, Page::Ssh, "SSH keys");
-            ui.selectable_value(&mut self.page, Page::Helper, "Git integration");
-            ui.selectable_value(&mut self.page, Page::Signing, "Commit signing");
+            if !self.no_repo {
+                ui.selectable_value(&mut self.page, Page::Helper, "Git integration");
+                ui.selectable_value(&mut self.page, Page::Signing, "Commit signing");
+            }
         });
         self.hide_secret_if_due(ui.ctx(), page_before);
         if self.page != Page::Vault {

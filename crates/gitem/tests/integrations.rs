@@ -1286,6 +1286,124 @@ fn everything_youre_in_works_from_a_repository_with_no_host_of_its_own() {
     wait_for_text(&mut h, "From elsewhere");
 }
 
+// ---- with no repository open
+
+fn no_repo_harness(f: &Fx, settings: Settings) -> Harness<'static, GitemApp> {
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, Settings { details_on_open: false, ..settings });
+    app.git = Ok(f.git.clone());
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5);
+    builder.build_ui_state(|ui, app: &mut GitemApp| app.frame(ui), app)
+}
+
+/// FG-40: nothing is asked until the click, what's found can be opened or cloned, and opening one
+/// leaves this page for the repository.
+#[test]
+fn everything_im_in_works_from_the_welcome_screen_with_no_repository() {
+    let f = Fx::new();
+    let (lab, seen) = second_host(vec![("/api/v4/merge_requests", 200, r#"[{"iid":5,"title":"From elsewhere","web_url":"http://127.0.0.1:9/o/elsewhere/-/merge_requests/5","references":{"full":"o/elsewhere!5"},"source_branch":"s","target_branch":"main"},{"iid":6,"title":"Not here yet","web_url":"http://127.0.0.1:9/o/other/-/merge_requests/6","references":{"full":"o/other!6"},"source_branch":"t","target_branch":"main"}]"#)]);
+    let custom = CustomHost { host: port_of(&lab), kind: ForgeKind::GitLab, api_base: String::new(), templates: Default::default() };
+    gitem_core::cred::set_forge_token(&identify(&format!("{lab}/o/elsewhere.git"), std::slice::from_ref(&custom)).unwrap().token_host(), "", "FAKE_LAB_TOKEN").unwrap();
+    let recent = vec![folder_using(&f, "elsewhere", &format!("{lab}/o/elsewhere.git"))];
+    let mut h = no_repo_harness(&f, Settings { recent_repos: recent.clone(), custom_hosts: vec![custom], ..Default::default() });
+    click(&mut h, "Pull requests I'm in");
+    wait_for_text(&mut h, "Nothing asked yet");
+    for _ in 0..10 {
+        h.step();
+    }
+    assert!(seen.lock().unwrap().is_empty(), "nothing asked before the click: {:?}", seen.lock().unwrap());
+    click(&mut h, "Ask");
+    wait_for_text(&mut h, "From elsewhere");
+    wait_for_text(&mut h, "Not here yet");
+    wait_for_label(&mut h, "Ask again");
+    no_errors(&h);
+    assert!(h.state().repos.is_empty());
+
+    // No copy of this one here, so it offers a clone, and opening a form is all that does.
+    click(&mut h, "Clone…");
+    wait_for_label(&mut h, "Clone repository");
+    click(&mut h, "Cancel");
+    assert!(h.state().repos.is_empty());
+
+    click(&mut h, "Open repository");
+    let t = Instant::now();
+    while h.state().repos.is_empty() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "it never opened: {:?}", h.state().errors_showing());
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(h.state().repos[0].repo.root.ends_with("elsewhere"));
+    assert!(h.query_by_label_contains("Back to the start").is_none(), "the page gives way to the repository");
+}
+
+#[test]
+fn back_from_a_page_with_no_repository_goes_to_the_start() {
+    let f = Fx::new();
+    let mut h = no_repo_harness(&f, Settings::default());
+    click(&mut h, "Credentials");
+    wait_for_label(&mut h, "Stored secrets");
+    assert!(h.query_by_label("SSH keys").is_some());
+    assert!(h.query_by_label("Git integration").is_none() && h.query_by_label("Commit signing").is_none(), "these read through a repository");
+    click(&mut h, "\u{E058} Back to the start");
+    wait_for_label(&mut h, "Open folder…");
+}
+
+/// UX-37: with no repository the palette opens, says what it can do, and doesn't go reading the
+/// folder gitem started in. Files would list it, and this one holds nothing else to find.
+#[test]
+fn the_palette_works_with_no_repository() {
+    let f = Fx::new();
+    let mut h = no_repo_harness(&f, Settings { recent_repos: vec![f.root.to_string_lossy().replace('\\', "/")], ..Default::default() });
+    click(&mut h, "Command palette");
+    wait_for_label(&mut h, "Clone Repository…");
+    assert!(h.state().palette_is_open());
+    assert!(h.query_by_label("Graph").is_none(), "that needs a repository");
+    // Tests start in this crate's folder, inside a real repository, so a wrong read would find it.
+    h.state_mut().open_palette_with("/Cargo");
+    for _ in 0..40 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(h.query_by_label_contains("Cargo.toml").is_none(), "no repository is open to list");
+    h.state_mut().open_palette_with("Clone");
+    click(&mut h, "Clone Repository…");
+    wait_for_label(&mut h, "Clone repository");
+    assert!(!h.state().palette_is_open());
+    click(&mut h, "Cancel");
+    h.state_mut().open_palette_with("Settings");
+    // The palette's row, and the title bar's button behind it.
+    h.step();
+    h.step();
+    click_last(&mut h, "Settings");
+    wait_for_text(&mut h, "Back to the start");
+    assert!(!h.state().palette_is_open());
+    assert!(h.query_all_by_label("Appearance").next().is_some());
+    let name = f.root.file_name().unwrap().to_string_lossy().into_owned();
+    h.state_mut().open_palette_with(&name);
+    click(&mut h, &name);
+    let t = Instant::now();
+    while h.state().repos.is_empty() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the recent one never opened");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    no_errors(&h);
+}
+
+/// UX-22: off by default, and with it on each name is there, and a click goes where it did.
+#[test]
+fn the_rail_can_show_names_and_doesnt_by_default() {
+    assert!(!Settings::default().rail_labels);
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |s| s.rail_labels = true);
+    click(&mut h, "Changes");
+    let t = Instant::now();
+    while !h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| t.key() == "changes") {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "Changes never opened");
+    }
+}
+
 // ---- a stack of pull requests, clicked
 
 /// The user is on `two`, on top of `one`, on the old `main`, whose own `main` has since moved. Both

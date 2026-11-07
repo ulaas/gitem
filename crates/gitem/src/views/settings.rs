@@ -433,6 +433,7 @@ impl SettingsView {
             g.switch(&mut s.colorblind_diff, "Colour-blind safe diffs", "Blue and orange in place of green and red.");
             g.switch(&mut s.reduce_motion, "Reduce motion", "No spinning or animated transitions.");
             g.switch(&mut s.rail_full, "All views on the rail", "Every view gets an icon of its own, in place of the More list.");
+            g.switch(&mut s.rail_labels, "Names on the rail", "A wider rail, with each view's name beside its icon.");
             g.switch(&mut s.details_on_open, "Show details on opening the graph", "Opens the Details panel on the current commit.");
             // Half-translated menus look broken, so this isn't offered until asked for.
             let showing = s.show_experimental || s.language != gitem_core::settings::Settings::default().language;

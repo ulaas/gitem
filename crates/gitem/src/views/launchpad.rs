@@ -40,6 +40,8 @@ pub struct LaunchpadView {
     loaded_for: Option<(u64, Option<String>)>,
     /// Everything you're involved in on this host, rather than this repository's.
     everywhere: bool,
+    /// With no repository open, that's all there is to show.
+    only_everywhere: bool,
     involved: Task<Everywhere>,
     /// The branch the status bar's pull request was last looked up for.
     pr_branch: Option<String>,
@@ -68,6 +70,7 @@ impl Default for LaunchpadView {
             started: false,
             loaded_for: None,
             everywhere: false,
+            only_everywhere: false,
             involved: Task::default(),
             pr_branch: None,
             auto_head: None,
@@ -152,6 +155,16 @@ fn ask_everywhere(git: &GitExe, here: Option<RemoteRepo>, recent: &[String], cus
     Ok(out)
 }
 
+/// The address to clone a repository from, read from its pull request's page, which names the
+/// same host and path. Only for an address a browser could open. It only fills in a form.
+fn clone_url_from(pr_url: &str, repo: &str) -> Option<String> {
+    if repo.is_empty() || !(pr_url.starts_with("https://") || pr_url.starts_with("http://")) {
+        return None;
+    }
+    let at = pr_url.find(&format!("/{repo}/"))?;
+    Some(format!("{}/{repo}.git", &pr_url[..at]))
+}
+
 /// Saved token for this host, or whatever git's credential helpers know about it.
 pub fn resolve_client(git: &GitExe, repo: &RemoteRepo) -> Result<ForgeClient, String> {
     let host = repo.token_host();
@@ -183,6 +196,11 @@ pub fn token_form(repo: &RemoteRepo) -> FormDialog {
 }
 
 impl LaunchpadView {
+    /// For when no repository is open: this has no repository to list, and asks only on a click.
+    pub fn everything_only() -> Self {
+        Self { everywhere: true, only_everywhere: true, ..Default::default() }
+    }
+
     pub fn create_pr_for(head: &str, base: &str) -> Self {
         Self { page: Page::Create, head: head.to_string(), base: base.to_string(), title: head.replace(['-', '_', '/'], " "), ..Default::default() }
     }
@@ -283,7 +301,31 @@ impl LaunchpadView {
         });
     }
 
+    /// Everything I'm in by itself. Every other part of this view reads the repository.
+    fn everywhere_ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal.clone();
+        ui.label(RichText::new("Pull requests I'm in").size(20.0).strong());
+        ui.label(RichText::new("Asks each host your recent repositories use that has a saved token, and only when you click. To work on one, open or clone its repository.").color(p.dim));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let label = if self.involved.get().is_some() || self.involved.error.is_some() { "Ask again" } else { "Ask" };
+            if ui.add_enabled(!self.involved.busy(), egui::Button::new(label)).on_disabled_hover_text("Still asking.").clicked() {
+                let (git, recent, custom) = (cx.repo.git.clone(), cx.settings.recent_repos.clone(), cx.settings.custom_hosts.clone());
+                self.involved.spawn(ui.ctx(), move || ask_everywhere(&git, None, &recent, &custom));
+            }
+            if ui.button("Tokens…").on_hover_text("Saved tokens are in Credentials").clicked() {
+                cx.open(Tab::Credentials(Box::default()));
+            }
+        });
+        ui.separator();
+        self.involved_ui(ui, cx);
+    }
+
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        if self.only_everywhere {
+            self.everywhere_ui(ui, cx);
+            return;
+        }
         let p = cx.pal.clone();
         let ctx = ui.ctx().clone();
         let cur_branch = cx.current_branch();
@@ -431,7 +473,7 @@ impl LaunchpadView {
         }
         let Some(all) = self.involved.get().cloned() else {
             if !self.involved.busy() && self.involved.error.is_none() {
-                empty_state(ui, "Nothing asked yet", "Choose Ask again to ask each host.", &p);
+                empty_state(ui, "Nothing asked yet", if self.only_everywhere { "Choose Ask to ask each host." } else { "Choose Ask again to ask each host." }, &p);
             }
             return;
         };
@@ -439,7 +481,7 @@ impl LaunchpadView {
         let q = self.filter.to_lowercase();
         egui::ScrollArea::vertical().id_salt("lp-everywhere").auto_shrink([false, false]).show(ui, |ui| {
             if !all.no_token.is_empty() {
-                ui.label(RichText::new(format!("Not asked, as no token is saved: {}. Connect from a repository on that host.", all.no_token.join(", "))).small().color(p.dim));
+                ui.label(RichText::new(format!("Not asked, as no token is saved: {}. {}", all.no_token.join(", "), if self.only_everywhere { "Add one under Tokens." } else { "Connect from a repository on that host." })).small().color(p.dim));
             }
             if all.no_answer > 0 {
                 ui.label(RichText::new(format!("{} didn't say where {} remotes are in time, so {} hosts may be missing.", plural(all.no_answer, "recent folder", "recent folders"), if all.no_answer == 1 { "its" } else { "their" }, if all.no_answer == 1 { "its" } else { "their" })).small().color(p.dim));
@@ -480,10 +522,14 @@ impl LaunchpadView {
                                     }
                                     // A folder of that name opened here before. It's only a guess at which
                                     // clone, and opening it is all this does.
-                                    if let Some(path) = local_copy(&x.repo, &cx.settings.recent_repos)
-                                        && ui.small_button("Open repository").on_hover_text(path.clone()).clicked()
+                                    if let Some(path) = local_copy(&x.repo, &cx.settings.recent_repos) {
+                                        if ui.small_button("Open repository").on_hover_text(path.clone()).clicked() {
+                                            cx.out.push(Action::OpenRepo(path.into()));
+                                        }
+                                    } else if let Some(url) = clone_url_from(&x.pr.url, &x.repo)
+                                        && ui.small_button("Clone…").on_hover_text(url.clone()).clicked()
                                     {
-                                        cx.out.push(Action::OpenRepo(path.into()));
+                                        cx.form(forms::clone_form_for(&url));
                                     }
                                 });
                             });
@@ -1013,6 +1059,15 @@ mod tests {
         assert!(card_line(&dated, true).contains("ago"), "{}", card_line(&dated, true));
         let i = Issue { source: "Jira".into(), state: "Open".into(), ..Default::default() };
         assert_eq!(issue_line(&i, true), "Jira · Open");
+    }
+
+    #[test]
+    fn a_clone_address_comes_from_the_pages_own_host_and_path() {
+        assert_eq!(clone_url_from("https://git.example.invalid/o/r/pulls/7", "o/r").as_deref(), Some("https://git.example.invalid/o/r.git"));
+        assert_eq!(clone_url_from("http://127.0.0.1:9/group/sub/r/-/merge_requests/1", "group/sub/r").as_deref(), Some("http://127.0.0.1:9/group/sub/r.git"));
+        assert_eq!(clone_url_from("https://host.invalid/elsewhere/7", "o/r"), None, "the page doesn't name it");
+        assert_eq!(clone_url_from("ext::sh -c evil/o/r/7", "o/r"), None, "only what a browser would open");
+        assert_eq!(clone_url_from("https://host.invalid/o/r/7", ""), None);
     }
 
     #[test]

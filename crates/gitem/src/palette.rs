@@ -79,6 +79,9 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Change Theme…" => (icon::PALETTE, "", None),
         "Cherry-pick a Commit…" => (icon::GIT_COMMIT, "", None),
         "Clone Repository…" => (icon::DOWNLOAD_SIMPLE, "", None),
+        "Open Folder…" => (icon::FOLDER_OPEN, "", Some("Ctrl+O")),
+        "Scan for Repositories…" => (icon::FOLDER_OPEN, "Find the repositories in a folder", None),
+        "Pull Requests I'm In" => (icon::ROCKET_LAUNCH, "Across the hosts your recent repositories use", None),
         "Initialize Repository…" => (icon::FOLDER_PLUS, "", None),
         "Copy Working Changes as Patch" | "Copy Repository Link" => (icon::COPY, "", None),
         "Publish Repository…" => (icon::CLOUD_ARROW_UP, "", None),
@@ -276,6 +279,8 @@ pub fn commands() -> Vec<Item> {
     }));
     v.push(item("Git", "Fetch the Full History", |cx| cx.run(ops::unshallow())));
     view!("Search File Contents", Tab::Grep(Box::default()));
+    v.push(item("App", "Open Folder…", |cx| cx.out.push(Action::PickFolder)));
+    v.push(item("Git", "Scan for Repositories…", |cx| cx.form(forms::scan_form())));
     v.push(item("App", "Change Theme…", |cx| {
         use gitem_core::settings::ThemeChoice;
         let names: Vec<&str> = ThemeChoice::ALL.iter().map(|t| t.name()).collect();
@@ -338,6 +343,28 @@ pub fn commands() -> Vec<Item> {
     v.push(item("App", "Zen Mode (Hide Side Panels)", |cx| cx.out.push(Action::ToggleZen)));
     v.push(item("App", "Open Terminal Here", |cx| cx.out.push(Action::OpenTerminal(cx.repo.root.clone(), None))));
     v.push(item("App", "Refresh", |cx| cx.out.push(Action::Refresh)));
+    v
+}
+
+/// Commands that need no repository. Each of these does with none just what it does with one.
+const WORKS_WITHOUT_REPO: [&str; 8] = ["Open Folder…", "Clone Repository…", "Initialize Repository…", "Scan for Repositories…", "Settings", "Credentials", "Change Theme…", "About gitem"];
+
+/// What the palette offers with no repository open: only what works there, and nothing that
+/// reads one. Without git, only what's about the app.
+pub fn commands_without_repo(has_git: bool, recent_repos: &[String]) -> Vec<Item> {
+    let mut v: Vec<Item> = commands().into_iter().filter(|i| WORKS_WITHOUT_REPO.contains(&i.label.as_str())).collect();
+    v.push(item("View", "Pull Requests I'm In", |cx| cx.open(Tab::Launchpad(Box::default()))));
+    if !has_git {
+        v.retain(|i| i.category != "Git" && i.label != "Open Folder…");
+        return v;
+    }
+    for path in recent_repos.iter().take(12) {
+        let target = path.clone();
+        let name = path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path);
+        let mut it = item("Open recent", name, move |cx| cx.out.push(Action::OpenRepo(target.into())));
+        (it.glyph, it.detail, it.search, it.record) = (icon::FOLDER_OPEN, path.clone(), Some(path.clone()), false);
+        v.push(it);
+    }
     v
 }
 
@@ -429,7 +456,7 @@ const MAX_RESULTS: usize = 200;
 const MAX_RECENT: usize = 6;
 const RECENT: &str = "Recent";
 /// Sections in the order they appear before anything is typed.
-const SECTIONS: [&str; 10] = [RECENT, "View", "Git", "Show", "Remote", "App", "Check out", "Check out remote", "Open file", "Commit"];
+const SECTIONS: [&str; 11] = [RECENT, "Open recent", "View", "Git", "Show", "Remote", "App", "Check out", "Check out remote", "Open file", "Commit"];
 
 fn section_title(section: &str) -> &str {
     match section {
@@ -568,6 +595,8 @@ pub struct PaletteState {
     ranked: Option<(RankKey, Vec<Hit>)>,
     /// Bumped when the file or commit list arrives.
     data_gen: u64,
+    /// With no repository open: whether git was found. The app says, each frame.
+    pub outside: Option<bool>,
 }
 
 impl PaletteState {
@@ -581,6 +610,10 @@ impl PaletteState {
     }
 
     fn collect(&mut self, ctx: &egui::Context, cx: &mut Cx, mode: Mode, q: &str) -> Vec<Item> {
+        // Nothing below may run: it would read whatever folder gitem was started in.
+        if let Some(has_git) = self.outside {
+            return if matches!(mode, Mode::All | Mode::Commands) { commands_without_repo(has_git, &cx.settings.recent_repos) } else { Vec::new() };
+        }
         let mut items = Vec::new();
         if matches!(mode, Mode::All | Mode::Commands) {
             items = commands();
@@ -780,7 +813,7 @@ impl PaletteState {
         let esc_left = paint_keys(ui, "Esc", rect.right() - 16.0, y, p);
         let edit = Rect::from_min_max(pos2(x, rect.top() + 8.0), pos2(esc_left - 10.0, rect.bottom() - 8.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(edit).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let out = egui::TextEdit::singleline(&mut self.query).id(egui::Id::new("gitem-palette-input")).frame(egui::Frame::NONE).font(prop(16.0)).text_color(p.text).hint_text(RichText::new(mode.placeholder()).color(p.faint).size(15.0)).desired_width(edit.width()).margin(egui::Margin::symmetric(0, 4)).show(&mut child);
+        let out = egui::TextEdit::singleline(&mut self.query).id(egui::Id::new("gitem-palette-input")).frame(egui::Frame::NONE).font(prop(16.0)).text_color(p.text).hint_text(RichText::new(if self.outside.is_some() && mode == Mode::All { "Open, clone or scan repositories, or change settings" } else { mode.placeholder() }).color(p.faint).size(15.0)).desired_width(edit.width()).margin(egui::Margin::symmetric(0, 4)).show(&mut child);
         if self.just_opened || !out.response.has_focus() {
             self.just_opened = false;
             out.response.request_focus();
@@ -798,6 +831,7 @@ impl PaletteState {
         if hits.is_empty() {
             let (rect, _) = ui.allocate_exact_size(vec2(width, 120.0), Sense::hover());
             let (title, hint) = match mode {
+                Mode::Branches | Mode::Files | Mode::Commits if self.outside.is_some() => ("No repository is open", "Open or clone one first, and this finds what's in it."),
                 Mode::Commits if self.commits.busy() => ("Loading commits…", ""),
                 Mode::Files if self.files.busy() => ("Loading files…", ""),
                 _ => ("No matches", "Check the spelling, or try fewer letters."),
@@ -998,6 +1032,28 @@ mod tests {
         assert_eq!(plain[0].item.label, "Push…");
         let hits = rank(commands(), "re", &["Reset to a Ref…".to_string()]);
         assert!(labels(&hits).iter().position(|l| *l == "Reset to a Ref…").unwrap() < labels(&plain).len());
+    }
+
+    #[test]
+    fn with_no_repository_only_what_works_there_is_offered() {
+        let labels = |has_git: bool, recent: &[String]| commands_without_repo(has_git, recent).into_iter().map(|i| i.label).collect::<Vec<_>>();
+        let all = labels(true, &["C:/work/alpha/".to_string(), "/srv/beta".to_string()]);
+        for want in ["Open Folder…", "Clone Repository…", "Scan for Repositories…", "Settings", "Pull Requests I'm In", "alpha", "beta"] {
+            assert!(all.iter().any(|l| l == want), "{want} in {all:?}");
+        }
+        for not in ["Graph", "Changes", "Fetch…", "Stage All", "Delete a Branch…", "Refresh", "Open Terminal Here"] {
+            assert!(!all.iter().any(|l| l == not), "{not}");
+        }
+        // Each name on the list has to be a command still, or it would quietly stop being offered.
+        let every: Vec<String> = commands().into_iter().map(|i| i.label).collect();
+        for name in WORKS_WITHOUT_REPO {
+            assert!(every.iter().any(|l| l == name), "{name}");
+        }
+        let gitless = labels(false, &["C:/work/alpha".to_string()]);
+        assert!(gitless.iter().any(|l| l == "Settings"));
+        for not in ["Clone Repository…", "Open Folder…", "alpha"] {
+            assert!(!gitless.iter().any(|l| l == not), "{not}");
+        }
     }
 
     #[test]

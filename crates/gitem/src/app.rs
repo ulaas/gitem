@@ -200,8 +200,8 @@ const SIDEBAR_WIDTH: f32 = 270.0;
 const DETAILS_WIDTH: f32 = 340.0;
 
 /// Which side panels give way, Details first, so the view keeps a usable width.
-fn squeeze_for(width: f32, rail: bool, sidebar: bool, details: bool) -> Squeeze {
-    let left = width - if rail { chrome::RAIL_WIDTH } else { 0.0 };
+fn squeeze_for(width: f32, rail: f32, sidebar: bool, details: bool) -> Squeeze {
+    let left = width - rail;
     let with_sidebar = if sidebar { left - SIDEBAR_WIDTH } else { left };
     let hide_details = details && with_sidebar - DETAILS_WIDTH < VIEW_MIN_WIDTH;
     let hide_sidebar = sidebar && with_sidebar < VIEW_MIN_WIDTH;
@@ -212,14 +212,18 @@ fn squeeze_for(width: f32, rail: bool, sidebar: bool, details: bool) -> Squeeze 
 #[test]
 fn details_give_way_first_and_then_the_sidebar() {
     let got = |w: f32| {
-        let s = squeeze_for(w, true, true, true);
+        let s = squeeze_for(w, chrome::RAIL_WIDTH, true, true);
         (s.details, s.sidebar)
     };
     assert_eq!(got(1500.0), (false, false));
     assert_eq!(got(1100.0), (true, false));
     assert_eq!(got(800.0), (true, true));
     // What's been turned off has no room to give.
-    assert!(!squeeze_for(1000.0, true, true, false).details);
+    assert!(!squeeze_for(1000.0, chrome::RAIL_WIDTH, true, false).details);
+    // A wider rail takes its room from the view: what just fitted with the narrow one doesn't.
+    let just_fits = 44.0 + SIDEBAR_WIDTH + DETAILS_WIDTH + VIEW_MIN_WIDTH;
+    assert!(!squeeze_for(just_fits, chrome::RAIL_WIDTH, true, true).details);
+    assert!(squeeze_for(just_fits, chrome::RAIL_LABELLED_WIDTH, true, true).details);
 }
 
 impl RepoTab {
@@ -903,8 +907,10 @@ pub struct GitemApp {
     git_warning: Option<String>,
     #[cfg(windows)]
     styled_window: bool,
-    /// Settings shown with no repository open.
-    no_repo_settings: Option<Box<NoRepoSettings>>,
+    /// What a palette or a view needs with no repository open, made the first time one does.
+    no_repo: Option<Box<NoRepo>>,
+    /// The view showing in place of the welcome page: only those that need no repository.
+    no_repo_tab: Option<Tab>,
     /// The settings as last read or written, to merge with what another copy changed.
     settings_baseline: Option<serde_json::Value>,
     /// Session repositories not open in this copy, kept for next time. It was started for
@@ -951,10 +957,20 @@ struct Opening {
     then: Option<gitem_core::forge::DeepLink>,
 }
 
-struct NoRepoSettings {
+struct NoRepo {
     repo: Repo,
     data: RepoData,
-    view: crate::views::settings::SettingsView,
+}
+
+/// A view that can show with no repository, in the form that needs none, or None if it can't.
+/// Every other view reads the repository from its first frame.
+fn without_repo(tab: Tab) -> Option<Tab> {
+    match tab {
+        Tab::Settings(_) => Some(tab),
+        Tab::Credentials(_) => Some(Tab::Credentials(Box::new(crate::views::credentials::CredentialsView::outside_repo()))),
+        Tab::Launchpad(_) => Some(Tab::Launchpad(Box::new(crate::views::launchpad::LaunchpadView::everything_only()))),
+        _ => None,
+    }
 }
 
 /// Version, commit, and whether the build had uncommitted changes.
@@ -1031,7 +1047,8 @@ impl GitemApp {
             crash_reports: Vec::new(),
             #[cfg(windows)]
             styled_window: false,
-            no_repo_settings: None,
+            no_repo: None,
+            no_repo_tab: None,
             settings_baseline: None,
             session_kept: Vec::new(),
             reopen_failed: Vec::new(),
@@ -1242,6 +1259,7 @@ impl GitemApp {
         let root = repo.root.to_string_lossy().replace('\\', "/");
         self.session_kept.retain(|k| *k != root);
         self.settings.touch_recent(&root);
+        self.no_repo_tab = None;
         let mut tab = RepoTab::new(ctx, repo, &self.settings);
         tab.maintenance_due = self.settings.auto_maintenance;
         self.repos.push(tab);
@@ -1683,6 +1701,11 @@ impl GitemApp {
             Action::OpenTab(t) => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.open_tab(t);
+                } else {
+                    match without_repo(t) {
+                        Some(t) => self.no_repo_tab = Some(t),
+                        None => self.toasts.push(("That needs a repository. Open or clone one first.".to_string(), Instant::now())),
+                    }
                 }
             }
             Action::Inspect(sha) => {
@@ -1730,7 +1753,7 @@ impl GitemApp {
             Action::About => self.about_open = true,
             Action::OpenSettings => {
                 if self.repos.is_empty() {
-                    self.toggle_no_repo_settings();
+                    self.no_repo_tab = if matches!(self.no_repo_tab, Some(Tab::Settings(_))) { None } else { Some(Tab::Settings(Box::default())) };
                 } else {
                     self.apply_action(ctx, Action::OpenTab(Tab::Settings(Box::default())));
                 }
@@ -1773,6 +1796,7 @@ impl GitemApp {
                 }
             }
             Action::OpenPalette => self.palette = Some(PaletteState::new()),
+            Action::PickFolder => crate::widgets::pick(&mut self.folder_pick, ctx, rfd::FileDialog::new(), true),
             Action::GraphFocus(name) | Action::GraphHide(name) if self.repos.is_empty() => drop(name),
             Action::GraphFocus(name) => self.with_graph(|g| g.focus_ref(&name)),
             Action::GraphHide(name) => self.with_graph(|g| g.hide_ref(&name)),
@@ -1831,8 +1855,10 @@ impl GitemApp {
         let has_repo = !self.repos.is_empty();
         // The right end is laid out first: it holds the way to close the window, so however
         // many repositories are open it has to stay on screen.
-        let field = if !has_repo { 30.0 } else if bar.width() >= 1000.0 { chrome::COMMAND_FIELD_WIDTH } else { 30.0 };
-        let right = egui::Rect::from_min_max(egui::pos2(bar.right() - chrome::window_controls_width() - 8.0 - field, bar.top()), bar.max);
+        let field = if bar.width() >= 1000.0 { chrome::COMMAND_FIELD_WIDTH } else { 30.0 };
+        // With none open the rail isn't there, so Settings sits beside the field.
+        let extra = if has_repo { 0.0 } else { 30.0 };
+        let right = egui::Rect::from_min_max(egui::pos2(bar.right() - chrome::window_controls_width() - 8.0 - field - extra, bar.top()), bar.max);
         let left = egui::Rect::from_min_max(bar.min, egui::pos2(right.left() - chrome::TITLE_DRAG_ROOM, bar.bottom()));
         ui.scope_builder(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             chrome::window_controls(ui, &p);
@@ -1840,10 +1866,11 @@ impl GitemApp {
             ui.spacing_mut().item_spacing.x = 2.0;
             if !has_repo {
                 // With a repository open the rail has this.
-                if chrome::icon_button(ui, chrome::icon::GEAR_SIX, crate::i18n::t("Settings"), "Preferences", self.no_repo_settings.is_some(), &p).clicked() {
+                if chrome::icon_button(ui, chrome::icon::GEAR_SIX, crate::i18n::t("Settings"), "Preferences", matches!(self.no_repo_tab, Some(Tab::Settings(_))), &p).clicked() {
                     out.push(Action::OpenSettings);
                 }
-            } else if field > 30.0 {
+            }
+            if field > 30.0 {
                 if chrome::command_field(ui, field, &p).clicked() {
                     self.palette = Some(PaletteState::new());
                 }
@@ -1928,13 +1955,10 @@ impl GitemApp {
         });
     }
 
-    fn toggle_no_repo_settings(&mut self) {
-        if self.no_repo_settings.take().is_some() {
-            return;
-        }
-        let git = self.git.clone().unwrap_or_else(|_| GitExe { path: "git not found".into(), source: gitem_core::runner::GitSource::System, log: Default::default(), helper: None, neutral: Default::default(), cancel: None });
+    fn make_no_repo(git: &Result<GitExe, String>) -> Box<NoRepo> {
+        let git = git.clone().unwrap_or_else(|_| GitExe { path: "git not found".into(), source: gitem_core::runner::GitSource::System, log: Default::default(), helper: None, neutral: Default::default(), cancel: None });
         let root = PathBuf::from(".");
-        self.no_repo_settings = Some(Box::new(NoRepoSettings { repo: Repo::outside_any(git, root.clone(), root), data: RepoData::default(), view: Default::default() }));
+        Box::new(NoRepo { repo: Repo::outside_any(git, root.clone(), root), data: RepoData::default() })
     }
 
     fn about(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
@@ -2200,7 +2224,7 @@ impl GitemApp {
             ui.add_space(4.0);
             ui.label(RichText::new("gitem").size(30.0).strong());
             ui.label(RichText::new("A Git client. Open a repository, clone one, or start a new one.").color(p.dim));
-            ui.label(RichText::new("Once one is open: Ctrl+P finds any command, and F1 lists the keys and the words used here.").small().color(p.faint));
+            ui.label(RichText::new("Ctrl+P finds any command, and F1 lists the keys and the words used here.").small().color(p.faint));
             ui.add_space(14.0);
             if let Err(e) = &self.git {
                 error_box(ui, e, &p);
@@ -2211,6 +2235,7 @@ impl GitemApp {
                     if ui.button("Use").clicked() {
                         self.git = GitExe::discover(Some(Path::new(&self.settings.git_path))).map_err(|e| e.to_string());
                         self.git_warning = self.git.as_ref().ok().and_then(GitExe::version_warning);
+                        self.no_repo = None;
                         self.settings_dirty = true;
                     }
                 });
@@ -2229,6 +2254,16 @@ impl GitemApp {
                 }
                 if ui.button("Scan for repositories…").on_hover_text("Find the repositories in a folder, and open the ones you want").clicked() {
                     out.push(Action::Form(forms::scan_form()));
+                }
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space((ui.available_width() - 240.0).max(0.0) / 2.0);
+                if ui.button("Pull requests I'm in").on_hover_text("Across the hosts your recent repositories use. Nothing is asked until you say so.").clicked() {
+                    out.push(Action::OpenTab(Tab::Launchpad(Box::default())));
+                }
+                if ui.button("Credentials").on_hover_text("Saved tokens and SSH keys").clicked() {
+                    out.push(Action::OpenTab(Tab::Credentials(Box::default())));
                 }
             });
             ui.add_space(6.0);
@@ -3187,8 +3222,8 @@ impl GitemApp {
                 Some((_, t)) => name_of(t),
                 None => tab.dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).and_then(name_of),
             };
-            egui::Panel::left("rail").frame(egui::Frame::new().fill(pal.bg)).resizable(false).exact_size(chrome::RAIL_WIDTH).show(ui, |ui| {
-                match chrome::rail(ui, &|i| focused == Some(i.name), self.settings.rail_full, &pal) {
+            egui::Panel::left("rail").frame(egui::Frame::new().fill(pal.bg)).resizable(false).exact_size(chrome::rail_width(self.settings.rail_labels)).show(ui, |ui| {
+                match chrome::rail(ui, &|i| focused == Some(i.name), self.settings.rail_full, self.settings.rail_labels, &pal) {
                     Some((t, true)) => out.push(Action::OpenFromMore(t)),
                     Some((t, false)) => out.push(Action::OpenTab(t)),
                     None => {}
@@ -3247,7 +3282,8 @@ impl GitemApp {
                 });
             }
             let screen_w = ctx.content_rect().width();
-            let squeeze = squeeze_for(screen_w, *show_rail, *show_sidebar, *show_inspect);
+            let rail_room = if *show_rail { chrome::rail_width(self.settings.rail_labels) } else { 0.0 };
+            let squeeze = squeeze_for(screen_w, rail_room, *show_sidebar, *show_inspect);
             *tab_squeeze = squeeze;
             if !squeeze.details && *peek == Some(Peek::Details) || !squeeze.sidebar && *peek == Some(Peek::Sidebar) {
                 *peek = None;
@@ -3285,7 +3321,7 @@ impl GitemApp {
             if let Some(which) = *peek {
                 let width = (screen_w - 60.0).min(if which == Peek::Details { DETAILS_WIDTH } else { SIDEBAR_WIDTH });
                 let top = chrome::TITLE_BAR_HEIGHT + 34.0;
-                let (anchor, x) = if which == Peek::Details { (Align2::RIGHT_TOP, -2.0) } else { (Align2::LEFT_TOP, chrome::RAIL_WIDTH) };
+                let (anchor, x) = if which == Peek::Details { (Align2::RIGHT_TOP, -2.0) } else { (Align2::LEFT_TOP, rail_room) };
                 let shown = egui::Area::new("side-peek".into()).order(egui::Order::Middle).anchor(anchor, [x, top]).show(&ctx, |ui| {
                     egui::Frame::popup(ui.style()).fill(pal.panel).show(ui, |ui| {
                         ui.set_width(width);
@@ -3299,22 +3335,40 @@ impl GitemApp {
                 }
             }
             if let Some(pl) = &mut self.palette {
+                pl.outside = None;
                 let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
                 if pl.show(&ctx, &mut cx) {
                     self.palette = None;
                 }
             }
         } else {
-            self.palette = None;
-            if let Some(s) = &mut self.no_repo_settings {
+            if self.no_repo.is_none() && (self.no_repo_tab.is_some() || self.palette.is_some()) {
+                self.no_repo = Some(Self::make_no_repo(&self.git));
+            }
+            if let (Some(tab), Some(s)) = (&mut self.no_repo_tab, &self.no_repo) {
+                let mut back = false;
+                egui::Panel::top("no-repo-back").frame(bar_frame).show_separator_line(false).show(ui, |ui| {
+                    back = ui.button(format!("{} Back to the start", chrome::icon::ARROW_LEFT)).clicked();
+                });
                 let settings = &self.settings;
                 egui::CentralPanel::default().show(ui, |ui| {
-                    let NoRepoSettings { repo, data, view } = &mut **s;
+                    let NoRepo { repo, data } = &**s;
                     let mut cx = Cx { repo, data, settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
-                    view.ui(ui, &mut cx);
+                    tab.ui(ui, &mut cx);
                 });
+                if back {
+                    self.no_repo_tab = None;
+                }
             } else {
                 egui::CentralPanel::default().show(ui, |ui| self.welcome(ui, &mut out));
+            }
+            if let (Some(pl), Some(s)) = (&mut self.palette, &self.no_repo) {
+                pl.outside = Some(self.git.is_ok());
+                let NoRepo { repo, data } = &**s;
+                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
+                if pl.show(&ctx, &mut cx) {
+                    self.palette = None;
+                }
             }
         }
 
