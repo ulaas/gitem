@@ -7077,6 +7077,31 @@ fn wrapped_lines_take_the_rows_they_need() {
     assert_eq!(wrapped_lines(11, 10), 2);
 }
 
+/// Each is counted against what the layout really does, with the app's real fonts.
+#[test]
+fn a_wrapped_row_is_as_tall_as_its_text_with_wide_characters() {
+    use gitem::views::diffview::wrapped_line_count;
+    let ctx = egui::Context::default();
+    gitem::theme::install_fonts(&ctx);
+    ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+    let texts = ["plain ascii ".repeat(40), "中文宽字符测试的一行文字".repeat(12), "日本語の全角文字と한국어 mixed with ascii ".repeat(10), "é".repeat(300), "tab\tseparated\tcolumns\t".repeat(20), "🦀 emoji ".repeat(30)];
+    let font = 13.0;
+    let row_h = (font * 1.45_f32).ceil();
+    for width in [180.0, 333.0, 700.0] {
+        for text in &texts {
+            let mut job = gitem::widgets::code_job(text, font, egui::Color32::WHITE, None, None, egui::Color32::TRANSPARENT);
+            job.wrap.max_width = width;
+            job.wrap.break_anywhere = true;
+            let galley = ctx.fonts_mut(|fx| fx.layout_job(job));
+            let n = wrapped_line_count(&ctx, text, width, font);
+            assert!(n >= galley.rows.len(), "{text:?} at {width}: {n} rows for {}", galley.rows.len());
+            // Too many is only a blank line. Tabs come out slightly high.
+            assert!(n <= galley.rows.len() + galley.rows.len() / 8 + 1, "{text:?} at {width}: {n} rows for {}", galley.rows.len());
+            assert!(galley.size().y <= n as f32 * row_h + 1.0, "{text:?} at {width}: {} tall in {n} rows of {row_h}", galley.size().y);
+        }
+    }
+}
+
 #[test]
 fn wrap_works_in_both_diff_layouts_and_keeps_the_hunk_actions() {
     let f = Fx::new();

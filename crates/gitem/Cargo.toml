@@ -30,6 +30,6 @@ raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
-egui_kittest = { version = "0.36" }
+egui_kittest = { version = "0.36", features = ["wgpu"] }
 gitem-testenv = { path = "../gitem-testenv" }
 tempfile = "3"

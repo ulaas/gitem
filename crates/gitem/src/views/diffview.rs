@@ -174,8 +174,8 @@ pub struct DiffView {
     /// Long lines run on underneath, rather than off to the side.
     wrap: bool,
     /// Top of each row and the end of the last, while wrapping, with what they're for:
-    /// side by side or not, text columns, and the file.
-    wrapped_tops: Option<(bool, usize, usize, std::sync::Arc<Vec<f32>>)>,
+    /// side by side or not, the text's width in points and font size, and the file.
+    wrapped_tops: Option<(bool, (u32, u32), usize, std::sync::Arc<Vec<f32>>)>,
 }
 
 impl DiffView {
@@ -703,8 +703,7 @@ impl DiffView {
         let avail = ui.available_width();
         if self.wrap {
             let half = (avail - 10.0) / 2.0;
-            let columns = wrap_columns(half - 1.0 - gutter - 8.0, char_w);
-            let tops = self.tops_for(true, columns, row_h, pr);
+            let tops = self.tops_for(ui, true, half - 1.0 - gutter - 8.0, font, row_h, pr);
             self.wrapped_rows(ui, &tops, row_h, ("split-wrapped", self.selected_file), half * 2.0, |view, ui, rect, i| view.split_row(ui, cx, f, pr, rect, i, half, gutter, 0.0, font, &pal));
             return;
         }
@@ -760,17 +759,18 @@ impl DiffView {
 
     /// Where each row starts while wrapping, kept until the text or its width changes: this
     /// walks every line.
-    fn tops_for(&mut self, split: bool, columns: usize, row_h: f32, pr: &Prepared) -> std::sync::Arc<Vec<f32>> {
+    fn tops_for(&mut self, ui: &Ui, split: bool, width: f32, font: f32, row_h: f32, pr: &Prepared) -> std::sync::Arc<Vec<f32>> {
         let rows = if split { pr.side.len() } else { pr.unified.len() };
-        if let Some((s, c, file, tops)) = &self.wrapped_tops
+        let key = (width.to_bits(), font.to_bits());
+        if let Some((s, k, file, tops)) = &self.wrapped_tops
             && *s == split
-            && *c == columns
+            && *k == key
             && *file == self.selected_file
             && tops.len() == rows + 1
         {
             return tops.clone();
         }
-        let lines = |text: Option<&str>| text.map_or(1, |t| wrapped_lines(shown_chars(t), columns));
+        let lines = |text: Option<&str>| text.map_or(1, |t| wrapped_line_count(ui.ctx(), t, width, font));
         let heights: Vec<f32> = if split {
             pr.side.iter().map(|r| lines(r.left.as_ref().map(|x| x.1.as_str())).max(lines(r.right.as_ref().map(|x| x.1.as_str()))) as f32 * row_h).collect()
         } else {
@@ -784,7 +784,7 @@ impl DiffView {
             tops.push(y);
         }
         let tops = std::sync::Arc::new(tops);
-        self.wrapped_tops = Some((split, columns, self.selected_file, tops.clone()));
+        self.wrapped_tops = Some((split, key, self.selected_file, tops.clone()));
         tops
     }
 
@@ -817,8 +817,7 @@ impl DiffView {
         let char_w = ui.fonts_mut(|fx| fx.glyph_width(&mono(font), 'm'));
         if self.wrap {
             let width = ui.available_width() - 10.0;
-            let columns = wrap_columns(width - gutter - 8.0, char_w);
-            let tops = self.tops_for(false, columns, row_h, pr);
+            let tops = self.tops_for(ui, false, width - gutter - 8.0, font, row_h, pr);
             self.wrapped_rows(ui, &tops, row_h, ("unified-wrapped", self.selected_file), width, |view, ui, rect, i| view.unified_row(ui, cx, f, pr, rect, i, gutter, font, &pal));
             return;
         }
@@ -950,6 +949,30 @@ fn wrap_columns(width: f32, char_w: f32) -> usize {
 /// Rows a line of this many characters takes when wrapped.
 pub fn wrapped_lines(chars: usize, columns: usize) -> usize {
     chars.max(1).div_ceil(columns.max(1))
+}
+
+/// Rows a line takes when wrapped to `width`, as `code_job` draws it. Plain ASCII is one width
+/// in a monospace font, so it's counted. Anything else can come from a fallback font twice as
+/// wide, as CJK does, and is measured glyph by glyph the way the layout breaks a line.
+pub fn wrapped_line_count(ctx: &egui::Context, text: &str, width: f32, font: f32) -> usize {
+    let id = mono(font);
+    if text.is_ascii() && !text.contains('\t') {
+        let char_w = ctx.fonts_mut(|fx| fx.glyph_width(&id, 'm'));
+        return wrapped_lines(shown_chars(text), wrap_columns(width, char_w));
+    }
+    let shown = gitem_core::util::prefix(text, crate::widgets::MAX_SHOWN_LINE_BYTES);
+    ctx.fonts_mut(|fx| {
+        let (mut lines, mut x) = (1, 0.0);
+        for c in shown.chars() {
+            let w = fx.glyph_width(&id, c);
+            if x + w > width && x > 0.0 {
+                lines += 1;
+                x = 0.0;
+            }
+            x += w;
+        }
+        lines
+    })
 }
 
 fn short(s: &str) -> &str {
