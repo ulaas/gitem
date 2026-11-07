@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 const PATIENCE: Duration = Duration::from_secs(40);
 
 fn pr(number: u64, head: &str, title: &str, draft: bool) -> Value {
-    json!({"number":number,"title":title,"html_url":format!("http://127.0.0.1:9/pulls/{number}"),"user":{"login":if number % 2 == 0 {"me"} else {"someone-else"}},"state":"open","created_at":"2026-10-01T10:00:00Z","updated_at":"2026-11-01T10:00:00Z","draft":draft,"mergeable":number != 12,
+    json!({"number":number,"title":title,"html_url":format!("http://127.0.0.1:9/pulls/{number}"),"user":{"login":if number.is_multiple_of(2) {"me"} else {"someone-else"}},"state":"open","created_at":"2026-10-01T10:00:00Z","updated_at":"2026-11-01T10:00:00Z","draft":draft,"mergeable":number != 12,
         "head":{"ref":head,"repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r"}}})
 }
 
@@ -67,7 +67,7 @@ fn fake_host() -> String {
                 let route = path.split('?').next().unwrap_or("");
                 let body = match route {
                     "/api/v1/user" => json!({"login":"me"}),
-                    "/api/v1/repos/o/r/pulls" if page_one => json!([pr(7, "topic", "Teach the parser about wide characters", false), pr(9, "fix/long-branch-name-that-keeps-on-going", "Fix the thing that broke when a very long title like this one has to fit in a card", false), pr(12, "draft-work", "Sketch a new layout", true)]),
+                    "/api/v1/repos/o/r/pulls" if page_one => json!([pr(7, "topic", "Teach the parser about wide characters", false), pr(9, "fix/long-branch-name-that-keeps-on-going", "Fix the thing that broke when a very long title like this one has to fit in a card", false), pr(12, "draft-work", "Sketch a new layout", true), {let mut p = pr(14, "from-a-fork", "Someone else's fork", false); p["head"]["repo"]["full_name"] = json!("them/r"); p}]),
                     "/api/v1/repos/o/r/issues" if page_one => json!([{"number":3,"title":"Crash when opening a file","state":"open","html_url":"http://127.0.0.1:9/issues/3","user":{"login":"someone-else"},"labels":[{"name":"bug","color":"ff0000"}]}]),
                     _ => json!([]),
                 };
@@ -238,6 +238,27 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         settle_a_moment(&mut h);
         out.save(&mut h, "form");
     }
+    if wanted("switch") {
+        let mut h = f.harness(set, vec![]);
+        let ctx = h.ctx.clone();
+        h.state_mut().apply_action(&ctx, gitem::action::Action::Form(gitem::forms::switch_with_changes("topic".into(), vec!["a.txt".into(), "src/lib.rs".into()])));
+        settle_a_moment(&mut h);
+        out.save(&mut h, "switch");
+    }
+    if wanted("scan") {
+        let mut h = f.harness(set, vec![]);
+        let top = f.top.join("scan");
+        for n in ["one", "deep/er/two"] {
+            if !top.join(n).exists() {
+                make_repo(&f.git, &top.join(n));
+            }
+        }
+        let ctx = h.ctx.clone();
+        h.state_mut().apply_action(&ctx, gitem::action::Action::ScanRepos(top));
+        wait_for(&mut h, "deep/er/two");
+        settle_a_moment(&mut h);
+        out.save(&mut h, "scan");
+    }
     if wanted("confirm") {
         let mut h = f.harness(set, vec![]);
         // The close dialog's sibling: a danger form opened by name.
@@ -310,6 +331,37 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         settle_a_moment(&mut h);
         out.save(&mut h, "overflow");
     }
+    if wanted("refs") {
+        for i in 0..30 {
+            let name = format!("ref{i:02}");
+            if f.git.run(Some(&f.root), &["rev-parse", "--verify", "-q", &format!("refs/heads/{name}")]).is_err() {
+                run(&f.git, &f.root, &["branch", &name]);
+            }
+        }
+        let mut h = f.harness(set, vec![]);
+        h.set_size(vec2(1000.0, 500.0));
+        open(&mut h, Tab::graph());
+        h.query_all_by_label("Change a.txt, step 5").next().unwrap().click_secondary();
+        settle_a_moment(&mut h);
+        out.save(&mut h, "refs-menu");
+        h.query_by_label_contains("refs here").unwrap().click();
+        settle_a_moment(&mut h);
+        out.save(&mut h, "refs-list");
+    }
+    if wanted("stale") {
+        let mut h = f.harness(set, vec![]);
+        open(&mut h, Tab::graph());
+        let head = f.root.join(".git/HEAD");
+        let was = std::fs::read(&head).unwrap();
+        std::fs::write(&head, "this is not a ref
+").unwrap();
+        let ctx = h.ctx.clone();
+        h.state_mut().apply_action(&ctx, gitem::action::Action::Refresh);
+        quiet(&mut h);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "stale");
+        std::fs::write(&head, was).unwrap();
+    }
     if wanted("treemap") {
         let mut h = f.harness(set, vec![]);
         open(&mut h, Tab::Treemap(Box::default()));
@@ -337,7 +389,7 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         );
         open(&mut h, Tab::Launchpad(Box::default()));
         quiet(&mut h);
-        click(&mut h, "Other open (2)");
+        click(&mut h, "Other open (3)");
         wait_for(&mut h, "Teach the parser");
         quiet(&mut h);
         out.save(&mut h, "launchpad");
@@ -345,7 +397,7 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
     if wanted("credentials") {
         gitem_core::cred::set_forge_token("git.example.invalid", "someone", "FAKE_SECRET_VALUE").unwrap();
         gitem_core::cred::set_ai_key("anthropic", "FAKE_SECRET_VALUE").unwrap();
-        gitem_core::cred::store("gitem/git/https://code.example.invalid", "another.person", "FAKE_SECRET_VALUE").unwrap();
+        gitem_core::cred::store(&format!("{}https://code.example.invalid", gitem_core::cred::PREFIX_GIT), "another.person", "FAKE_SECRET_VALUE").unwrap();
         let mut h = f.harness(set, vec![]);
         open(&mut h, Tab::Credentials(Box::default()));
         wait_for(&mut h, "Stored secrets");

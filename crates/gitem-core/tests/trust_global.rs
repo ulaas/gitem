@@ -32,7 +32,8 @@ fn global_setup() -> (MutexGuard<'static, ()>, std::path::PathBuf) {
     static MARKER: OnceLock<std::path::PathBuf> = OnceLock::new();
     let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     let marker = MARKER.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("gitem-trust-global-{}", std::process::id()));
+        // In this binary's scratch home, which goes when it ends.
+        let dir = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("trust-global");
         std::fs::create_dir_all(&dir).unwrap();
         let m = dir.join("marker.txt");
         let prog = format!("sh -c 'echo mine >> \"{}\"; cat' -", m.to_string_lossy().replace('\\', "/"));

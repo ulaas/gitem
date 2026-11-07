@@ -156,6 +156,10 @@ fn fetch_image(url: &str) -> Option<egui::ColorImage> {
     decode_image(&bytes)
 }
 
+/// File names the file view and diffs try `decode_image` on. SVG isn't one: it needs a renderer,
+/// not a decoder, and shows as the text it is.
+pub const PICTURE_TYPES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
+
 pub fn decode_image(bytes: &[u8]) -> Option<egui::ColorImage> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
@@ -298,10 +302,10 @@ pub fn load_more_bar(ui: &mut Ui, id: &str, shown: usize, noun: &str, step: usiz
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Showing the latest {} {noun}", grouped(shown))).color(p.dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!busy, egui::Button::new("Load all")).on_hover_text("Can take a while in a very long history").clicked() {
+                if ui.add_enabled(!busy, egui::Button::new("Load all")).on_disabled_hover_text("Still loading.").on_hover_text("Can take a while in a very long history").clicked() {
                     choice = Some(LoadMore::All);
                 }
-                if ui.add_enabled(!busy, egui::Button::new(format!("Load {} more", grouped(step)))).clicked() {
+                if ui.add_enabled(!busy, egui::Button::new(format!("Load {} more", grouped(step)))).on_disabled_hover_text("Still loading.").clicked() {
                     choice = Some(LoadMore::More);
                 }
                 if busy {
@@ -324,7 +328,7 @@ pub fn load_more_row(ui: &mut Ui, step: usize, left: Option<usize>, busy: bool) 
     ui.add_space(3.0);
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        clicked = ui.add_enabled(!busy, egui::Button::new(RichText::new(label).size(11.5))).clicked();
+        clicked = ui.add_enabled(!busy, egui::Button::new(RichText::new(label).size(11.5))).on_disabled_hover_text("Still loading.").clicked();
         if busy {
             ui.add(spinner(12.0));
         }

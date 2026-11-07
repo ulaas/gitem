@@ -134,7 +134,7 @@ impl ComposerView {
                 self.groups.push(ComposedCommit { message: String::new(), files: Vec::new() });
             }
             let busy = self.suggest.busy();
-            if ui.add_enabled(!busy && !changed.is_empty(), egui::Button::new("Suggest with AI")).on_hover_text("Sends the diff of tracked files to your AI provider").clicked() {
+            if ui.add_enabled(!busy && !changed.is_empty(), egui::Button::new("Suggest with AI")).on_disabled_hover_text("There are no changes to group, or a suggestion is on its way.").on_hover_text("Sends the diff of tracked files to your AI provider").clicked() {
                 let (repo, cfg) = (cx.repo.clone(), cx.settings.ai.clone());
                 let untracked: Vec<String> = st.entries.iter().filter(|e| e.worktree == gitem_core::model::FileStatus::Untracked).map(|e| e.path.clone()).collect();
                 self.suggest.spawn(ui.ctx(), move || -> Result<Vec<ComposedCommit>, String> {

@@ -334,7 +334,7 @@ impl Mode {
         match self {
             Mode::All => "Search commands, branches, and files",
             Mode::Commands => "Run a command",
-            Mode::Branches => "Switch to a branch",
+            Mode::Branches => "Check out a branch",
             Mode::Files => "Open a file",
             Mode::Commits => "Find a commit by message, author, or SHA",
         }
@@ -360,14 +360,14 @@ const MAX_RESULTS: usize = 200;
 const MAX_RECENT: usize = 6;
 const RECENT: &str = "Recent";
 /// Sections in the order they appear before anything is typed.
-const SECTIONS: [&str; 10] = [RECENT, "View", "Git", "Show", "Remote", "App", "Switch to", "Check out", "Open file", "Commit"];
+const SECTIONS: [&str; 10] = [RECENT, "View", "Git", "Show", "Remote", "App", "Check out", "Check out remote", "Open file", "Commit"];
 
 fn section_title(section: &str) -> &str {
     match section {
         "View" => "Views",
         "Show" => "Compare",
-        "Switch to" => "Switch branch",
-        "Check out" => "Remote branches",
+        "Check out" => "Check out a branch",
+        "Check out remote" => "Remote branches",
         "Open file" => "Files",
         "Commit" => "Commits",
         other => other,
@@ -376,9 +376,9 @@ fn section_title(section: &str) -> &str {
 
 fn section_tint(section: &str, p: &Palette) -> Color32 {
     match section {
-        "View" | "Switch to" => p.series[0],
+        "View" | "Check out" => p.series[0],
         "Git" => p.series[2],
-        "Show" | "Remote" | "Check out" => p.series[6],
+        "Show" | "Remote" | "Check out remote" => p.series[6],
         "Open file" => p.series[3],
         "Commit" => p.series[1],
         _ => p.dim,
@@ -527,14 +527,14 @@ impl PaletteState {
                         (0, x) => format!("\u{E03E}{x}  "),
                         (a, x) => format!("\u{E08E}{a} \u{E03E}{x}  "),
                     };
-                    let mut it = item("Switch to", b.name.clone(), move |cx| cx.run(ops::checkout(&n)));
+                    let mut it = item("Check out", b.name.clone(), move |cx| cx.run(ops::checkout(&n)));
                     (it.glyph, it.detail, it.record) = (icon::GIT_BRANCH, format!("{track}{}", b.subject), false);
                     items.push(it);
                 }
             }
             for b in cx.data.remote_branches() {
                 let n = b.name.clone();
-                let mut it = item("Check out", b.name.clone(), move |cx| {
+                let mut it = item("Check out remote", b.name.clone(), move |cx| {
                     let remotes = cx.data.remote_names();
                     // With a local branch of that name, that's the one meant. Git would refuse.
                     let local = gitem_core::parse::split_remote_ref(&n, &remotes).1.to_string();

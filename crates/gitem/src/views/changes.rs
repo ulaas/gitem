@@ -557,7 +557,7 @@ impl ChangesView {
                             cx.form(forms::stash_form(Vec::new()));
                             ui.close();
                         }
-                        if ui.add_enabled(!self.ai_stash.busy(), egui::Button::new("Stash with AI message")).clicked() {
+                        if ui.add_enabled(!self.ai_stash.busy(), egui::Button::new("Stash with AI message")).on_disabled_hover_text("Already writing a message for this stash.").clicked() {
                             self.ai_stash_gen = cx.data.status_gen;
                             let (repo, cfg) = (cx.repo.clone(), cx.settings.ai.clone());
                             self.ai_stash.spawn(ui.ctx(), move || -> Result<String, String> {
@@ -704,7 +704,7 @@ impl ChangesView {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let busy = self.ai.busy();
                 ui.menu_button(format!("AI {}", icon::CARET_DOWN), |ui| {
-                    if ui.add_enabled(!busy, egui::Button::new("Generate with AI")).on_hover_text("Write a message from the staged diff").clicked() {
+                    if ui.add_enabled(!busy, egui::Button::new("Generate with AI")).on_disabled_hover_text("Already writing a message.").on_hover_text("Write a message from the staged diff").clicked() {
                         self.generate(ui.ctx(), cx);
                         ui.close();
                     }

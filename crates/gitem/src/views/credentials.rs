@@ -329,7 +329,7 @@ impl CredentialsView {
         ui.horizontal(|ui| {
             ui.add(crate::widgets::input(&mut self.test_host).hint_text("github.com").desired_width(220.0));
             let host = self.test_host.trim().to_string();
-            if ui.add_enabled(!host.is_empty(), egui::Button::new("Test")).clicked() {
+            if ui.add_enabled(!host.is_empty(), egui::Button::new("Test")).on_disabled_hover_text("Type a host to test first.").clicked() {
                 self.test.spawn(ui.ctx(), move || -> Result<String, String> { Ok(cred::ssh_test(&host)) });
             }
             if self.test.busy() {

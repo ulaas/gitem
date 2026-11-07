@@ -35,6 +35,23 @@ pub const TABLE: &[(&str, &str)] = &[
     ("P, R, E, S, F, D", "Rebase: pick, reword, edit, squash, fixup, drop"),
 ];
 
+/// The words gitem uses for things, and git's where it has one: what F1 shows and what the README
+/// lists, so there's one place to look and to change.
+pub const WORDS: &[(&str, &str)] = &[
+    ("Check out", "Make a branch or commit the one you're on. Git's `switch`"),
+    ("Changes", "What you've edited and not committed. Unstaged until you stage it"),
+    ("Stage", "Add to what the next commit holds"),
+    ("Graph", "The history, with its branches drawn as lanes"),
+    ("Details", "The panel about the selected commit"),
+    ("Launchpad", "Pull requests and issues on the repository's host"),
+    ("Review", "Your own notes on a diff. Review with AI adds to them"),
+    ("Compose", "Split uncommitted changes into several commits, in the Composer"),
+    ("Recompose", "The same for commits you've already made"),
+    ("Rebase", "Replay commits on another base, or edit them. Git's `rebase -i`"),
+    ("Upstream", "The remote branch a branch follows, for its counts, Pull and Push"),
+    ("Patches", "A local library of saved changes"),
+];
+
 #[cfg(test)]
 mod tests {
     #[test]

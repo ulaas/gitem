@@ -753,7 +753,7 @@ impl SettingsView {
             });
             let mut test = false;
             g.row("Connection", "Sends a one-word request.", |ui| {
-                test = ui.add_enabled(!self.ai_test.busy(), egui::Button::new("Test connection")).clicked();
+                test = ui.add_enabled(!self.ai_test.busy(), egui::Button::new("Test connection")).on_disabled_hover_text("Already testing it.").clicked();
                 if self.ai_test.busy() {
                     ui.add(spinner(14.0));
                 }

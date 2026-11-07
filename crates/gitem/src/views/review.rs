@@ -262,7 +262,7 @@ impl ReviewView {
             let target = self.selected.clone().unwrap_or_default();
             ui.horizontal(|ui| {
                 ui.add(crate::widgets::input(&mut self.new_comment).hint_text(if target.is_empty() { "Add a general note" } else { "Add a note on this file" }).desired_width(ui.available_width() - 60.0));
-                if ui.add_enabled(!self.new_comment.trim().is_empty(), egui::Button::new("Add")).clicked() {
+                if ui.add_enabled(!self.new_comment.trim().is_empty(), egui::Button::new("Add")).on_disabled_hover_text("Type a comment first.").clicked() {
                     let text = std::mem::take(&mut self.new_comment);
                     self.saved.threads.push(Thread { path: target.clone(), text: text.trim().to_string(), author: "You".to_string(), ..Default::default() });
                     self.save(cx);

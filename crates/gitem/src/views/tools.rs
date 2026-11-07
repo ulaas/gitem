@@ -260,7 +260,7 @@ impl ToolsView {
         let (list, left_alone) = self.clean_list.get().cloned().unwrap_or_default();
         ui.label(RichText::new(format!("{} would be deleted", plural(list.len(), "item", "items"))).color(p.dim));
         let b = egui::Button::new(RichText::new("Delete these…").color(crate::theme::ink_on(p.danger))).fill(p.danger);
-        if ui.add_enabled(!list.is_empty(), b).clicked() {
+        if ui.add_enabled(!list.is_empty(), b).on_disabled_hover_text("Nothing would be deleted.").clicked() {
             cx.confirm("Clean working tree", &format!("Permanently delete {}? This cannot be undone.", plural(list.len(), "untracked item", "untracked items")), "Delete", ops::clean(self.clean_dirs, self.clean_ignored));
         }
         if !left_alone.is_empty() {
@@ -340,7 +340,7 @@ impl ToolsView {
         let mut disabled = false;
         ui.horizontal(|ui| {
             let patterns: Vec<String> = text.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-            if ui.add_enabled(!patterns.is_empty(), egui::Button::new("Apply")).clicked() {
+            if ui.add_enabled(!patterns.is_empty(), egui::Button::new("Apply")).on_disabled_hover_text("Add a pattern first.").clicked() {
                 cx.run(ops::sparse_set(&patterns, self.sparse_cone));
             }
             if ui.button("Disable sparse checkout").clicked() {

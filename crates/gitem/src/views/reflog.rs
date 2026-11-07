@@ -232,7 +232,7 @@ impl BisectView {
             // looked at. While the last mark runs, the commit shown is out of date as well.
             let shown = self.current.get().map(|c| c.sha.clone()).filter(|_| !self.current.busy() && !cx.data.ops_busy);
             let mut mark = |ui: &mut Ui, button: egui::Button, verdict: &str| {
-                if ui.add_enabled(shown.is_some(), button).clicked()
+                if ui.add_enabled(shown.is_some(), button).on_disabled_hover_text("Wait for git: the commit to judge isn't known yet.").clicked()
                     && let Some(sha) = &shown
                 {
                     cx.run(ops::bisect_mark_commit(verdict, sha));
@@ -249,7 +249,7 @@ impl BisectView {
         ui.horizontal(|ui| {
             ui.label("Automate with a test command");
             ui.add(crate::widgets::input(&mut self.run_cmd).hint_text("cargo test failing_case").desired_width(280.0));
-            if ui.add_enabled(!self.run_cmd.trim().is_empty(), egui::Button::new("Run")).clicked() {
+            if ui.add_enabled(!self.run_cmd.trim().is_empty(), egui::Button::new("Run")).on_disabled_hover_text("Type a command to test each commit with.").clicked() {
                 cx.run(ops::bisect_run(self.run_cmd.trim()));
             }
         });

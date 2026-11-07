@@ -58,9 +58,29 @@ fn scratch_env(dir: &Path) -> Vec<(&'static str, PathBuf)> {
     ]
 }
 
+/// A scratch folder from a run that ended without tidying up, going by its name and age. On
+/// Windows a test binary that fails ends through `ExitProcess`, which skips `atexit`, and a killed
+/// one never gets there. No run lasts a day, so that's old enough not to be anyone's.
+fn is_old_scratch(name: &str, age: std::time::Duration) -> bool {
+    // The second is what `trust_global` used to make.
+    let number = name.strip_prefix("gitem-test-").or_else(|| name.strip_prefix("gitem-trust-global-"));
+    age > std::time::Duration::from_secs(24 * 60 * 60) && number.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn sweep_old_scratch(temp: &Path) {
+    let Ok(entries) = std::fs::read_dir(temp) else { return };
+    for e in entries.flatten() {
+        let age = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        if age.is_some_and(|a| is_old_scratch(&e.file_name().to_string_lossy(), a)) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// Not for calling directly: `isolate!` runs this. A failure stops the process,
 /// since running on without isolation could touch the real profile.
 pub fn setup() {
+    sweep_old_scratch(&std::env::temp_dir());
     let dir = std::env::temp_dir().join(format!("gitem-test-{}", std::process::id()));
     // Only there if a killed run had this process id.
     let _ = std::fs::remove_dir_all(&dir);
@@ -134,6 +154,18 @@ mod tests {
     fn the_binary_has_no_tests_of_its_own() {
         let text = std::fs::read_to_string(workspace().join("crates/gitem/src/main.rs")).unwrap();
         assert!(!text.contains("#[cfg(test)]") && !text.contains("#[test]"));
+    }
+
+    #[test]
+    fn only_old_folders_of_ours_count_as_left_behind() {
+        use std::time::Duration;
+        let (day, hour) = (Duration::from_secs(25 * 60 * 60), Duration::from_secs(60 * 60));
+        assert!(crate::is_old_scratch("gitem-test-1234", day));
+        assert!(crate::is_old_scratch("gitem-trust-global-1234", day));
+        assert!(!crate::is_old_scratch("gitem-test-1234", hour), "it may be running");
+        for name in ["gitem-test-", "gitem-test-12a", "gitem-p1-shot", "gitem-test-1234.log", "gitem-todo-1-2.txt", "something-else"] {
+            assert!(!crate::is_old_scratch(name, day), "{name}");
+        }
     }
 
     #[test]

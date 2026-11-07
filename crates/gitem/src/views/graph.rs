@@ -944,26 +944,34 @@ impl GraphView {
             cx.form(forms::cherry_pick_form(shas));
             ui.close();
         }
-        // Branch-specific commands for refs on this commit. A commit can have dozens, so
-        // past a few they go in a list of their own, or the menu outgrows the window.
-        let ref_entries = |ui: &mut Ui, cx: &mut Cx| {
-            for r in c.refs.iter().filter(|r| matches!(r.kind, RefKind::Branch | RefKind::Remote)) {
-                if let Some(b) = cx.data.branches().iter().find(|b| b.name == r.name).cloned() {
+        // Branch-specific commands for refs on this commit. A commit can have dozens, so past a
+        // few they go in a list of their own, or the menu outgrows the window. Not one that
+        // scrolls: egui shuts the whole menu on a press on a submenu's row in a scroll area. So
+        // that list stops at what fits on a small window and says how many are left.
+        const LIST_ROWS: usize = 12;
+        let ref_entries = |ui: &mut Ui, cx: &mut Cx, limit: usize| {
+            let branches = c.refs.iter().filter(|r| matches!(r.kind, RefKind::Branch | RefKind::Remote));
+            let tags = c.refs.iter().filter(|r| r.kind == RefKind::Tag);
+            for r in branches.chain(tags).take(limit) {
+                if r.kind == RefKind::Tag {
+                    if let Some(t) = cx.data.tags().iter().find(|t| t.name == r.name).cloned() {
+                        ui.menu_button(format!("Tag {}", r.name), |ui| menus::tag_menu(ui, cx, &t));
+                    }
+                } else if let Some(b) = cx.data.branches().iter().find(|b| b.name == r.name).cloned() {
                     ui.menu_button(format!("Branch {}", r.name), |ui| menus::branch_menu(ui, cx, &b));
-                }
-            }
-            for r in c.refs.iter().filter(|r| r.kind == RefKind::Tag) {
-                if let Some(t) = cx.data.tags().iter().find(|t| t.name == r.name).cloned() {
-                    ui.menu_button(format!("Tag {}", r.name), |ui| menus::tag_menu(ui, cx, &t));
                 }
             }
         };
         if c.refs.len() > 3 {
             ui.menu_button(format!("{} here", plural(c.refs.len(), "ref", "refs")), |ui| {
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| ref_entries(ui, cx));
+                ref_entries(ui, cx, LIST_ROWS);
+                if c.refs.len() > LIST_ROWS {
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("And {} more: filter the sidebar for them", c.refs.len() - LIST_ROWS)).small().color(cx.pal.dim));
+                }
             });
         } else {
-            ref_entries(ui, cx);
+            ref_entries(ui, cx, usize::MAX);
         }
         if let Some(s) = cx.data.stashes().iter().find(|s| s.sha == c.sha).cloned() {
             ui.menu_button(format!("Stash {}", s.selector), |ui| menus::stash_menu(ui, cx, &s));

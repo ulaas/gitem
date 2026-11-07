@@ -211,7 +211,7 @@ impl FileView {
         self.data.spawn_git(ctx, cx.repo, move |repo| -> Result<FileData, String> {
             let empty = |binary| FileData { lines: Vec::new(), binary, blame_skipped: false, lens_rows: Vec::new(), max_chars: 0, syntax: Vec::new(), encoding: None, image: None, blame: Vec::new(), changes: HashMap::new(), deletions: HashMap::new(), newest: 0, oldest: 0, lens: Vec::new() };
             let lower = path.to_lowercase();
-            if [".png", ".jpg", ".jpeg"].iter().any(|e| lower.ends_with(e)) {
+            if PICTURE_TYPES.iter().any(|e| lower.ends_with(&format!(".{e}"))) {
                 let bytes = match &rev {
                     Some(r) => repo.file_at(r, &path),
                     None => repo.worktree_file(&path),
@@ -386,7 +386,7 @@ impl FileView {
                 });
             }
             let repo = cx.repo.clone();
-            if ui.add_enabled(self.rev.is_some(), egui::Button::new("Newer ▶").small()).on_hover_text("Next revision of this file").clicked() {
+            if ui.add_enabled(self.rev.is_some(), egui::Button::new("Newer ▶").small()).on_disabled_hover_text("This is the newest: it's the file as it is now.").on_hover_text("Next revision of this file").clicked() {
                 if let Some((rev, p)) = self.trail.pop() {
                     self.rev = rev;
                     self.path = p;

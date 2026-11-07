@@ -152,7 +152,7 @@ impl PatchesView {
                 ui.add(crate::widgets::input(&mut self.title).hint_text("Title").desired_width(f32::INFINITY));
                 ui.add(crate::widgets::text_area(&mut self.description).hint_text("Description").desired_rows(2).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!self.title.trim().is_empty() && !self.saving.busy(), egui::Button::new("Save")).clicked() {
+                    if ui.add_enabled(!self.title.trim().is_empty() && !self.saving.busy(), egui::Button::new("Save")).on_disabled_hover_text("It needs a title, and one being saved has to finish first.").clicked() {
                         let src = src.clone();
                         self.saving.spawn_git(ui.ctx(), cx.repo, move |r| r.patch_bytes(&src));
                     }

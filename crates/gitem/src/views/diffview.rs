@@ -880,7 +880,7 @@ impl DiffView {
     fn binary(&mut self, ui: &mut Ui, cx: &mut Cx, f: &FileDiff) {
         let pal = cx.pal.clone();
         let path = f.display_path().to_string();
-        let is_image = ["png", "jpg", "jpeg"].iter().any(|e| path.to_lowercase().ends_with(e));
+        let is_image = crate::widgets::PICTURE_TYPES.iter().any(|e| path.to_lowercase().ends_with(&format!(".{e}")));
         if !is_image {
             empty_state(ui, "Binary file", "This file can't be compared as text.", &pal);
             return;

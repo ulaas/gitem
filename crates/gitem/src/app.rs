@@ -375,7 +375,7 @@ impl RepoTab {
                             if dropped > 0 {
                                 out.push(Action::Error(format!("{title} stopped at a conflict.{not_run}")));
                             }
-                        } else if let (Some(target), Some(files), true) = (title.strip_prefix("Switch to "), ops::switch_blocked_by_changes(&e), dropped == 0) {
+                        } else if let (Some(target), Some(files), true) = (title.strip_prefix("Check out "), ops::switch_blocked_by_changes(&e), dropped == 0) {
                             out.push(Action::Form(forms::switch_with_changes(target.to_string(), files)));
                         } else {
                             out.push(Action::Error(format!("{title} failed:\n{e}{not_run}")));
@@ -710,6 +710,15 @@ fn dialog_backdrop(ctx: &egui::Context, controls_width: f32) {
     }
 }
 
+/// Git's own message for a missing folder blames git: "The directory name is invalid".
+fn could_not_open(path: &Path, why: &str) -> String {
+    if path.exists() {
+        format!("{} isn't a git repository:\n{why}", path.display())
+    } else {
+        format!("{} doesn't exist. It may have been moved, renamed or deleted.", path.display())
+    }
+}
+
 /// How many folders down Scan for repositories looks.
 const SCAN_DEPTH: usize = 4;
 
@@ -844,6 +853,8 @@ struct Opening {
     task: crate::task::Task<Repo>,
     /// From the saved session: if it can't be reached, it's only kept for next time.
     quiet: bool,
+    /// A link to follow once it's open.
+    then: Option<gitem_core::forge::DeepLink>,
 }
 
 struct NoRepoSettings {
@@ -1033,7 +1044,7 @@ impl GitemApp {
             } else if task.busy() {
                 // Kept in the session meanwhile, in case the window closes first.
                 self.session_kept.push(p.clone());
-                self.opening.push(Opening { path: p.into(), task, quiet: true });
+                self.opening.push(Opening { path: p.into(), task, quiet: true, then: None });
             } else {
                 self.session_kept.push(p.clone());
                 self.reopen_failed.push(p);
@@ -1048,32 +1059,43 @@ impl GitemApp {
             if !o.task.poll() {
                 return true;
             }
-            done.push((o.path.clone(), o.task.value.take(), o.task.error.take(), o.quiet));
+            done.push((o.path.clone(), o.task.value.take(), o.task.error.take(), o.quiet, o.then.take()));
             false
         });
-        for (path, repo, error, quiet) in done {
+        for (path, repo, error, quiet, then) in done {
             let was_empty = self.repos.is_empty();
             let shown = self.active;
             let name = path.to_string_lossy().replace('\\', "/");
             match repo {
                 Some(repo) => {
                     self.session_kept.retain(|k| *k != name);
+                    let before = self.repos.len();
                     self.add_repo(ctx, repo);
-                    self.active = if was_empty || !quiet { self.repos.len() - 1 } else { shown };
+                    let added = self.repos.len() > before;
+                    // One already open has just been made active, as whoever asked would want.
+                    if added {
+                        self.active = if was_empty || !quiet { self.repos.len() - 1 } else { shown };
+                    } else if quiet {
+                        self.active = shown;
+                    }
+                    if let Some(link) = then {
+                        self.follow_link(ctx, link);
+                    }
                 }
                 None if quiet => self.reopen_failed.push(name),
-                None => self.errors.push(format!("{} isn't a git repository:\n{}", path.display(), error.unwrap_or_default())),
+                None => self.errors.push(error.unwrap_or_default()),
             }
         }
     }
 
-    /// The same, for one the user asked for that may be on a network share.
-    fn open_in_background(&mut self, ctx: &egui::Context, path: PathBuf) {
+    /// The same, for one the user asked for. Off the UI thread whatever it looks like: a mapped
+    /// drive or a sleeping disk can take as long as a share to answer, and no path says so.
+    fn open_in_background(&mut self, ctx: &egui::Context, path: PathBuf, then: Option<gitem_core::forge::DeepLink>) {
         let Ok(git) = self.git.clone() else { return };
         let mut task = crate::task::Task::default();
         let p = path.clone();
-        task.spawn(ctx, move || Repo::open(git, &p));
-        self.opening.push(Opening { path, task, quiet: false });
+        task.spawn(ctx, move || Repo::open(git, &p).map_err(|e| could_not_open(&p, &e.to_string())));
+        self.opening.push(Opening { path, task, quiet: false, then });
     }
 
     fn add_repo(&mut self, ctx: &egui::Context, repo: Repo) {
@@ -1101,8 +1123,7 @@ impl GitemApp {
             }
             Err(e) => {
                 if !quiet {
-                    // Git's own message for this blames git: "The directory name is invalid".
-                    self.errors.push(if path.exists() { format!("{} isn't a git repository:\n{e}", path.display()) } else { format!("{} doesn't exist. It may have been moved, renamed or deleted.", path.display()) });
+                    self.errors.push(could_not_open(path, &e.to_string()));
                 }
                 false
             }
@@ -1120,12 +1141,8 @@ impl GitemApp {
         self.settings.recent_repos.iter().chain(&self.settings.open_repos).any(|r| norm(r) == want) || self.repos.iter().any(|r| norm(&r.repo.root.to_string_lossy()) == want)
     }
 
-    /// The rest of a link only makes sense in its own repository. If that didn't open, the
-    /// one on screen is some other repository and has nothing to do with it.
+    /// The rest of a link only makes sense in its own repository, so this comes once that's open.
     fn follow_link(&mut self, ctx: &egui::Context, d: gitem_core::forge::DeepLink) {
-        if !self.open_repo(ctx, std::path::Path::new(&d.repo), false) {
-            return;
-        }
         if let Some(c) = &d.commit {
             self.apply_action(ctx, Action::Inspect(c.clone()));
         }
@@ -1150,7 +1167,7 @@ impl GitemApp {
         });
         if open {
             self.link_prompt = None;
-            self.follow_link(ctx, link);
+            self.open_in_background(ctx, PathBuf::from(&link.repo), Some(link));
         } else if cancel {
             self.link_prompt = None;
         }
@@ -1557,18 +1574,12 @@ impl GitemApp {
             }
             Action::Toast(s) => self.toasts.push((s, Instant::now())),
             Action::Error(e) => self.errors.push(e),
-            Action::OpenRepo(p) => {
-                if gitem_core::forge::is_network_path(&p.to_string_lossy()) {
-                    self.open_in_background(ctx, p);
-                } else {
-                    self.open_repo(ctx, &p, false);
-                }
-            }
+            Action::OpenRepo(p) => self.open_in_background(ctx, p, None),
             Action::DeepLink(d) => {
                 if gitem_core::forge::is_network_path(&d.repo) {
                     self.errors.push(format!("Not opening a link to a network path: {}", d.repo));
                 } else if self.knows_path(&d.repo) {
-                    self.follow_link(ctx, d);
+                    self.open_in_background(ctx, PathBuf::from(&d.repo), Some(d));
                 } else {
                     self.link_prompt = Some(d);
                 }
@@ -2647,7 +2658,8 @@ impl GitemApp {
         let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let p = self.pal.clone();
         dialog_window("Keyboard shortcuts", self.dialogs_settled).anchor(Align2::CENTER_TOP, [0.0, 60.0]).show(ctx, |ui| {
-            ui.set_width(480.0);
+            // As wide as the list, whose longest line sets the window's width.
+            ui.set_width(580.0);
             let r = ui.add(crate::widgets::input(query).hint_text("Search").desired_width(f32::INFINITY));
             if !ui.memory(|m| m.focused().is_some()) {
                 r.request_focus();
@@ -2661,6 +2673,18 @@ impl GitemApp {
                         ui.end_row();
                     }
                 });
+                let words: Vec<_> = crate::keys::WORDS.iter().filter(|(k, w)| needle.is_empty() || k.to_lowercase().contains(&needle) || w.to_lowercase().contains(&needle)).collect();
+                if !words.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Words").strong());
+                    egui::Grid::new("words").num_columns(2).spacing(egui::vec2(14.0, 4.0)).striped(true).show(ui, |ui| {
+                        for (word, what) in words {
+                            ui.label(RichText::new(*word).color(p.text));
+                            ui.label(RichText::new(*what).color(p.dim));
+                            ui.end_row();
+                        }
+                    });
+                }
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {

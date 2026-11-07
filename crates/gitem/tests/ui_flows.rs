@@ -1605,7 +1605,7 @@ fn deep_links_open_the_commit_and_file() {
     let link = gitem_core::forge::DeepLink::parse(&gitem_core::forge::DeepLink { repo: root, commit: Some(sha), file: Some("a.txt".into()), line: Some(2) }.to_url()).unwrap();
     h.state_mut().apply_action(&ctx, Action::DeepLink(link));
     h.step();
-    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(_))));
+    pump(&mut h, |a| a.repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(_))), "the file to open");
     assert_eq!(h.state().repos.len(), 1, "an already open repository isn't opened twice");
 }
 
@@ -7155,6 +7155,7 @@ fn every_view_says_so_when_git_cant_read_the_repository() {
     }
     assert!(silent.is_empty(), "showing no error: {silent:?}");
     assert!(h.query_by_label("Try again").is_some() || h.query_by_label_contains("can't read").is_some(), "the banner");
+    assert!(h.query_by_label_contains("What's showing may be out of date").is_some(), "the lists under it are old");
 }
 
 #[test]
@@ -7284,11 +7285,11 @@ fn a_branch_folder_folds_away() {
     }
     let mut h = harness(&f);
     settle(&mut h);
-    pump_for_label(&mut h, "team/one");
-    let chip = format!("{} team/ 3", gitem::chrome::icon::CARET_DOWN);
-    click(&mut h, &chip);
+    pump_for_label(&mut h, "Close folder team");
+    assert!(h.query_by_label("one").is_some());
+    click(&mut h, "Close folder team");
     wait_until_quiet(&mut h);
-    assert!(h.query_by_label("team/one").is_none());
+    assert!(h.query_by_label("one").is_none());
     assert!(h.query_by_label("main").is_some(), "only that folder");
 }
 
@@ -7492,12 +7493,12 @@ fn a_switch_with_changes_in_the_way_offers_a_stash() {
     pump_for_label(&mut h, "Changes are in the way of other");
     assert_eq!(f.git(&["branch", "--show-current"]).trim(), "main", "nothing's happened yet");
     assert!(h.state().errors_showing().is_empty(), "{:?}", h.state().errors_showing());
-    click(&mut h, "Switch");
+    click_last_label(&mut h, "Check out");
     wait_for(&mut h, "the switch", || f.git(&["branch", "--show-current"]).trim() == "other");
     wait_until_quiet(&mut h);
     no_errors(&h);
     assert_eq!(std::fs::read_to_string(f.root.join("a.txt")).unwrap(), "one\n");
-    assert!(f.git(&["stash", "list"]).contains("Before switching to other"));
+    assert!(f.git(&["stash", "list"]).contains("Before checking out other"));
 }
 
 #[test]
@@ -7520,7 +7521,7 @@ fn a_switch_with_changes_in_the_way_can_bring_them_along_or_be_cancelled() {
     h.step();
     h.step();
     click(&mut h, "Bring the changes along, merging them. This can leave conflicts");
-    click(&mut h, "Switch");
+    click_last_label(&mut h, "Check out");
     wait_for(&mut h, "the switch", || f.git(&["branch", "--show-current"]).trim() == "other");
     wait_until_quiet(&mut h);
     assert!(std::fs::read_to_string(f.root.join("a.txt")).unwrap().contains("my edit"), "not lost");
@@ -7645,3 +7646,250 @@ fn arrow_keys_move_through_the_rows_of_the_sidebar() {
     h.step();
     assert_eq!(focused(&h).as_deref(), Some(order[1].as_str()), "up");
 }
+
+/// A switched-off button has to say why (UX-29). Read from the source, so a new one can't forget.
+/// Fetch, Pull, Push and the like use `add_enabled_ui`, with the reason a little further on.
+#[test]
+fn every_button_that_can_be_off_says_why() {
+    fn files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut all = Vec::new();
+    files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut all);
+    let mut seen = 0;
+    let mut silent = Vec::new();
+    for f in all {
+        for (n, line) in std::fs::read_to_string(&f).unwrap().lines().enumerate() {
+            if line.contains("ui.add_enabled(") {
+                seen += 1;
+                if !line.contains("on_disabled_hover_text") {
+                    silent.push(format!("{}:{}", f.display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(seen > 30, "only {seen} found: has the code moved?");
+    assert!(silent.is_empty(), "{silent:#?}");
+}
+
+/// There's one word for each thing (UX-30). Each of these is the old second word for one of them.
+#[test]
+fn the_words_for_things_stay_the_same_everywhere() {
+    fn files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut all = Vec::new();
+    files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut all);
+    let strays = ["\"Commit Graph", "\"Repository Tools", "\"Git Config", "\"Repository Health", "\"Commit Composer", "\"Interactive Rebase", "\"Cloud Patch", "\"Merge conflicts", "\"Switch to"];
+    let mut found = Vec::new();
+    for f in all.iter().filter(|f| !f.ends_with("i18n.rs")) {
+        for (n, line) in std::fs::read_to_string(f).unwrap().lines().enumerate() {
+            for s in strays {
+                // The strip_prefix in app.rs matches op titles, which are in the core crate.
+                if line.contains(s) {
+                    found.push(format!("{}:{}: {s}", f.display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "{found:#?}");
+    let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md")).unwrap();
+    for (word, what) in gitem::keys::WORDS {
+        assert!(readme.contains(&format!("| {word} | {what} |")), "the README's table doesn't have {word}");
+    }
+}
+
+fn click_last_label(h: &mut Harness<GitemApp>, label: &str) {
+    pump_for_label(h, label);
+    h.step();
+    h.query_all_by_label(label).last().unwrap().click();
+    h.step();
+    h.step();
+}
+
+/// What can be clicked is at least 24 points each way, counting the margin around a widget that
+/// still hits it (UX-49). Real pointers weren't used: this measures the rectangles egui hit-tests.
+#[test]
+fn hit_targets_are_at_least_24_points() {
+    use egui_kittest::kittest::NodeT;
+    use egui::accesskit::Role;
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("a.txt", "changed\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    let radius = h.ctx.global_style().interaction.interact_radius;
+    let mut small: Vec<String> = Vec::new();
+    let mut seen = 0;
+    let views = [Tab::graph(), Tab::changes(), Tab::diff(DiffSource::Unstaged, Some("a.txt".into())), Tab::Launchpad(Box::default()), Tab::Credentials(Box::default()), Tab::Settings(Box::default())];
+    for view in views {
+        open_tab_now(&mut h, view);
+        wait_until_quiet(&mut h);
+        let nodes: Vec<_> = h.query_all_by_label_contains("").filter(|n| matches!(n.accesskit_node().role(), Role::Button | Role::CheckBox | Role::RadioButton | Role::ComboBox | Role::Tab)).map(|n| (n.accesskit_node().label().unwrap_or_default(), n.rect())).collect();
+        for (label, r) in nodes {
+            seen += 1;
+            // Part of it off the window or under a panel says nothing about its size.
+            if r.top() < 0.0 || r.bottom() > 940.0 || r.width() < 1.0 || r.height() < 1.0 {
+                continue;
+            }
+            let (w, tall) = (r.width() + 2.0 * radius, r.height() + 2.0 * radius);
+            if w < 24.0 || tall < 24.0 {
+                small.push(format!("{label:?}: {:.0}x{:.0}, {w:.0}x{tall:.0} with the margin", r.width(), r.height()));
+            }
+        }
+    }
+    assert!(seen > 100, "only {seen} looked at");
+    small.sort();
+    small.dedup();
+    assert!(small.is_empty(), "radius {radius}: {small:#?}");
+}
+
+
+/// A commit with many refs (UX-9). A pointer's press on a submenu's row in a menu's scroll area
+/// closed the whole menu, so this list doesn't scroll, and every row in it fits.
+#[test]
+fn a_click_on_a_row_in_a_commits_list_of_refs_opens_it_and_stays() {
+    let f = Fx::new();
+    sample_history(&f);
+    for i in 0..30 {
+        f.git(&["branch", &format!("ref{i:02}")]);
+    }
+    let mut h = sized_harness(&f, vec2(1000.0, 500.0), no_details());
+    settle(&mut h);
+    pump_for_label(&mut h, "second");
+    h.get_by_label("second").click_secondary();
+    wait_until_quiet(&mut h);
+    h.get_by_label_contains("refs here").click();
+    wait_until_quiet(&mut h);
+    // Rows that were in a scroll area used to be there but clipped, outside the window.
+    let name = "Branch ref25 ⏵";
+    pump_for_label(&mut h, name);
+    let at = h.get_by_label(name).rect();
+    assert!(at.bottom() <= 500.0, "{at:?}");
+    // Pointer events, as a person's mouse makes. Hover alone opens a submenu.
+    let press = |h: &mut Harness<GitemApp>, pos: egui::Pos2| {
+        h.input_mut().events.push(egui::Event::PointerMoved(pos));
+        for _ in 0..3 {
+            h.step();
+        }
+        h.input_mut().events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.input_mut().events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        for _ in 0..3 {
+            h.step();
+        }
+    };
+    press(&mut h, at.center());
+    assert!(h.query_by_label(name).is_some(), "the list closed");
+    pump_for_label(&mut h, "Merge into current…");
+    let item = h.get_by_label("Merge into current…").rect().center();
+    press(&mut h, item);
+    pump_for_label(&mut h, "Merge");
+    assert!(h.query_by_label_contains("ref25").is_some(), "from the branch that was clicked");
+    assert!(h.query_by_label(name).is_none(), "and the menu has gone");
+    assert!(h.query_by_label_contains("more: filter the sidebar").is_none(), "behind the form now");
+}
+
+/// The other kind of list in a menu: plain rows, which do scroll. The branch picker, with the
+/// wheel and then a pointer's click.
+#[test]
+fn the_branch_pickers_list_can_be_scrolled_and_a_row_clicked() {
+    let f = Fx::new();
+    sample_history(&f);
+    for i in 0..40 {
+        f.git(&["branch", &format!("ref{i:02}")]);
+    }
+    let mut h = sized_harness(&f, vec2(1000.0, 600.0), no_details());
+    settle(&mut h);
+    let label = format!("{} main  {}", gitem::chrome::icon::GIT_BRANCH, gitem::chrome::icon::CARET_DOWN);
+    click(&mut h, &label);
+    wait_until_quiet(&mut h);
+    let name = "ref39";
+    pump_for_label(&mut h, name);
+    let window_bottom = 600.0;
+    let row = |h: &Harness<GitemApp>| h.query_all_by_label(name).last().unwrap().rect();
+    let over = egui::pos2(row(&h).center().x, 250.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(over));
+    let t = Instant::now();
+    while row(&h).bottom() > window_bottom - 100.0 {
+        h.input_mut().events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -60.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "it never scrolled: {:?}", row(&h));
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    wait_until_quiet(&mut h);
+    let pos = row(&h).center();
+    h.input_mut().events.push(egui::Event::PointerMoved(pos));
+    for _ in 0..3 {
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    wait_for(&mut h, "the switch", || f.git(&["branch", "--show-current"]).trim() == name);
+}
+
+/// VC-42: the other formats the decoder takes, in the file view and in a diff. Pictures written
+/// by the `image` crate's encoders, so this says nothing about unusual files in those formats.
+#[test]
+fn other_picture_formats_show_as_pictures() {
+    let f = Fx::new();
+    let formats = [("g.gif", image::ImageFormat::Gif), ("w.webp", image::ImageFormat::WebP), ("b.bmp", image::ImageFormat::Bmp), ("i.ico", image::ImageFormat::Ico)];
+    for (name, format) in formats {
+        let mut bytes = Vec::new();
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255])).write_to(&mut std::io::Cursor::new(&mut bytes), format).unwrap();
+        std::fs::write(f.root.join(name), &bytes).unwrap();
+    }
+    f.commit("pictures");
+    let mut h = harness(&f);
+    settle(&mut h);
+    for (name, _) in formats {
+        h.state_mut().repos[0].open_tab(Tab::file(name, None, None));
+        pump_for_any(&mut h, "3 × 2 px");
+        assert!(h.query_by_label("Binary file").is_none(), "{name}");
+        let tab = Tab::diff(DiffSource::Commit("HEAD".into()), Some(name.into()));
+        h.state_mut().repos[0].open_tab(tab);
+        wait_until_quiet(&mut h);
+        assert!(h.query_by_label_contains("can't be compared as text").is_none(), "{name} in a diff");
+    }
+}
+
+/// UX-20: what a toast says when something's done, through the app and not only the function.
+#[test]
+fn a_finished_op_says_what_happened() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "other"]);
+    f.write("a.txt", "changed
+");
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::stage_all()));
+    pump_for_label(&mut h, "Staged all changes");
+    h.state_mut().apply_action(&ctx, Action::Run(ops::commit(&ops::CommitOpts { message: "a change".into(), ..Default::default() })));
+    let t = Instant::now();
+    while h.query_by_label_contains("Committed ").is_none() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "no toast");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    h.state_mut().apply_action(&ctx, Action::Run(ops::checkout("other")));
+    pump_for_label(&mut h, "Checked out other");
+    assert!(h.query_by_label_contains(": done").is_none());
+}
+

@@ -284,7 +284,7 @@ impl HomeView {
                 })));
                 self.summaries_for = None;
             }
-            if ui.add_enabled(!self.scan_pick.busy(), egui::Button::new("Scan a folder…").small()).clicked() {
+            if ui.add_enabled(!self.scan_pick.busy(), egui::Button::new("Scan a folder…").small()).on_disabled_hover_text("The folder picker is already open.").clicked() {
                 crate::widgets::pick(&mut self.scan_pick, ui.ctx(), rfd::FileDialog::new(), true);
             }
             if self.scan_pick.poll()

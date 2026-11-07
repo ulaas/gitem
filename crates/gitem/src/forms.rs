@@ -264,7 +264,7 @@ impl FormDialog {
                 Field::Path { label, value, kind, .. } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
                     ui.horizontal(|ui| {
-                        let browse = ui.add_enabled(!self.picking.busy(), egui::Button::new("Browse…")).clicked();
+                        let browse = ui.add_enabled(!self.picking.busy(), egui::Button::new("Browse…")).on_disabled_hover_text("The folder picker is already open.").clicked();
                         ui.add(crate::widgets::input(value).desired_width(f32::INFINITY));
                         if browse {
                             self.picking_field = i;
@@ -340,7 +340,7 @@ pub fn new_branch(start: Option<String>) -> FormDialog {
     FormDialog::new(title, "Create")
         .text("name", "Branch name", "")
         .hint("feature/my-work")
-        .check("switch", "Switch to it", true)
+        .check("switch", "Check it out", true)
         .on_submit(move |v| run(ops::branch_create(&required(v, "name", "A name")?, start.as_deref(), v.on("switch"))))
 }
 
@@ -617,9 +617,9 @@ pub fn switch_with_changes(target: String, files: Vec<String>) -> FormDialog {
     if files.len() > SHOWN {
         list.push(format!("  and {} more", files.len() - SHOWN));
     }
-    FormDialog::new(format!("Changes are in the way of {target}"), "Switch")
-        .info(format!("{target} has different versions of files you've changed. Nothing has been switched or lost yet.\n{}", list.join("\n")))
-        .choice("how", "What to do", &["Stash the changes, then switch. They wait in Stashes", "Bring the changes along, merging them. This can leave conflicts"], 0)
+    FormDialog::new(format!("Changes are in the way of {target}"), "Check out")
+        .info(format!("{target} has different versions of files you've changed. Nothing has been changed or lost yet.\n{}", list.join("\n")))
+        .choice("how", "What to do", &["Stash the changes, then check it out. They wait in Stashes", "Bring the changes along, merging them. This can leave conflicts"], 0)
         .on_submit(move |v| run(if v.index("how") == 0 { ops::stash_and_checkout(&target) } else { ops::checkout_merge(&target) }))
 }
 

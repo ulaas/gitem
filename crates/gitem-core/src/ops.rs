@@ -308,9 +308,13 @@ fn stash_note(printed: &str) -> Option<String> {
 pub fn done_message(title: &str, note: &str) -> String {
     const WHOLE: &[(&str, &str)] = &[("Stash changes", "Stashed changes"), ("Force push", "Force pushed"), ("Interactive rebase", "Rebased"), ("Garbage collect", "Collected garbage"), ("Clean working tree", "Cleaned the working tree"), ("Update from the pull request", "Updated from the pull request"), ("Reset to the pull request", "Reset to the pull request"), ("Prepare to recompose", "Ready to recompose"), ("Clear all stashes", "Cleared all stashes")];
     const FIRST: &[(&str, &str)] = &[
-        ("Abort", "Aborted"), ("Add", "Added"), ("Amend", "Amended"), ("Apply", "Applied"), ("Archive", "Archived"), ("Check", "Checked"), ("Checkout", "Checked out"), ("Cherry-pick", "Cherry-picked"), ("Clear", "Cleared"), ("Clone", "Cloned"), ("Commit", "Committed"), ("Continue", "Continued"), ("Copy", "Copied"), ("Create", "Created"), ("Delete", "Deleted"), ("Deinit", "Deinitialized"), ("Disable", "Disabled"), ("Discard", "Discarded"), ("Drop", "Dropped"), ("End", "Ended"), ("Fetch", "Fetched"), ("Fixup", "Made a fixup for"), ("Initialize", "Initialized"), ("Install", "Installed"), ("Keep", "Kept"), ("LFS", "Git LFS:"), ("Lock", "Locked"), ("Mark", "Marked"), ("Merge", "Merged"), ("Move", "Moved"), ("Open", "Opened"), ("Pop", "Popped"), ("Prune", "Pruned"), ("Publish", "Published"), ("Pull", "Pulled"), ("Push", "Pushed"), ("Rebase", "Rebased"), ("Refresh", "Refreshed"), ("Remove", "Removed"), ("Rename", "Renamed"), ("Repair", "Repaired"), ("Reset", "Reset"), ("Restore", "Restored"), ("Revert", "Reverted"), ("Reword", "Reworded"), ("Run", "Ran"), ("Set", "Set"), ("Skip", "Skipped"), ("Squash", "Squashed"), ("Stage", "Staged"), ("Start", "Started"), ("Switch", "Switched"), ("Sync", "Synced"), ("Take", "Took"), ("Track", "Tracking"), ("Turn", "Turned"), ("Undo", "Undid"), ("Unlock", "Unlocked"), ("Unset", "Unset"), ("Unstage", "Unstaged"), ("Update", "Updated"), ("Verify", "Verified"),
+        ("Abort", "Aborted"), ("Add", "Added"), ("Amend", "Amended"), ("Apply", "Applied"), ("Archive", "Archived"), ("Checkout", "Checked out"), ("Cherry-pick", "Cherry-picked"), ("Clear", "Cleared"), ("Clone", "Cloned"), ("Commit", "Committed"), ("Continue", "Continued"), ("Copy", "Copied"), ("Create", "Created"), ("Delete", "Deleted"), ("Deinit", "Deinitialized"), ("Disable", "Disabled"), ("Discard", "Discarded"), ("Drop", "Dropped"), ("End", "Ended"), ("Fetch", "Fetched"), ("Fixup", "Made a fixup for"), ("Initialize", "Initialized"), ("Install", "Installed"), ("Keep", "Kept"), ("LFS", "Git LFS:"), ("Lock", "Locked"), ("Mark", "Marked"), ("Merge", "Merged"), ("Move", "Moved"), ("Open", "Opened"), ("Pop", "Popped"), ("Prune", "Pruned"), ("Publish", "Published"), ("Pull", "Pulled"), ("Push", "Pushed"), ("Rebase", "Rebased"), ("Refresh", "Refreshed"), ("Remove", "Removed"), ("Rename", "Renamed"), ("Repair", "Repaired"), ("Reset", "Reset"), ("Restore", "Restored"), ("Revert", "Reverted"), ("Reword", "Reworded"), ("Run", "Ran"), ("Set", "Set"), ("Skip", "Skipped"), ("Squash", "Squashed"), ("Stage", "Staged"), ("Start", "Started"), ("Sync", "Synced"), ("Take", "Took"), ("Track", "Tracking"), ("Turn", "Turned"), ("Undo", "Undid"), ("Unlock", "Unlocked"), ("Unset", "Unset"), ("Unstage", "Unstaged"), ("Update", "Updated"), ("Verify", "Verified"),
     ];
     let done = WHOLE.iter().find(|(t, _)| *t == title).map(|(_, d)| d.to_string()).or_else(|| {
+        // Two words, whose past tense isn't either of them alone.
+        if let Some(what) = title.strip_prefix("Check out ") {
+            return Some(format!("Checked out {what}"));
+        }
         let (first, rest) = title.split_once(' ').unwrap_or((title, ""));
         let past = FIRST.iter().find(|(t, _)| *t == first)?.1;
         Some(if rest.is_empty() { past.to_string() } else { format!("{past} {rest}") })
@@ -549,20 +553,20 @@ fn short(s: &str) -> &str {
 pub fn checkout(target: &str) -> GitOp {
     // A name a server delivered, shown in full, which `switch` won't take as a branch.
     if let Some(short) = target.strip_prefix("refs/heads/") {
-        return GitOp::new(format!("Switch to {short}")).step(&["switch", "--end-of-options", short]);
+        return GitOp::new(format!("Check out {short}")).step(&["switch", "--end-of-options", short]);
     }
-    GitOp::new(format!("Switch to {target}")).names(&[target]).step(&["switch", target])
+    GitOp::new(format!("Check out {target}")).names(&[target]).step(&["switch", target])
 }
 
 /// Switch, taking uncommitted changes along even where the other branch touches the same files.
 /// Git merges them, which can leave conflicts to resolve.
 pub fn checkout_merge(target: &str) -> GitOp {
-    GitOp::new(format!("Switch to {target}")).names(&[target]).step(&["switch", "--merge", target])
+    GitOp::new(format!("Check out {target}")).names(&[target]).step(&["switch", "--merge", target])
 }
 
 /// Put uncommitted changes in a stash and switch. They wait there until someone applies them.
 pub fn stash_and_checkout(target: &str) -> GitOp {
-    GitOp::new(format!("Stash changes and switch to {target}")).lossless().names(&[target]).step(&["stash", "push", "--include-untracked", "-m", &format!("Before switching to {target}")]).step(&["switch", target])
+    GitOp::new(format!("Stash changes and check out {target}")).lossless().names(&[target]).step(&["stash", "push", "--include-untracked", "-m", &format!("Before checking out {target}")]).step(&["switch", target])
 }
 
 /// The files in the way, when a switch failed because uncommitted changes would be overwritten.
@@ -1487,7 +1491,7 @@ mod tests {
         assert_eq!(args(&fetch_pr("origin", "pull/7/head", "pr/7")), "fetch -- origin +pull/7/head:pr/7");
         assert_eq!(done_message("Commit", "7e6d960 on main"), "Committed 7e6d960 on main");
         assert_eq!(done_message("Stage 3 files", ""), "Staged 3 files");
-        assert_eq!(done_message("Switch to main", ""), "Switched to main");
+        assert_eq!(done_message("Check out main", ""), "Checked out main");
         assert_eq!(done_message("Stash changes", "from main"), "Stashed changes: from main");
         assert_eq!(done_message("Push", "main to main"), "Pushed: main to main");
         assert_eq!(done_message("Pull", "already up to date"), "Pulled: already up to date");

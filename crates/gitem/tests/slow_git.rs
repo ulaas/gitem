@@ -282,6 +282,37 @@ fn a_session_repository_that_is_slow_to_answer_does_not_hold_up_the_window() {
 }
 
 
+/// A mapped drive looks like any local path, and takes as long as a dead share to answer. A git
+/// that takes its time stands in for one: nothing here may touch a network.
+#[test]
+fn a_folder_chosen_by_hand_that_is_slow_to_answer_does_not_hold_up_the_window() {
+    let f = Fx::new("rev-parse", 2000);
+    let mut h = f.harness(Settings::default());
+    let t = Instant::now();
+    while h.state().repos.is_empty() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the first never arrived");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let second = tempfile::tempdir().unwrap();
+    let root = second.path().canonicalize().unwrap();
+    run(&f.real, &root, &["init", "-q", "-b", "main"]);
+    let ctx = h.ctx.clone();
+    let t = Instant::now();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::OpenRepo(root.clone()));
+    h.step();
+    let frame = t.elapsed();
+    assert!(frame < Duration::from_millis(1500), "the window waited {frame:?}");
+    assert!(h.query_by_label_contains("Opening").is_some(), "it says what it's waiting for");
+    while h.state().repos.len() < 2 {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "it never opened");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert_eq!(h.state().repos[1].repo.root.canonicalize().unwrap(), root);
+    assert_eq!(h.state().active, 1, "chosen, so it's what shows");
+}
+
 /// AS-12: a read that hangs left the last answer on screen, with nothing to say so.
 #[test]
 fn a_status_that_never_answers_says_so_and_can_be_restarted() {

@@ -14,7 +14,7 @@ const MESSAGE: &str = "message";
 const GRAPH: &str = "graph";
 const CHANGES: &str = "changes";
 const MIN_MESSAGE: f32 = 120.0;
-const DIVIDER_HIT: f32 = 7.0;
+const DIVIDER_HIT: f32 = 12.0;
 
 struct Spec {
     key: &'static str,
@@ -167,16 +167,16 @@ impl Columns {
             let key = self.order[i].clone();
             let Some(s) = spec(&key) else { continue };
             ui.horizontal(|ui| {
-                if ui.add_enabled(i > 0, egui::Button::new(up).small()).on_hover_text(format!("Move {} earlier", s.label)).clicked() {
+                if ui.add_enabled(i > 0, egui::Button::new(up).small()).on_disabled_hover_text("It's already first.").on_hover_text(format!("Move {} earlier", s.label)).clicked() {
                     self.order.swap(i, i - 1);
                     changed = true;
                 }
-                if ui.add_enabled(i + 1 < self.order.len(), egui::Button::new(down).small()).on_hover_text(format!("Move {} later", s.label)).clicked() {
+                if ui.add_enabled(i + 1 < self.order.len(), egui::Button::new(down).small()).on_disabled_hover_text("It's already last.").on_hover_text(format!("Move {} later", s.label)).clicked() {
                     self.order.swap(i, i + 1);
                     changed = true;
                 }
                 let mut on = self.shown(&key);
-                if ui.add_enabled(key != MESSAGE, egui::Checkbox::new(&mut on, s.label)).changed() {
+                if ui.add_enabled(key != MESSAGE, egui::Checkbox::new(&mut on, s.label)).on_disabled_hover_text("The commit message always shows.").changed() {
                     if key == CHANGES {
                         self.changes = on;
                         cx.out.push(Action::Settings(Box::new(move |st| st.graph_changes_column = on)));

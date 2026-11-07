@@ -606,7 +606,7 @@ impl LaunchpadView {
         ui.horizontal(|ui| {
             let ok = !self.title.trim().is_empty() && !self.head.is_empty() && !self.create.busy();
             let b = egui::Button::new(RichText::new("Create").color(if ok { p.on_accent } else { p.faint })).fill(if ok { p.accent } else { p.panel2 });
-            if ui.add_enabled(ok, b).clicked() {
+            if ui.add_enabled(ok, b).on_disabled_hover_text("It needs a title and a source branch, and one being created has to finish first.").clicked() {
                 let g = cx.repo.git.clone();
                 let r = repo.clone();
                 let (t, bd, h, ba, d) = (self.title.clone(), self.body.clone(), self.head.clone(), self.base.clone(), self.draft);
@@ -615,7 +615,7 @@ impl LaunchpadView {
             if ui.button("Open in browser instead").clicked() {
                 cx.url(repo.new_pr_url(&self.base, &self.head));
             }
-            if ui.add_enabled(!self.ai_text.busy(), egui::Button::new("Write with AI")).clicked() {
+            if ui.add_enabled(!self.ai_text.busy(), egui::Button::new("Write with AI")).on_disabled_hover_text("Already writing this.").clicked() {
                 let r = cx.repo.clone();
                 let cfg = cx.settings.ai.clone();
                 let (h, ba) = (self.head.clone(), self.base.clone());

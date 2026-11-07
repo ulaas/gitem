@@ -165,7 +165,7 @@ impl SearchView {
             if ui.button("Search").clicked() || enter {
                 self.run_search(&ctx, cx);
             }
-            if ui.add_enabled(!self.natural.busy() && !self.query.trim().is_empty(), egui::Button::new("Ask AI")).on_hover_text("Treat the box as a plain-language question, like: what did Ann change in auth last month?").clicked() {
+            if ui.add_enabled(!self.natural.busy() && !self.query.trim().is_empty(), egui::Button::new("Ask AI")).on_disabled_hover_text("Type what to look for, or wait for the answer on its way.").on_hover_text("Treat the box as a plain-language question, like: what did Ann change in auth last month?").clicked() {
                 let (q, cfg) = (self.query.clone(), cx.settings.ai.clone());
                 let today = gitem_core::util::format_day(gitem_core::util::now_ts());
                 self.natural.spawn(&ctx, move || -> Result<String, String> {
@@ -221,7 +221,7 @@ impl SearchView {
                 self.run_compare(&ctx, cx);
             }
             let ready = !self.a.trim().is_empty() && !self.b.trim().is_empty();
-            if ui.add_enabled(ready, egui::Button::new("Compare")).clicked() {
+            if ui.add_enabled(ready, egui::Button::new("Compare")).on_disabled_hover_text("Choose both sides first.").clicked() {
                 self.run_compare(&ctx, cx);
             }
             if self.compare.busy() {
@@ -251,7 +251,7 @@ impl SearchView {
                     cx.url(url);
                 }
             }
-            if ui.add_enabled(!self.changelog.busy(), egui::Button::new("Changelog with AI").small()).on_hover_text("Summarise the commits on the right-hand side").clicked() {
+            if ui.add_enabled(!self.changelog.busy(), egui::Button::new("Changelog with AI").small()).on_disabled_hover_text("Already writing one.").on_hover_text("Summarise the commits on the right-hand side").clicked() {
                 let text: String = res.ahead.iter().map(|c| format!("- {}\n", c.message().replace('\n', " "))).collect();
                 let cfg = cx.settings.ai.clone();
                 self.changelog.spawn(ui.ctx(), move || -> Result<String, String> {

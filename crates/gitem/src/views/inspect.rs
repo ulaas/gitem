@@ -267,7 +267,7 @@ impl InspectPanel {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let busy = self.explanation.busy();
-            if ui.add_enabled(!busy, egui::Button::new("Explain with AI").small()).clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("Explain with AI").small()).on_disabled_hover_text("Already explaining this commit.").clicked() {
                 self.explain(ui.ctx(), cx, c);
             }
             if busy {

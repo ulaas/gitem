@@ -34,7 +34,7 @@ gitem looks for git in this order:
 | Changes annotations | Change bars and deletion markers against `HEAD` |
 | Git CodeLens | Recent-change and author summaries above symbols, by regex for common languages |
 | Revision navigation | Older and Newer across a file's history, following renames; compare with the previous or next revision, the working tree, or any branch or tag; open any revision |
-| Commit Graph | Lanes with folding, ref badges, search with highlights and match options, Current and Smart presets, favorites, focus and hide refs, worktree pills, minimap by commits or lines changed, Changes column, columns you can resize, reorder, and hide by dragging or right-clicking headers, remembered between sessions, dim merges, jump to HEAD or upstream, `/` ref finder, multi-select, drag a ref onto a commit to merge, rebase, or compare, work-in-progress row, stashes |
+| Graph | Lanes with folding, ref badges, search with highlights and match options, Current and Smart presets, favorites, focus and hide refs, worktree pills, minimap by commits or lines changed, Changes column, columns you can resize, reorder, and hide by dragging or right-clicking headers, remembered between sessions, dim merges, jump to HEAD or upstream, `/` ref finder, multi-select, drag a ref onto a commit to merge, rebase, or compare, work-in-progress row, stashes |
 | Commit actions | Reword, squash, drop, Undo Commit, Push to Commit, fixup and Squash Fixups, recompose, copy as patch, compare with common base, conflict prediction |
 | Inspect / Commit Details | Metadata, signatures, autolinks, notes, containing refs, files with stats |
 | Commits, Branches, Remotes, Tags, Stashes, Contributors views | Sidebar trees, plus full views where useful. Local and remote branches open to their latest commits, and long lists have Load more |
@@ -44,7 +44,7 @@ gitem looks for git in this order:
 | Visual History | Time and author bubble chart with churn bars, zoom, and pan, for a file, a folder, a branch, or the whole repository |
 | Treemaps, Repository Health | Files by size or recent commits; a verdict plus optimizations you can turn on and undo; maintenance on demand or at open |
 | Search & Compare | The same search syntax (`message:`, `-message:`, `re:`, `author:`, `committer:`, `@me`, `commit:`, `file:`, `change:`, `after:`, `before:`, `is:merge`, `type:merge`), and compare of any two refs. Words are plain text and all must match, as with `fix(auth):` or `C++`. `re:` takes a regular expression, such as `re:fix\|feat` |
-| Interactive Rebase Editor | Drag to reorder; pick, reword, edit, squash, fixup, drop, exec, break. Also works as git's own `sequence.editor` |
+| Rebase | Drag to reorder; pick, reword, edit, squash, fixup, drop, exec, break. Also works as git's own `sequence.editor` |
 | Git Command Palette | `Ctrl+P`: every command, branch, and file, with guided forms |
 | Launchpad | Pull requests grouped by what they need from you, with checks, review, and conflict state; pin, snooze, stacked-PR labels and rebase; current branch's PR in the status bar |
 | Start Work, Start Review | Branch or worktree from an issue; check out a PR, or open it in a worktree |
@@ -53,7 +53,7 @@ gitem looks for git in this order:
 | Remote commands | Open or copy links to commits, files and lines, branches, tags, comparisons, and the repository; open a file from a pasted link |
 | Autolinks | Configurable prefixes, plus `#123` for the repository's host |
 | AI features | Commit messages; explanations of commits, branches, stashes, and working changes; review; conflict resolution; natural-language search; PR descriptions; stash messages; changelogs; commit composition and recompose. Through Anthropic, OpenAI, Gemini, Mistral, OpenRouter, or any OpenAI-compatible server such as Ollama. `.aiignore`, `.cursorignore`, and `.aiexclude` are honored |
-| Cloud Patches | A local patch library, shareable as a secret GitHub gist. No account required |
+| Patches | A local patch library, shareable as a secret GitHub gist. No account required |
 | Hovers, avatars | Commit cards everywhere; initials by default, Gravatar opt-in |
 | Commit signatures | Verification status per commit, signing setup, SSH allowed signers editor |
 | Agents | A board of Claude Code and Codex sessions in this repository's worktrees, with resume, archive, and a file activity treemap; start a session in any worktree |
@@ -97,6 +97,8 @@ gitem isn't an editor plugin, so the following differ by design.
 - Bare repositories can't be opened, because gitem works from a working tree. It says so, and names any linked worktrees to open instead. A linked worktree of a bare repository opens as usual.
 - The in-app rebase editor works on linear history: merge commits in the range aren't kept, and the view says so. It refuses to start if HEAD has moved since the plan was made. For `--rebase-merges`, use **Rebase onto…**, which has that option, or run the rebase from the command line with gitem as `sequence.editor`.
 - Hunk and line staging need UTF-8 text. For other encodings, stage the whole file. The merge tool offers a choice of versions for such files rather than rewriting them. A valid file that really contains U+FFFD is treated the same way.
+
+Scan for repositories, on the welcome screen and the + menu, finds them in a folder and opens the ones you tick. Dropping a folder or a file on the window opens its repository. Branches with `/` in their names fold into a tree in the sidebar, where Up and Down move through the rows and Right and Left open and close them.
 
 ## Using gitem from the command line
 
@@ -144,11 +146,30 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 | `Alt+B` | Toggle blame in a file |
 | `Ctrl+Shift+Z` | Zen mode |
 
+## Words
+
+The same words are used throughout, and F1 lists them too.
+
+| Word | What it means |
+|---|---|
+| Check out | Make a branch or commit the one you're on. Git's `switch` |
+| Changes | What you've edited and not committed. Unstaged until you stage it |
+| Stage | Add to what the next commit holds |
+| Graph | The history, with its branches drawn as lanes |
+| Details | The panel about the selected commit |
+| Launchpad | Pull requests and issues on the repository's host |
+| Review | Your own notes on a diff. Review with AI adds to them |
+| Compose | Split uncommitted changes into several commits, in the Composer |
+| Recompose | The same for commits you've already made |
+| Rebase | Replay commits on another base, or edit them. Git's `rebase -i` |
+| Upstream | The remote branch a branch follows, for its counts, Pull and Push |
+| Patches | A local library of saved changes |
+
 ## Safety
 
 - Destructive commands ask first and show the exact git command, including a plain force push from the push form. You can turn this off in Settings. Deleting a stored secret asks too, and a revealed secret hides itself after 30 seconds or when you leave its page.
-- Unstaging during a merge, cherry-pick or rebase keeps the operation and its conflicts. The Commit Composer waits until the operation is finished, except while a rebase is stopped at an edit step, where splitting a commit is the point.
-- The Commit Composer keeps its plan until each commit has landed, leaves other staged files staged, and asks before committing a partly staged file whole.
+- Unstaging during a merge, cherry-pick or rebase keeps the operation and its conflicts. The Composer waits until the operation is finished, except while a rebase is stopped at an edit step, where splitting a commit is the point.
+- The Composer keeps its plan until each commit has landed, leaves other staged files staged, and asks before committing a partly staged file whole.
 - Closing a tab, a repository or the window asks first if that would lose unsaved merge resolutions, a written commit message, a Composer plan, typing in an open dialog, or a running or queued git command. A fetch doesn't count. Not yet covered: rebase plans, Launchpad's pull request form, and review notes being typed.
 - Force with lease also uses `--force-if-includes`, so a push after a fetch is refused until you've taken in what the fetch brought.
 - Writes wait up to four seconds for another program's `index.lock`. A lock that stays gets a dialog offering to remove it, only when you ask and no git process is running on the computer. It's never removed automatically. Cancelling a pull can leave one behind, along with half-updated files.
@@ -179,6 +200,7 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 - In a partial clone, line counts in the graph, Visual History and Contributors no longer download files. Commits whose files aren't here show no counts. Opening a commit's diff still fetches what it needs.
 - A squash merge fills in its prepared message and says it's waiting for its commit. A prepared message keeps lines that start with `#`, and drops only git's own list of conflicts.
 - In the graph, No merges and First parent draw real connections rather than lanes that never end, and the arrow keys only scroll when the row is off screen. Hiding the current branch now hides it. A search git rejects says why.
+- Checking out a branch with uncommitted changes in the way doesn't just fail: it offers to stash them first, or bring them along with `git switch --merge`, which can leave conflicts.
 - A pull request's Check out replaces what `pr/N` held, so it still works after its author force-pushes, but asks first if commits of yours are there, offering to keep them on a new branch. It follows the pull request's branch so Pull works. On that branch, Update brings in new commits and Reset to its tip handles a rewrite, asking first. A fork's branch is told from one of the same name here.
 - Push from `pr/N` goes back to the pull request's own branch. A pull request from a fork has Push to the fork, which adds a remote for it. The host decides whether you may.
 - Settings > Hosting can name a PEM file of certificate authorities for hosting and AI requests. It replaces the system's store for them, as git's `http.sslCAInfo` does, and git's own connections go by git's settings.
