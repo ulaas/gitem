@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::vec2;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use gitem::app::GitemApp;
 use gitem::views::Tab;
@@ -1078,4 +1078,210 @@ fn details_say_which_pull_request_a_commit_came_in_by() {
     h.state_mut().apply_action(&ctx, gitem::action::Action::Inspect(sha));
     click(&mut h, "Find pull request");
     wait_for_label(&mut h, "#7 The topic");
+}
+
+// ---- replies within a thread, and more than one host
+
+fn pr_tab(number: u64) -> Tab {
+    let pr = gitem_core::forge::PullRequest { number, title: "The topic".into(), author: "someone".into(), head: "topic".into(), base: "main".into(), url: "http://127.0.0.1:9/pulls/7".into(), ..Default::default() };
+    Tab::PullRequest(Box::new(gitem::views::pullrequest::PullRequestView::new(pr, "me")))
+}
+
+/// These replies, for anything under these paths, longest first so the rest don't shadow them.
+fn answer(f: &Fx, routes: &[(&str, &str)]) {
+    let mut h = f.host.lock().unwrap();
+    for (path, body) in routes {
+        h.fail.push((path.to_string(), 200, body.to_string()));
+    }
+}
+
+fn write_in_the_box(h: &mut Harness<GitemApp>, words: &str) {
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
+    h.step();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text(words);
+    h.step();
+    h.step();
+}
+
+#[test]
+fn a_reply_within_a_thread_is_posted_from_the_conversation_and_the_words_stay_if_it_fails() {
+    let f = Fx::new();
+    answer(&f, &[
+        ("/api/v3/repos/o/r/pulls/7/comments/31/replies", "{}"),
+        ("/api/v3/repos/o/r/pulls/7/comments", r#"[{"id":31,"user":{"login":"bea"},"body":"Why this way","path":"a.txt","line":1,"created_at":"2026-01-03T00:00:00Z"},{"id":32,"in_reply_to_id":31,"user":{"login":"cy"},"body":"Because of the parser","path":"a.txt","line":1,"created_at":"2026-01-04T00:00:00Z"}]"#),
+        ("/api/v3/repos/o/r/pulls/7/files", "[]"),
+        ("/api/v3/repos/o/r/pulls/7/reviews", "[]"),
+        ("/api/v3/repos/o/r/pulls/7", r#"{"head":{"sha":"h"},"base":{"sha":"b"}}"#),
+        ("/api/v3/repos/o/r/issues/7/comments", "[]"),
+        ("/api/v3/repos/o/r/commits/h/check-runs", r#"{"check_runs":[]}"#),
+        ("/api/v3/repos/o/r/commits/h/status", r#"{"statuses":[]}"#),
+    ]);
+    let mut h = f.harness(ForgeKind::GitHub, |_| {});
+    h.state_mut().repos[0].open_tab(pr_tab(7));
+    wait_for_label(&mut h, "Conversation (2)");
+    click(&mut h, "Conversation (2)");
+    wait_for_text(&mut h, "Because of the parser");
+    click(&mut h, "Reply to bea's thread");
+    wait_for_label(&mut h, "Post reply");
+    write_in_the_box(&mut h, "Fair enough");
+    click(&mut h, "Post reply");
+    wait_for_text(&mut h, "Replied to bea on #7");
+    let posted = f.requests("POST", "/api/v3/repos/o/r/pulls/7/comments/31/replies");
+    assert_eq!(posted.len(), 1);
+    assert_eq!(serde_json::from_str::<Value>(&posted[0].body).unwrap(), json!({"body":"Fair enough"}));
+    assert_eq!(posted[0].auth, format!("Bearer {SECRET}"));
+
+    // A second one the host turns down keeps its words in the box.
+    f.host.lock().unwrap().fail.insert(0, ("/api/v3/repos/o/r/pulls/7/comments/31/replies".to_string(), 403, r#"{"message":"not allowed"}"#.to_string()));
+    click(&mut h, "Reply to bea's thread");
+    wait_for_label(&mut h, "Post reply");
+    write_in_the_box(&mut h, "Kept");
+    click(&mut h, "Post reply");
+    wait_for_text(&mut h, "not allowed");
+    let t = Instant::now();
+    while h.state().repos[0].open_tab_unsaved("pr:7").is_none() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the reply was lost");
+    }
+}
+
+#[test]
+fn a_host_with_no_replies_says_so_on_the_conversation() {
+    let f = Fx::new();
+    answer(&f, &[
+        ("/api/v1/repos/o/r/pulls/7/reviews/9/comments", r#"[{"id":40,"user":{"login":"cy"},"body":"Nit on a line","path":"topic.txt","position":1,"created_at":"2026-01-03T00:00:01Z"}]"#),
+        ("/api/v1/repos/o/r/pulls/7/reviews", r#"[{"id":9,"user":{"login":"cy"},"state":"COMMENT","body":"","comments_count":1,"submitted_at":"2026-01-03T00:00:00Z"}]"#),
+    ]);
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    h.state_mut().repos[0].open_tab(pr_tab(7));
+    wait_for_label(&mut h, "Conversation (3)");
+    click(&mut h, "Conversation (3)");
+    wait_for_text(&mut h, "can't take a reply within a thread from here");
+    wait_for_label(&mut h, "Reply to cy");
+    assert!(h.get_by_label("Reply to cy").accesskit_node().is_disabled(), "offered, greyed out, with the reason");
+    h.get_by_label("Reply to cy").click();
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(h.query_by_label("Post reply").is_none());
+}
+
+/// A repository of its own, whose `origin` is the given address. No commits needed.
+fn folder_using(f: &Fx, name: &str, url: &str) -> String {
+    let at = f.root.parent().unwrap().join(name);
+    std::fs::create_dir_all(&at).unwrap();
+    run(&f.git, &at, &["init", "-q", "-b", "main"]);
+    run(&f.git, &at, &["remote", "add", "origin", url]);
+    // As the app records it, which has none of a canonical path's prefix.
+    gitem_core::Repo::open(f.git.clone(), &at).unwrap().root.to_string_lossy().replace('\\', "/")
+}
+
+/// A second host on another port, answering everything from this table.
+fn second_host(routes: Vec<(&'static str, u16, &'static str)>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = r.read_line(&mut first);
+            let mut auth = String::new();
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':')
+                    && k.eq_ignore_ascii_case("authorization")
+                {
+                    auth = v.trim().to_string();
+                }
+            }
+            let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
+            log.lock().unwrap().push(format!("{path} {auth}"));
+            let (status, body) = routes.iter().find(|(p, _, _)| path.starts_with(p)).map_or((404, "{}"), |(_, s, b)| (*s, *b));
+            let _ = write!(s, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    (base, seen)
+}
+
+fn port_of(base: &str) -> String {
+    base.trim_start_matches("http://").to_string()
+}
+
+#[test]
+fn everything_youre_in_asks_every_host_with_a_token_and_keeps_each_failure_to_itself() {
+    let f = Fx::new();
+    let (lab, lab_seen) = second_host(vec![("/api/v4/merge_requests", 200, r#"[{"iid":5,"title":"Over on the other host","web_url":"http://127.0.0.1:9/o/a/-/merge_requests/5","references":{"full":"o/a!5"},"source_branch":"s","target_branch":"main"}]"#)]);
+    let (down, down_seen) = second_host(vec![("/", 401, r#"{"message":"that token was revoked"}"#)]);
+    let (unsaved, unsaved_seen) = second_host(vec![("/", 200, "[]")]);
+    let (lab_custom, down_custom, unsaved_custom) = (
+        CustomHost { host: port_of(&lab), kind: ForgeKind::GitLab, api_base: String::new(), templates: Default::default() },
+        CustomHost { host: port_of(&down), kind: ForgeKind::Gitea, api_base: String::new(), templates: Default::default() },
+        CustomHost { host: port_of(&unsaved), kind: ForgeKind::Gitea, api_base: String::new(), templates: Default::default() },
+    );
+    gitem_core::cred::set_forge_token(&identify(&format!("{lab}/o/a.git"), std::slice::from_ref(&lab_custom)).unwrap().token_host(), "", "FAKE_LAB_TOKEN").unwrap();
+    gitem_core::cred::set_forge_token(&identify(&format!("{down}/o/b.git"), std::slice::from_ref(&down_custom)).unwrap().token_host(), "", "FAKE_DOWN_TOKEN").unwrap();
+    let recent = vec![
+        folder_using(&f, "on-lab", &format!("{lab}/o/a.git")),
+        folder_using(&f, "on-lab-too", &format!("{lab}/o/other.git")),
+        folder_using(&f, "on-down", &format!("{down}/o/b.git")),
+        folder_using(&f, "no-token", &format!("{unsaved}/o/c.git")),
+        "Z:/no/such/folder".to_string(),
+    ];
+    let mut h = f.harness(ForgeKind::Gitea, move |s| {
+        s.recent_repos = recent;
+        let here = s.custom_hosts.remove(0);
+        s.custom_hosts = vec![lab_custom, down_custom, unsaved_custom, here];
+    });
+    open_launchpad(&mut h);
+    quiet(&mut h);
+    assert!(lab_seen.lock().unwrap().is_empty() && down_seen.lock().unwrap().is_empty(), "nothing until you ask");
+    click(&mut h, "Everything I'm in");
+    wait_for_text(&mut h, "A pull request somewhere else");
+    wait_for_text(&mut h, "Over on the other host");
+    wait_for_text(&mut h, "that token was revoked");
+    wait_for_text(&mut h, "Not asked, as no token is saved");
+    quiet(&mut h);
+    assert!(unsaved_seen.lock().unwrap().is_empty(), "no saved token, so it wasn't asked");
+    let asked = lab_seen.lock().unwrap().clone();
+    assert!(!asked.is_empty() && asked.iter().all(|r| r.ends_with("Bearer FAKE_LAB_TOKEN")), "each host gets its own token: {asked:?}");
+    assert!(down_seen.lock().unwrap().iter().all(|r| !r.contains("FAKE_LAB_TOKEN") && !r.contains(SECRET)));
+    let (lab_calls, here_calls) = (asked.len(), f.requests("GET", "/api/v1/repos/issues/search").len());
+
+    // Nothing asks again by itself: not time, not a change of view, not a refresh of this repository.
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::Refresh);
+    quiet(&mut h);
+    click(&mut h, "This repository");
+    quiet(&mut h);
+    click(&mut h, "Everything I'm in");
+    quiet(&mut h);
+    assert_eq!(lab_seen.lock().unwrap().len(), lab_calls);
+    assert_eq!(f.requests("GET", "/api/v1/repos/issues/search").len(), here_calls);
+
+    click(&mut h, "Ask again");
+    quiet(&mut h);
+    assert!(lab_seen.lock().unwrap().len() > lab_calls, "and asking again does");
+}
+
+#[test]
+fn everything_youre_in_works_from_a_repository_with_no_host_of_its_own() {
+    let f = Fx::new();
+    let (lab, _seen) = second_host(vec![("/api/v4/merge_requests", 200, r#"[{"iid":5,"title":"From elsewhere","web_url":"http://127.0.0.1:9/5","references":{"full":"o/a!5"},"source_branch":"s","target_branch":"main"}]"#)]);
+    let custom = CustomHost { host: port_of(&lab), kind: ForgeKind::GitLab, api_base: String::new(), templates: Default::default() };
+    gitem_core::cred::set_forge_token(&identify(&format!("{lab}/o/a.git"), std::slice::from_ref(&custom)).unwrap().token_host(), "", "FAKE_LAB_TOKEN").unwrap();
+    let recent = vec![folder_using(&f, "elsewhere", &format!("{lab}/o/a.git"))];
+    run(&f.git, &f.root, &["remote", "remove", "origin"]);
+    let mut h = f.harness(ForgeKind::Gitea, move |s| {
+        s.recent_repos = recent;
+        s.custom_hosts = vec![custom];
+    });
+    open_launchpad(&mut h);
+    click(&mut h, "Everything I'm in");
+    wait_for_text(&mut h, "From elsewhere");
 }

@@ -34,6 +34,11 @@ impl ForgeKind {
         }
     }
 
+    /// Gitea's API, as far as is known here, takes a new comment on a line but no reply to one.
+    pub fn can_reply_in_threads(self) -> bool {
+        matches!(self, Self::GitHub | Self::GitLab | Self::Bitbucket | Self::BitbucketServer | Self::AzureDevOps)
+    }
+
     /// GitLab has approvals and comments, but no verdict that blocks a merge request by name.
     pub fn can_request_changes(self) -> bool {
         matches!(self, Self::GitHub | Self::Gitea | Self::Bitbucket | Self::BitbucketServer | Self::AzureDevOps)
@@ -88,6 +93,11 @@ pub struct PrComment {
     pub line: Option<u32>,
     /// `APPROVED` and the like, for a review.
     pub verdict: String,
+    /// The host's name for this comment, where something can be done with it.
+    pub id: String,
+    /// Which thread it's part of. Empty for one that stands alone and can't be answered, such as
+    /// a comment on a GitHub pull request as a whole.
+    pub thread: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -101,6 +111,21 @@ pub struct PrDetails {
     pub comments: Vec<PrComment>,
     /// What couldn't be read, with what could shown beside it.
     pub problems: Vec<String>,
+}
+
+impl PrDetails {
+    /// The conversation as it reads: each comment on its own, or a thread with its first comment
+    /// where that started and its replies after it, oldest first. Assumes `comments` is in order.
+    pub fn threads(&self) -> Vec<Vec<&PrComment>> {
+        let mut out: Vec<Vec<&PrComment>> = Vec::new();
+        for c in &self.comments {
+            match out.iter_mut().find(|g| !c.thread.is_empty() && g[0].thread == c.thread) {
+                Some(g) => g.push(c),
+                None => out.push(vec![c]),
+            }
+        }
+        out
+    }
 }
 
 /// One line of a file's hunks, numbered as the two sides have it.
@@ -175,6 +200,26 @@ fn state_of(word: &str) -> CheckState {
 
 fn num(v: Option<&Value>) -> u32 {
     v.and_then(Value::as_u64).unwrap_or(0) as u32
+}
+
+/// A host's name for something, which may be a number or a string.
+fn id_of(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::String(x)) => x.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Bitbucket Server hangs a comment's replies off the comment, to any depth. All go in one thread,
+/// on the first comment's line.
+fn server_comments(c: &Value, thread: &str, path: Option<&str>, line: Option<u32>, into: &mut Vec<PrComment>) {
+    let id = id_of(c.get("id"));
+    let thread = if thread.is_empty() { id.as_str() } else { thread };
+    into.push(PrComment { author: s(c.pointer("/author/name")), body: s(c.get("text")), when: c.get("createdDate").and_then(Value::as_i64).unwrap_or(0) / 1000, path: path.map(String::from), line, verdict: String::new(), id: id.clone(), thread: thread.to_string() });
+    for reply in c.get("comments").and_then(Value::as_array).into_iter().flatten() {
+        server_comments(reply, thread, path, line, into);
+    }
 }
 
 fn line_of(v: Option<&Value>) -> Option<u32> {
@@ -265,7 +310,10 @@ impl ForgeClient {
         }
         let inline = self.paged_get(|p| format!("{base}/repos/{path}/pulls/{n}/comments?per_page={PER_PAGE}&page={p}"), "", "Inline comments");
         for c in g.take("Inline comments", inline) {
-            comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("created_at")), path: Some(s(c.get("path"))), line: line_of(c.get("line")).or(line_of(c.get("original_line"))), verdict: String::new() });
+            let id = id_of(c.get("id"));
+            // A reply says which comment started it, and GitHub only takes replies to that one.
+            let thread = Some(id_of(c.get("in_reply_to_id"))).filter(|t| !t.is_empty()).unwrap_or_else(|| id.clone());
+            comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("created_at")), path: Some(s(c.get("path"))), line: line_of(c.get("line")).or(line_of(c.get("original_line"))), verdict: String::new(), id, thread });
         }
         let reviews = self.paged_get(|p| format!("{base}/repos/{path}/pulls/{n}/reviews?per_page={PER_PAGE}&page={p}"), "", "Reviews");
         for c in g.take("Reviews", reviews) {
@@ -304,7 +352,8 @@ impl ForgeClient {
             if r.get("comments_count").and_then(Value::as_u64).unwrap_or(0) > 0 {
                 let inner = self.get(&format!("/repos/{path}/pulls/{n}/reviews/{id}/comments")).and_then(|v| list_in(&v, "", "Inline comments"));
                 for c in g.take("Inline comments", inner) {
-                    comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("created_at")), path: Some(s(c.get("path"))), line: line_of(c.get("position")), verdict: String::new() });
+                    let id = id_of(c.get("id"));
+                    comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("created_at")), path: Some(s(c.get("path"))), line: line_of(c.get("position")), verdict: String::new(), thread: id.clone(), id });
                 }
             }
         }
@@ -344,13 +393,15 @@ impl ForgeClient {
                 checks.push(PrCheck { name: s(j.get("name")), state: state_of(&word), detail: word, url: s(j.get("web_url")) });
             }
         }
-        let notes = self.paged_get(|p| format!("{base}/projects/{id}/merge_requests/{n}/notes?per_page={PER_PAGE}&page={p}"), "", "Comments");
-        let comments = g
-            .take("Comments", notes)
-            .iter()
-            .filter(|c| c.get("system").and_then(Value::as_bool) != Some(true))
-            .map(|c| PrComment { author: s(c.pointer("/author/username")), body: s(c.get("body")), when: ts(c.get("created_at")), path: c.pointer("/position/new_path").and_then(Value::as_str).map(String::from), line: line_of(c.pointer("/position/new_line")), verdict: String::new() })
-            .collect();
+        // Discussions rather than the plain list of notes, which doesn't say which thread each is in.
+        let talks = self.paged_get(|p| format!("{base}/projects/{id}/merge_requests/{n}/discussions?per_page={PER_PAGE}&page={p}"), "", "Comments");
+        let mut comments = Vec::new();
+        for t in g.take("Comments", talks) {
+            let thread = if t.get("individual_note").and_then(Value::as_bool) == Some(true) { String::new() } else { s(t.get("id")) };
+            for c in t.get("notes").and_then(Value::as_array).into_iter().flatten().filter(|c| c.get("system").and_then(Value::as_bool) != Some(true)) {
+                comments.push(PrComment { author: s(c.pointer("/author/username")), body: s(c.get("body")), when: ts(c.get("created_at")), path: c.pointer("/position/new_path").and_then(Value::as_str).map(String::from), line: line_of(c.pointer("/position/new_line")), verdict: String::new(), id: id_of(c.get("id")), thread: thread.clone() });
+            }
+        }
         Ok(PrDetails { head_sha: s(mr.pointer("/diff_refs/head_sha")), base_sha: s(mr.pointer("/diff_refs/base_sha")), start_sha: s(mr.pointer("/diff_refs/start_sha")), files, checks, comments, problems: Vec::new() })
     }
 
@@ -380,10 +431,25 @@ impl ForgeClient {
         let statuses = page_of("Checks", "statuses".to_string());
         let checks = g.take("Checks", statuses).iter().map(|c| PrCheck { name: s(c.get("name")), state: state_of(&s(c.get("state"))), detail: s(c.get("description")), url: s(c.get("url")) }).collect();
         let said = page_of("Comments", "comments".to_string());
-        let comments = g
-            .take("Comments", said)
+        let said = g.take("Comments", said);
+        // Each says only which it answers, so a thread is named after the one at the top.
+        let parent_of: Vec<(String, String)> = said.iter().map(|c| (id_of(c.get("id")), id_of(c.pointer("/parent/id")))).collect();
+        let top_of = |id: String| {
+            let mut at = id;
+            for _ in 0..parent_of.len() {
+                match parent_of.iter().find(|(i, up)| *i == at && !up.is_empty()) {
+                    Some((_, up)) => at = up.clone(),
+                    None => break,
+                }
+            }
+            at
+        };
+        let comments = said
             .iter()
-            .map(|c| PrComment { author: s(c.pointer("/user/display_name")), body: s(c.pointer("/content/raw")), when: ts(c.get("created_on")), path: c.pointer("/inline/path").and_then(Value::as_str).map(String::from), line: line_of(c.pointer("/inline/to")), verdict: String::new() })
+            .map(|c| {
+                let id = id_of(c.get("id"));
+                PrComment { author: s(c.pointer("/user/display_name")), body: s(c.pointer("/content/raw")), when: ts(c.get("created_on")), path: c.pointer("/inline/path").and_then(Value::as_str).map(String::from), line: line_of(c.pointer("/inline/to")), verdict: String::new(), thread: top_of(id.clone()), id }
+            })
             .collect();
         Ok(PrDetails { head_sha: s(pr.pointer("/source/commit/hash")), base_sha: s(pr.pointer("/destination/commit/hash")), files, checks, comments, ..Default::default() })
     }
@@ -410,15 +476,18 @@ impl ForgeClient {
         let builds = self.request(Method::Get, &format!("{root}/rest/build-status/1.0/commits/{head_sha}")).and_then(|v| list_in(&v, "/values", "Checks"));
         let checks = g.take("Checks", builds).iter().map(|c| PrCheck { name: s(c.get("name")), state: state_of(&s(c.get("state"))), detail: s(c.get("description")), url: s(c.get("url")) }).collect();
         let acts = self.request(Method::Get, &format!("{at}/activities?limit=200")).and_then(|v| list_in(&v, "/values", "Comments"));
-        let comments = g
-            .take("Comments", acts)
-            .iter()
-            .filter_map(|a| match s(a.get("action")).as_str() {
-                "COMMENTED" => Some(PrComment { author: s(a.pointer("/comment/author/name")), body: s(a.pointer("/comment/text")), when: a.pointer("/comment/createdDate").and_then(Value::as_i64).unwrap_or(0) / 1000, path: a.pointer("/commentAnchor/path").and_then(Value::as_str).map(String::from), line: line_of(a.pointer("/commentAnchor/line")), verdict: String::new() }),
-                verdict @ ("APPROVED" | "REVIEWED") => Some(PrComment { author: s(a.pointer("/user/name")), when: a.get("createdDate").and_then(Value::as_i64).unwrap_or(0) / 1000, verdict: verdict.to_string(), ..Default::default() }),
-                _ => None,
-            })
-            .collect();
+        let mut comments = Vec::new();
+        for a in g.take("Comments", acts) {
+            match s(a.get("action")).as_str() {
+                "COMMENTED" => {
+                    if let Some(c) = a.get("comment") {
+                        server_comments(c, "", a.pointer("/commentAnchor/path").and_then(Value::as_str), line_of(a.pointer("/commentAnchor/line")), &mut comments);
+                    }
+                }
+                verdict @ ("APPROVED" | "REVIEWED") => comments.push(PrComment { author: s(a.pointer("/user/name")), when: a.get("createdDate").and_then(Value::as_i64).unwrap_or(0) / 1000, verdict: verdict.to_string(), ..Default::default() }),
+                _ => {}
+            }
+        }
         Ok(PrDetails { head_sha, base_sha: s(pr.pointer("/toRef/latestCommit")), files, checks, comments, ..Default::default() })
     }
 
@@ -444,7 +513,7 @@ impl ForgeClient {
                 if s(c.get("commentType")).eq_ignore_ascii_case("system") {
                     continue;
                 }
-                comments.push(PrComment { author: s(c.pointer("/author/displayName")), body: s(c.get("content")), when: ts(c.get("publishedDate")), path: t.pointer("/threadContext/filePath").and_then(Value::as_str).map(|x| x.trim_start_matches('/').to_string()), line: line_of(t.pointer("/threadContext/rightFileStart/line")), verdict: String::new() });
+                comments.push(PrComment { author: s(c.pointer("/author/displayName")), body: s(c.get("content")), when: ts(c.get("publishedDate")), path: t.pointer("/threadContext/filePath").and_then(Value::as_str).map(|x| x.trim_start_matches('/').to_string()), line: line_of(t.pointer("/threadContext/rightFileStart/line")), verdict: String::new(), id: id_of(c.get("id")), thread: id_of(t.get("id")) });
             }
         }
         Ok(PrDetails { head_sha: s(pr.pointer("/lastMergeSourceCommit/commitId")), base_sha: s(pr.pointer("/lastMergeTargetCommit/commitId")), files, checks, comments, ..Default::default() })
@@ -560,6 +629,29 @@ impl ForgeClient {
         if body.trim().is_empty() { Ok(()) } else { self.comment_pr(n, body) }
     }
 
+    /// A reply within the thread that `first` started: the first comment [`PrDetails::threads`] gives.
+    pub fn reply_in_thread(&self, n: u64, first: &PrComment, body: &str) -> Result<()> {
+        self.needs_api()?;
+        if !self.repo.kind.can_reply_in_threads() {
+            return Err(Error::Other(format!("{} can't take a reply within a thread from here. Comment on the line again in Files.", self.repo.kind.label())));
+        }
+        let number = || first.id.parse::<u64>().map_err(|_| Error::Other("The host didn't say which comment this is, so no reply was sent.".into()));
+        match self.repo.kind {
+            ForgeKind::GitHub => self.request(Method::Post(json!({"body":body})), &format!("{}/repos/{}/pulls/{n}/comments/{}/replies", self.api_base(), self.repo.path, number()?)).map(|_| ()),
+            ForgeKind::GitLab => self.request(Method::Post(json!({"body":body})), &format!("{}/projects/{}/merge_requests/{n}/discussions/{}/notes", self.api_base(), url_encode(&self.repo.path), url_encode(&first.thread))).map(|_| ()),
+            ForgeKind::Bitbucket => self.request(Method::Post(json!({"content":{"raw":body},"parent":{"id":number()?}})), &format!("{}/repositories/{}/pullrequests/{n}/comments", self.api_base(), self.repo.path)).map(|_| ()),
+            ForgeKind::BitbucketServer => {
+                let (b, p, r) = self.server_api();
+                self.request(Method::Post(json!({"text":body,"parent":{"id":number()?}})), &format!("{b}/projects/{p}/repos/{r}/pull-requests/{n}/comments")).map(|_| ())
+            }
+            ForgeKind::AzureDevOps => {
+                let (org, proj, repo) = self.azure_parts()?;
+                self.request(Method::Post(json!({"content":body,"parentCommentId":number()?,"commentType":1})), &format!("{}/{org}/{proj}/_apis/git/repositories/{repo}/pullrequests/{n}/threads/{}/comments?api-version=7.0", self.azure_root(), url_encode(&first.thread))).map(|_| ())
+            }
+            ForgeKind::Gitea | ForgeKind::Gerrit | ForgeKind::GoogleSource => unreachable!("rejected above"),
+        }
+    }
+
     /// A comment on one line of the new side of a file.
     pub fn comment_line(&self, n: u64, d: &PrDetails, file: &PrFile, line: u32, body: &str) -> Result<()> {
         self.needs_api()?;
@@ -591,6 +683,49 @@ impl ForgeClient {
 pub struct InvolvedPr {
     pub repo: String,
     pub pr: PullRequest,
+}
+
+/// What one host said when asked for everything you're in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostPrs {
+    /// The name its token is saved under.
+    pub host: String,
+    pub kind: ForgeKind,
+    pub found: std::result::Result<Vec<InvolvedPr>, String>,
+}
+
+/// One repository per host to ask through, first seen first. Azure DevOps asks per organisation,
+/// so its organisations count as hosts here. Hosts with no API to ask are left out.
+pub fn hosts_to_ask(urls: &[String], custom: &[crate::settings::CustomHost]) -> Vec<RemoteRepo> {
+    let mut out: Vec<RemoteRepo> = Vec::new();
+    for repo in urls.iter().filter_map(|u| identify(u, custom)).filter(|r| r.kind.has_api()) {
+        if !out.iter().any(|o| same_host(o, &repo)) {
+            out.push(repo);
+        }
+    }
+    out
+}
+
+/// Whether one query answers for both.
+pub fn same_host(a: &RemoteRepo, b: &RemoteRepo) -> bool {
+    let org = |r: &RemoteRepo| if r.kind == ForgeKind::AzureDevOps { r.path.split('/').next().unwrap_or("").to_string() } else { String::new() };
+    a.kind == b.kind && a.token_host() == b.token_host() && org(a) == org(b)
+}
+
+/// Asks each host at once, so a slow one holds up only its own answer. Each host's failure stays
+/// its own, beside what the rest found.
+pub fn involved_on_hosts(clients: Vec<ForgeClient>) -> Vec<HostPrs> {
+    std::thread::scope(|scope| {
+        let asking: Vec<_> = clients.iter().map(|c| (c, scope.spawn(move || c.involved_prs()))).collect();
+        asking
+            .into_iter()
+            .map(|(c, job)| HostPrs {
+                host: c.repo.token_host(),
+                kind: c.repo.kind,
+                found: job.join().unwrap_or_else(|_| Err(Error::Other("Asking this host stopped unexpectedly.".into()))).map_err(|e| e.to_string()),
+            })
+            .collect()
+    })
 }
 
 /// A pull request a commit came in by.

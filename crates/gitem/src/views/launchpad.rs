@@ -1,5 +1,7 @@
 //! Launchpad: pull requests grouped by what they need from you, issues from the
 //! host plus Jira and Linear, "start work", and pull-request creation.
+use std::time::{Duration, Instant};
+
 use egui::{RichText, Ui};
 use gitem_core::forge::{self, ForgeClient, Issue, LaunchpadGroup, PullRequest, RemoteRepo, launchpad_group};
 use gitem_core::{GitExe, Repo, ai, cred, ops, util};
@@ -38,8 +40,7 @@ pub struct LaunchpadView {
     loaded_for: Option<(u64, Option<String>)>,
     /// Everything you're involved in on this host, rather than this repository's.
     everywhere: bool,
-    involved: Task<Vec<forge::details::InvolvedPr>>,
-    involved_for: Option<u64>,
+    involved: Task<Everywhere>,
     /// The branch the status bar's pull request was last looked up for.
     pr_branch: Option<String>,
     /// The source branch as filled in. It follows the current branch until someone types.
@@ -68,7 +69,6 @@ impl Default for LaunchpadView {
             loaded_for: None,
             everywhere: false,
             involved: Task::default(),
-            involved_for: None,
             pr_branch: None,
             auto_head: None,
             action: Task::default(),
@@ -83,6 +83,73 @@ impl Default for LaunchpadView {
             create: Task::default(),
         }
     }
+}
+
+/// What Everything I'm in found, host by host.
+#[derive(Clone, Default)]
+struct Everywhere {
+    hosts: Vec<forge::details::HostPrs>,
+    /// Hosts your recent repositories use that nothing is saved for, so weren't asked.
+    no_token: Vec<String>,
+    /// Recent folders that took too long to say where their remotes are.
+    no_answer: usize,
+}
+
+/// How long recent folders get to say which hosts they use. One on a dead drive mustn't hold up the rest.
+const RECENT_PATIENCE: Duration = Duration::from_secs(5);
+
+/// Where the recent repositories' remotes point. Each is opened the usual way, so its config can't
+/// run anything, in a thread of its own so that one slow folder costs only itself. Network folders
+/// aren't read at all.
+fn recent_remote_urls(git: &GitExe, recent: &[String]) -> (Vec<String>, usize) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut asked = 0;
+    for path in recent.iter().filter(|p| !forge::is_network_path(p)) {
+        asked += 1;
+        let (git, path, tx) = (git.clone(), path.clone(), tx.clone());
+        std::thread::spawn(move || {
+            let urls: Vec<String> = Repo::open(git, std::path::Path::new(&path)).and_then(|r| r.remotes()).map(|all| all.into_iter().map(|m| m.fetch_url).collect()).unwrap_or_default();
+            let _ = tx.send((path, urls));
+        });
+    }
+    drop(tx);
+    let until = Instant::now() + RECENT_PATIENCE;
+    let mut answers = Vec::new();
+    while answers.len() < asked {
+        match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            Ok(a) => answers.push(a),
+            Err(_) => break,
+        }
+    }
+    let missing = asked - answers.len();
+    // In the order of the list, not of whichever answered first.
+    answers.sort_by_key(|(p, _)| recent.iter().position(|r| r == p));
+    (answers.into_iter().flat_map(|(_, u)| u).collect(), missing)
+}
+
+/// Asks this repository's host, as it always did, and every other host the recent repositories use
+/// that has a saved token. Others aren't asked through git's credential helpers: going through
+/// them could bring up a prompt per host, for something you didn't name.
+fn ask_everywhere(git: &GitExe, here: Option<RemoteRepo>, recent: &[String], custom: &[gitem_core::settings::CustomHost]) -> Result<Everywhere, String> {
+    let (urls, no_answer) = recent_remote_urls(git, recent);
+    let others = forge::details::hosts_to_ask(&urls, custom);
+    let mut clients = Vec::new();
+    let mut out = Everywhere { no_answer, ..Default::default() };
+    if let Some(r) = &here {
+        match resolve_client(git, r) {
+            Ok(c) => clients.push(c),
+            Err(e) => out.hosts.push(forge::details::HostPrs { host: r.token_host(), kind: r.kind, found: Err(e) }),
+        }
+    }
+    for repo in others.into_iter().filter(|o| !here.as_ref().is_some_and(|h| forge::details::same_host(h, o))) {
+        match cred::get(&format!("{}{}", cred::PREFIX_FORGE, repo.token_host())) {
+            Ok(Some(c)) if !c.secret.is_empty() => clients.push(ForgeClient::new(repo, c.secret, c.username)),
+            _ => out.no_token.push(repo.token_host()),
+        }
+    }
+    out.no_token.dedup();
+    out.hosts.extend(forge::details::involved_on_hosts(clients));
+    Ok(out)
 }
 
 /// Saved token for this host, or whatever git's credential helpers know about it.
@@ -272,7 +339,14 @@ impl LaunchpadView {
         let p = cx.pal.clone();
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.everywhere, false, "This repository");
-            ui.add_enabled_ui(cx.forge().is_some(), |ui| ui.selectable_value(&mut self.everywhere, true, "Everything I'm in")).inner.on_hover_text("Open pull requests you're involved in across this host").on_disabled_hover_text("None of this repository's remotes is on a supported host.");
+            let asked = ui.selectable_value(&mut self.everywhere, true, "Everything I'm in").on_hover_text("Open pull requests you're involved in, asking each host your recent repositories use that has a saved token. One request per host or more, and only when you ask.");
+            // Only ever by a click: it's requests to every host, with a token.
+            let first_look = asked.clicked() && self.involved.get().is_none() && !self.involved.busy();
+            let again = self.everywhere && ui.add_enabled(!self.involved.busy(), egui::Button::new("Ask again").small()).on_disabled_hover_text("Still asking.").clicked();
+            if first_look || again {
+                let (git, here, recent, custom) = (cx.repo.git.clone(), cx.forge().cloned(), cx.settings.recent_repos.clone(), cx.settings.custom_hosts.clone());
+                self.involved.spawn(ui.ctx(), move || ask_everywhere(&git, here, &recent, &custom));
+            }
         });
         if self.everywhere {
             self.involved_ui(ui, cx);
@@ -349,56 +423,74 @@ impl LaunchpadView {
     fn involved_ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         self.involved.poll();
-        let Some(remote) = cx.forge().cloned() else { return };
-        if self.involved_for != Some(cx.data.forge_gen) {
-            self.involved_for = Some(cx.data.forge_gen);
-            let git = cx.repo.git.clone();
-            self.involved.spawn(ui.ctx(), move || -> Result<Vec<forge::details::InvolvedPr>, String> { resolve_client(&git, &remote)?.involved_prs().map_err(|e| e.to_string()) });
-        }
         if let Some(e) = &self.involved.error {
             error_box(ui, e, &p);
         }
-        let Some(list) = self.involved.get().cloned() else {
-            if self.involved.busy() {
-                spinner_row(ui, "Asking the host…", &p);
+        if self.involved.busy() {
+            spinner_row(ui, "Asking each host…", &p);
+        }
+        let Some(all) = self.involved.get().cloned() else {
+            if !self.involved.busy() && self.involved.error.is_none() {
+                empty_state(ui, "Nothing asked yet", "Choose Ask again to ask each host.", &p);
             }
             return;
         };
         ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
         let q = self.filter.to_lowercase();
-        if list.len() >= forge::LIST_LIMIT {
-            ui.label(RichText::new(format!("Showing the first {} only.", forge::LIST_LIMIT)).small().color(p.dim));
-        }
         egui::ScrollArea::vertical().id_salt("lp-everywhere").auto_shrink([false, false]).show(ui, |ui| {
-            if list.is_empty() {
-                empty_state(ui, "Nothing open", "Open pull requests you're involved in on this host appear here.", &p);
+            if !all.no_token.is_empty() {
+                ui.label(RichText::new(format!("Not asked, as no token is saved: {}. Connect from a repository on that host.", all.no_token.join(", "))).small().color(p.dim));
             }
-            for x in list.iter().filter(|x| q.is_empty() || x.pr.title.to_lowercase().contains(&q) || x.repo.to_lowercase().contains(&q)) {
-                egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        chip(ui, &x.repo, p.series_text(6));
-                        crate::widgets::web_link(ui, format!("#{}", x.pr.number), &x.pr.url);
-                        ui.add(egui::Label::new(RichText::new(&x.pr.title).strong()).truncate());
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(if x.pr.head.is_empty() { x.pr.author.clone() } else { card_line(&x.pr, cx.settings.date_relative) }).small().color(p.dim));
-                        if x.pr.draft {
-                            chip(ui, "Draft", p.dim);
+            if all.no_answer > 0 {
+                ui.label(RichText::new(format!("{} didn't say where {} remotes are in time, so {} hosts may be missing.", plural(all.no_answer, "recent folder", "recent folders"), if all.no_answer == 1 { "its" } else { "their" }, if all.no_answer == 1 { "its" } else { "their" })).small().color(p.dim));
+            }
+            if all.hosts.is_empty() {
+                empty_state(ui, "No hosts to ask", "A host appears here once a recent repository uses it and a token is saved for it.", &p);
+            }
+            for host in &all.hosts {
+                ui.add_space(4.0);
+                match &host.found {
+                    Err(why) => {
+                        ui.label(RichText::new(format!("{} · {}", host.kind.label(), host.host)).strong());
+                        ui.add(egui::Label::new(RichText::new(format!("Couldn't ask this host: {why}")).color(p.warn)).wrap());
+                    }
+                    Ok(list) => {
+                        ui.label(RichText::new(format!("{} · {} ({})", host.kind.label(), host.host, list.len())).strong());
+                        if list.len() >= forge::LIST_LIMIT {
+                            ui.label(RichText::new(format!("Showing the first {} only.", forge::LIST_LIMIT)).small().color(p.dim));
                         }
-                        if ui.small_button("Open").clicked() {
-                            cx.url(x.pr.url.clone());
+                        if list.is_empty() {
+                            ui.label(RichText::new("Nothing open here.").small().color(p.dim));
                         }
-                        // A folder of that name opened here before. It's only a guess at which
-                        // clone, and opening it is all this does.
-                        if let Some(path) = local_copy(&x.repo, &cx.settings.recent_repos)
-                            && ui.small_button("Open repository").on_hover_text(path.clone()).clicked()
-                        {
-                            cx.out.push(Action::OpenRepo(path.into()));
+                        for x in list.iter().filter(|x| q.is_empty() || x.pr.title.to_lowercase().contains(&q) || x.repo.to_lowercase().contains(&q)) {
+                            egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    chip(ui, &x.repo, p.series_text(6));
+                                    crate::widgets::web_link(ui, format!("#{}", x.pr.number), &x.pr.url);
+                                    ui.add(egui::Label::new(RichText::new(&x.pr.title).strong()).truncate());
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(if x.pr.head.is_empty() { x.pr.author.clone() } else { card_line(&x.pr, cx.settings.date_relative) }).small().color(p.dim));
+                                    if x.pr.draft {
+                                        chip(ui, "Draft", p.dim);
+                                    }
+                                    if ui.small_button("Open").clicked() {
+                                        cx.url(x.pr.url.clone());
+                                    }
+                                    // A folder of that name opened here before. It's only a guess at which
+                                    // clone, and opening it is all this does.
+                                    if let Some(path) = local_copy(&x.repo, &cx.settings.recent_repos)
+                                        && ui.small_button("Open repository").on_hover_text(path.clone()).clicked()
+                                    {
+                                        cx.out.push(Action::OpenRepo(path.into()));
+                                    }
+                                });
+                            });
+                            ui.add_space(3.0);
                         }
-                    });
-                });
-                ui.add_space(3.0);
+                    }
+                }
             }
         });
     }

@@ -1,7 +1,7 @@
 //! One pull request in full: what it says, its checks, its conversation, its changed files, and
 //! a verdict or a merge from here. Lists are in Launchpad.
 use egui::{RichText, Ui};
-use gitem_core::forge::details::{CheckState, MergeStyle, PatchLineKind, PrDetails, Verdict, patch_lines};
+use gitem_core::forge::details::{CheckState, MergeStyle, PatchLineKind, PrComment, PrDetails, Verdict, patch_lines};
 use gitem_core::forge::{PullRequest, RemoteRepo};
 
 use crate::action::{Action, Cx, Later};
@@ -32,6 +32,9 @@ pub struct PullRequestView {
     /// A new-side line in the selected file with a comment being written on it.
     comment_on: Option<u32>,
     comment: String,
+    /// The thread with a reply being written on it.
+    reply_on: Option<String>,
+    reply: String,
     posting: Task<String>,
 }
 
@@ -59,7 +62,7 @@ pub fn merge_form(cx_git: &gitem_core::GitExe, repo: &RemoteRepo, pr: &PullReque
 
 impl PullRequestView {
     pub fn new(pr: PullRequest, me: &str) -> Self {
-        Self { pr, me: me.to_string(), page: Page::Overview, details: Task::default(), loaded_for: None, selected_file: 0, review: String::new(), comment_on: None, comment: String::new(), posting: Task::default() }
+        Self { pr, me: me.to_string(), page: Page::Overview, details: Task::default(), loaded_for: None, selected_file: 0, review: String::new(), comment_on: None, comment: String::new(), reply_on: None, reply: String::new(), posting: Task::default() }
     }
 
     pub fn key(&self) -> String {
@@ -72,7 +75,7 @@ impl PullRequestView {
 
     /// What closing this tab would lose: a review or a comment being written.
     pub fn unsaved(&self) -> Option<String> {
-        (!self.review.trim().is_empty() || !self.comment.trim().is_empty()).then(|| "A review you're writing.".to_string())
+        (!self.review.trim().is_empty() || !self.comment.trim().is_empty() || !self.reply.trim().is_empty()).then(|| "A review you're writing.".to_string())
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -83,6 +86,8 @@ impl PullRequestView {
                 self.review.clear();
                 self.comment.clear();
                 self.comment_on = None;
+                self.reply.clear();
+                self.reply_on = None;
                 cx.out.push(Action::ForgeChanged(m));
             }
             if let Some(e) = self.posting.error.take() {
@@ -124,7 +129,7 @@ impl PullRequestView {
             Page::Overview => self.overview(ui, cx, &repo),
             Page::Files => self.files(ui, cx, &repo),
             Page::Checks => self.checks(ui, cx),
-            Page::Conversation => self.conversation(ui, cx),
+            Page::Conversation => self.conversation(ui, cx, &repo),
         }
     }
 
@@ -318,7 +323,7 @@ impl PullRequestView {
         });
     }
 
-    fn conversation(&mut self, ui: &mut Ui, cx: &mut Cx) {
+    fn conversation(&mut self, ui: &mut Ui, cx: &mut Cx, repo: &RemoteRepo) {
         let p = cx.pal.clone();
         let Some(d) = self.details.get().cloned() else {
             spinner_row(ui, "Loading its conversation…", &p);
@@ -328,37 +333,86 @@ impl PullRequestView {
             empty_state(ui, "No conversation yet", "Comments and reviews appear here.", &p);
             return;
         }
+        let can_reply = repo.kind.can_reply_in_threads();
+        let no_reply_why = format!("{} can't take a reply within a thread from here. Comment on the line again in Files.", repo.kind.label());
+        let threads = d.threads();
+        if !can_reply && threads.iter().any(|g| !g[0].thread.is_empty()) {
+            ui.label(RichText::new(&no_reply_why).small().color(p.faint));
+        }
         egui::ScrollArea::vertical().id_salt("pr-talk").auto_shrink([false, false]).show(ui, |ui| {
-            for c in &d.comments {
-                egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(&c.author).strong());
-                        if c.when > 0 {
-                            ui.label(RichText::new(time_label(c.when, cx.settings.date_relative)).small().color(p.dim));
-                        }
-                        match c.verdict.as_str() {
-                            "" | "COMMENTED" | "COMMENT" => {}
-                            "APPROVED" => chip(ui, "Approved", p.good),
-                            "CHANGES_REQUESTED" | "REQUEST_CHANGES" => chip(ui, "Changes requested", p.warn),
-                            other => chip(ui, other, p.dim),
-                        }
-                        if let (Some(path), line) = (&c.path, c.line) {
-                            let where_ = line.map_or(path.clone(), |l| format!("{path}:{l}"));
-                            if ui.small_button(where_).on_hover_text("Show this file").clicked()
-                                && let Some(i) = d.files.iter().position(|f| f.path == *path)
-                            {
-                                self.selected_file = i;
-                                self.page = Page::Files;
+            for group in &threads {
+                self.said(ui, cx, group[0], &d);
+                for reply in &group[1..] {
+                    ui.horizontal_top(|ui| {
+                        ui.add_space(18.0);
+                        ui.vertical(|ui| self.said(ui, cx, reply, &d));
+                    });
+                }
+                let first = group[0];
+                if !first.thread.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        if self.reply_on.as_ref() != Some(&first.thread) {
+                            let label = if group.len() > 1 { format!("Reply to {}'s thread", first.author) } else { format!("Reply to {}", first.author) };
+                            if ui.add_enabled(can_reply, egui::Button::new(label).small()).on_disabled_hover_text(&no_reply_why).clicked() {
+                                self.reply_on = Some(first.thread.clone());
+                                self.reply.clear();
                             }
+                        } else {
+                            ui.vertical(|ui| {
+                                ui.add(crate::widgets::text_area(&mut self.reply).hint_text("Your reply").desired_rows(3).desired_width(480.0));
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(!self.reply.trim().is_empty() && !self.posting.busy(), egui::Button::new("Post reply")).on_disabled_hover_text("Write something first, and wait for anything being posted.").clicked() {
+                                        let (g, r, num, top, body) = (cx.repo.git.clone(), repo.clone(), self.pr.number, first.clone(), self.reply.clone());
+                                        self.posting.spawn(ui.ctx(), move || -> Result<String, String> {
+                                            resolve_client(&g, &r)?.reply_in_thread(num, &top, &body).map_err(|e| e.to_string())?;
+                                            Ok(format!("Replied to {} on #{num}", top.author))
+                                        });
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        self.reply_on = None;
+                                        self.reply.clear();
+                                    }
+                                });
+                            });
                         }
                     });
-                    if !c.body.trim().is_empty() {
-                        ui.add(egui::Label::new(&c.body).wrap());
-                    }
-                });
-                ui.add_space(3.0);
+                }
+                ui.add_space(6.0);
             }
         });
+    }
+
+    /// One comment or review.
+    fn said(&mut self, ui: &mut Ui, cx: &Cx, c: &PrComment, d: &PrDetails) {
+        let p = &cx.pal;
+        egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&c.author).strong());
+                if c.when > 0 {
+                    ui.label(RichText::new(time_label(c.when, cx.settings.date_relative)).small().color(p.dim));
+                }
+                match c.verdict.as_str() {
+                    "" | "COMMENTED" | "COMMENT" => {}
+                    "APPROVED" => chip(ui, "Approved", p.good),
+                    "CHANGES_REQUESTED" | "REQUEST_CHANGES" => chip(ui, "Changes requested", p.warn),
+                    other => chip(ui, other, p.dim),
+                }
+                if let (Some(path), line) = (&c.path, c.line) {
+                    let where_ = line.map_or(path.clone(), |l| format!("{path}:{l}"));
+                    if ui.small_button(where_).on_hover_text("Show this file").clicked()
+                        && let Some(i) = d.files.iter().position(|f| f.path == *path)
+                    {
+                        self.selected_file = i;
+                        self.page = Page::Files;
+                    }
+                }
+            });
+            if !c.body.trim().is_empty() {
+                ui.add(egui::Label::new(&c.body).wrap());
+            }
+        });
+        ui.add_space(3.0);
     }
 }

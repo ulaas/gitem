@@ -948,7 +948,7 @@ fn gitlab_merge_request_details_and_review() {
         ("GET", "/projects/o%2Fr/merge_requests/4/changes") => (200, json!({"diff_refs":{"base_sha":"b","head_sha":"h","start_sha":"s"},"changes":[{"old_path":"a","new_path":"a","diff":"@@ -1 +1 @@\n-x\n+y\n"},{"old_path":"n","new_path":"n","new_file":true,"diff":""}]}).to_string()),
         ("GET", "/projects/o%2Fr/merge_requests/4/pipelines") => (200, json!([{"id":77},{"id":76}]).to_string()),
         ("GET", "/projects/o%2Fr/pipelines/77/jobs") => (200, json!([{"name":"test","status":"failed","web_url":"http://j"}]).to_string()),
-        ("GET", "/projects/o%2Fr/merge_requests/4/notes") => (200, json!([{"body":"pushed","system":true,"author":{"username":"bot"}},{"body":"Nit","author":{"username":"bea"},"created_at":"2026-01-01T00:00:00Z","position":{"new_path":"a","new_line":1}}]).to_string()),
+        ("GET", "/projects/o%2Fr/merge_requests/4/discussions") => (200, json!([{"id":"sys","individual_note":true,"notes":[{"body":"pushed","system":true,"author":{"username":"bot"}}]},{"id":"d1","individual_note":false,"notes":[{"id":11,"body":"Nit","author":{"username":"bea"},"created_at":"2026-01-01T00:00:00Z","position":{"new_path":"a","new_line":1}}]}]).to_string()),
         ("POST", _) | ("PUT", _) => (201, "{}".to_string()),
         _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
     });
@@ -1116,4 +1116,188 @@ fn a_commit_says_which_pull_requests_it_came_in_by() {
     let b = client(ForgeKind::Bitbucket, "o/r", &m.base, "").prs_for_commit("abc").unwrap();
     assert_eq!((b[0].number, b[0].url.as_str()), (10, "http://h/10"));
     assert!(client(ForgeKind::AzureDevOps, "o/p/r", &m.base, "").prs_for_commit("abc").is_err());
+}
+
+// ---- replies within a thread
+
+use gitem_core::forge::details::{self, PrComment};
+
+fn threads_of(d: &details::PrDetails) -> Vec<Vec<&str>> {
+    d.threads().iter().map(|g| g.iter().map(|c| c.body.as_str()).collect()).collect()
+}
+
+#[test]
+fn github_threads_group_replies_and_a_reply_goes_to_the_comment_that_started_it() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/repos/o/r/pulls/5") => (200, json!({"head":{"sha":"h1"},"base":{"sha":"b1"}}).to_string()),
+        ("GET", "/repos/o/r/pulls/5/comments") => (200, json!([
+            {"id":31,"user":{"login":"bea"},"body":"Why?","path":"a.rs","line":2,"created_at":"2026-01-03T00:00:00Z"},
+            {"id":40,"user":{"login":"cy"},"body":"Elsewhere","path":"b.rs","line":1,"created_at":"2026-01-04T00:00:00Z"},
+            {"id":32,"in_reply_to_id":31,"user":{"login":"ann"},"body":"Because","path":"a.rs","line":2,"created_at":"2026-01-05T00:00:00Z"},
+        ]).to_string()),
+        ("GET", "/repos/o/r/issues/5/comments") => (200, json!([{"id":9,"user":{"login":"bea"},"body":"Overall fine","created_at":"2026-01-02T00:00:00Z"}]).to_string()),
+        ("POST", "/repos/o/r/pulls/5/comments/31/replies") => (201, "{}".to_string()),
+        ("GET", _) => (200, "[]".to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::GitHub, "o/r", &m.base, "");
+    let d = c.pr_details(5).unwrap();
+    assert_eq!(threads_of(&d), vec![vec!["Overall fine"], vec!["Why?", "Because"], vec!["Elsewhere"]]);
+    assert_eq!(d.threads()[0][0].thread, "", "a comment on the whole pull request has no thread to answer in");
+    c.reply_in_thread(5, d.threads()[1][0], "Thanks").unwrap();
+    let log = m.log.lock().unwrap();
+    let post = log.iter().find(|r| r.method == "POST").unwrap();
+    assert_eq!(post.path, "/repos/o/r/pulls/5/comments/31/replies");
+    assert_eq!(post.json(), json!({"body":"Thanks"}));
+}
+
+#[test]
+fn gitlab_threads_come_from_discussions_and_a_reply_goes_to_the_discussion() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/projects/o%2Fr/merge_requests/4/changes") => (200, json!({"diff_refs":{"base_sha":"b","head_sha":"h","start_sha":"s"},"changes":[]}).to_string()),
+        ("GET", "/projects/o%2Fr/merge_requests/4/discussions") => (200, json!([
+            {"id":"lone","individual_note":true,"notes":[{"id":1,"body":"On the whole","author":{"username":"bea"},"created_at":"2026-01-01T00:00:00Z"}]},
+            {"id":"abc123","individual_note":false,"notes":[
+                {"id":2,"body":"Nit","author":{"username":"bea"},"created_at":"2026-01-02T00:00:00Z","position":{"new_path":"a","new_line":1}},
+                {"id":3,"body":"Done","author":{"username":"ann"},"created_at":"2026-01-03T00:00:00Z","position":{"new_path":"a","new_line":1}},
+                {"id":4,"body":"resolved","system":true,"author":{"username":"bot"},"created_at":"2026-01-04T00:00:00Z"}]},
+        ]).to_string()),
+        ("POST", "/projects/o%2Fr/merge_requests/4/discussions/abc123/notes") => (201, "{}".to_string()),
+        ("GET", _) => (200, "[]".to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::GitLab, "o/r", &m.base, "");
+    let d = c.pr_details(4).unwrap();
+    assert_eq!(threads_of(&d), vec![vec!["On the whole"], vec!["Nit", "Done"]]);
+    c.reply_in_thread(4, d.threads()[1][0], "Thanks").unwrap();
+    assert_eq!(m.log.lock().unwrap().iter().find(|r| r.method == "POST").unwrap().json(), json!({"body":"Thanks"}));
+}
+
+#[test]
+fn bitbucket_threads_follow_parents_to_any_depth_and_a_reply_names_its_parent() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/repositories/o/r/pullrequests/2") => (200, json!({"source":{"commit":{"hash":"h"}},"destination":{"commit":{"hash":"b"}}}).to_string()),
+        ("GET", "/repositories/o/r/pullrequests/2/comments") => (200, json!({"values":[
+            {"id":1,"user":{"display_name":"Bea"},"content":{"raw":"Nit"},"created_on":"2026-01-01T00:00:00Z","inline":{"path":"a","to":1}},
+            {"id":2,"parent":{"id":1},"user":{"display_name":"Ann"},"content":{"raw":"Sure"},"created_on":"2026-01-02T00:00:00Z"},
+            {"id":3,"parent":{"id":2},"user":{"display_name":"Bea"},"content":{"raw":"Thanks"},"created_on":"2026-01-03T00:00:00Z"},
+        ]}).to_string()),
+        ("POST", "/repositories/o/r/pullrequests/2/comments") => (201, "{}".to_string()),
+        ("GET", p) if p.ends_with("/diff") => (200, String::new()),
+        ("GET", _) => (200, json!({"values":[]}).to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::Bitbucket, "o/r", &m.base, "u");
+    let d = c.pr_details(2).unwrap();
+    assert_eq!(threads_of(&d), vec![vec!["Nit", "Sure", "Thanks"]]);
+    c.reply_in_thread(2, d.threads()[0][0], "Ok").unwrap();
+    assert_eq!(m.log.lock().unwrap().iter().find(|r| r.method == "POST").unwrap().json(), json!({"content":{"raw":"Ok"},"parent":{"id":1}}));
+}
+
+#[test]
+fn bitbucket_server_shows_replies_it_used_to_leave_out_and_a_reply_names_its_parent() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/rest/projects/P/repos/r/pull-requests/2") => (200, json!({"fromRef":{"latestCommit":"h"},"toRef":{"latestCommit":"b"}}).to_string()),
+        ("GET", "/rest/projects/P/repos/r/pull-requests/2/activities") => (200, json!({"values":[{"action":"COMMENTED","commentAnchor":{"path":"a","line":1},"comment":{"id":5,"text":"Nit","author":{"name":"bea"},"createdDate":1000000,"comments":[
+            {"id":6,"text":"Sure","author":{"name":"ann"},"createdDate":2000000,"comments":[{"id":7,"text":"Thanks","author":{"name":"bea"},"createdDate":3000000,"comments":[]}]}]}}]}).to_string()),
+        ("POST", "/rest/projects/P/repos/r/pull-requests/2/comments") => (201, "{}".to_string()),
+        ("GET", p) if p.ends_with(".diff") => (200, String::new()),
+        ("GET", _) => (200, json!({"values":[]}).to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::BitbucketServer, "scm/P/r", &format!("{}/rest", m.base), "ann");
+    let d = c.pr_details(2).unwrap();
+    assert_eq!(threads_of(&d), vec![vec!["Nit", "Sure", "Thanks"]]);
+    assert_eq!(d.comments[2].path.as_deref(), Some("a"), "on the first comment's line");
+    c.reply_in_thread(2, d.threads()[0][0], "Ok").unwrap();
+    assert_eq!(m.log.lock().unwrap().iter().find(|r| r.method == "POST").unwrap().json(), json!({"text":"Ok","parent":{"id":5}}));
+}
+
+#[test]
+fn azure_threads_keep_their_ids_and_a_reply_goes_into_the_thread() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/org/p/_apis/git/repositories/r/pullrequests/8") => (200, json!({"lastMergeSourceCommit":{"commitId":"h"},"lastMergeTargetCommit":{"commitId":"b"}}).to_string()),
+        ("GET", "/org/p/_apis/git/repositories/r/pullrequests/8/threads") => (200, json!({"value":[{"id":70,"threadContext":{"filePath":"/a.txt","rightFileStart":{"line":3}},"comments":[
+            {"id":1,"author":{"displayName":"Bea"},"content":"Nit","publishedDate":"2026-01-01T00:00:00Z","commentType":"text"},
+            {"id":2,"parentCommentId":1,"author":{"displayName":"Ann"},"content":"Sure","publishedDate":"2026-01-02T00:00:00Z","commentType":"text"},
+            {"id":3,"author":{"displayName":"System"},"content":"voted","commentType":"system"}]}]}).to_string()),
+        ("POST", "/org/p/_apis/git/repositories/r/pullrequests/8/threads/70/comments") => (200, "{}".to_string()),
+        ("GET", _) => (200, json!({"value":[]}).to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::AzureDevOps, "org/p/r", &m.base, "u");
+    let d = c.pr_details(8).unwrap();
+    assert_eq!(threads_of(&d), vec![vec!["Nit", "Sure"]]);
+    c.reply_in_thread(8, d.threads()[0][0], "Ok").unwrap();
+    assert_eq!(m.log.lock().unwrap().iter().find(|r| r.method == "POST").unwrap().json(), json!({"content":"Ok","parentCommentId":1,"commentType":1}));
+}
+
+#[test]
+fn a_host_with_no_replies_says_so_and_sends_nothing() {
+    let m = mock(|_| (500, "{}".to_string()));
+    let c = client(ForgeKind::Gitea, "o/r", &m.base, "");
+    assert!(!ForgeKind::Gitea.can_reply_in_threads());
+    let first = PrComment { id: "1".into(), thread: "1".into(), ..Default::default() };
+    let e = c.reply_in_thread(3, &first, "Ok").unwrap_err().to_string();
+    assert!(e.contains("can't take a reply"), "{e}");
+    assert!(m.log.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_comment_with_no_id_sends_no_reply_rather_than_a_wrong_one() {
+    let m = mock(|_| (201, "{}".to_string()));
+    let c = client(ForgeKind::GitHub, "o/r", &m.base, "");
+    let e = c.reply_in_thread(3, &PrComment { thread: "x".into(), ..Default::default() }, "Ok").unwrap_err().to_string();
+    assert!(e.contains("no reply was sent"), "{e}");
+    assert!(m.log.lock().unwrap().is_empty());
+}
+
+// ---- everything you're in, on the two hosts 10b only compiled, and across hosts
+
+#[test]
+fn bitbucket_lists_what_youre_in_under_your_own_name() {
+    let m = mock(|r| match r.path.split('?').next().unwrap() {
+        "/user" => (200, json!({"username":"ann","account_id":"id-1","nickname":"ann"}).to_string()),
+        p if p.starts_with("/pullrequests/") => (200, json!({"values":[{"id":6,"title":"In the other repo","state":"OPEN","author":{"display_name":"Ann","nickname":"ann"},"source":{"branch":{"name":"t"},"repository":{"full_name":"o/a"}},"destination":{"branch":{"name":"main"},"repository":{"full_name":"o/a"}},"links":{"html":{"href":"http://h/o/a/6"}}}]}).to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let got = client(ForgeKind::Bitbucket, "o/r", &m.base, "u").involved_prs().unwrap();
+    assert_eq!(got.iter().map(|x| (x.repo.as_str(), x.pr.number, x.pr.title.as_str())).collect::<Vec<_>>(), vec![("o/a", 6, "In the other repo")]);
+    assert_eq!(got[0].pr.url, "http://h/o/a/6");
+    let log = m.log.lock().unwrap();
+    assert!(log.iter().any(|r| r.path.starts_with("/pullrequests/") && r.path.contains("state=OPEN")), "{:?}", log.iter().map(|r| r.path.clone()).collect::<Vec<_>>());
+}
+
+#[test]
+fn bitbucket_server_lists_what_youre_in_from_its_dashboard_and_follows_pages() {
+    let m = mock(|r| match (r.path.split('?').next().unwrap(), r.path.contains("start=0")) {
+        ("/rest/dashboard/pull-requests", true) => (200, json!({"isLastPage":false,"values":[{"id":6,"title":"First","state":"OPEN","fromRef":{"displayId":"t"},"toRef":{"displayId":"main","repository":{"slug":"a","project":{"key":"P"}}},"links":{"self":[{"href":"http://h/projects/P/repos/a/pull-requests/6"}]}}]}).to_string()),
+        ("/rest/dashboard/pull-requests", false) => (200, json!({"isLastPage":true,"values":[{"id":7,"title":"Second","state":"OPEN","fromRef":{"displayId":"u"},"toRef":{"displayId":"main","repository":{"slug":"b","project":{"key":"Q"}}},"links":{"self":[{"href":"http://h/projects/Q/repos/b/pull-requests/7"}]}}]}).to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let got = client(ForgeKind::BitbucketServer, "scm/P/r", &format!("{}/rest", m.base), "ann").involved_prs().unwrap();
+    assert_eq!(got.iter().map(|x| (x.repo.as_str(), x.pr.number)).collect::<Vec<_>>(), vec![("P/a", 6), ("Q/b", 7)]);
+    assert_eq!(got[1].pr.url, "http://h/projects/Q/repos/b/pull-requests/7", "its own address, not this repository's");
+}
+
+#[test]
+fn hosts_to_ask_are_each_host_once_and_azure_per_organisation() {
+    let urls: Vec<String> = ["https://gitlab.example/a/b.git", "git@gitlab.example:c/d.git", "https://gitea.example/e/f.git", "https://dev.azure.com/one/p/_git/r", "https://dev.azure.com/two/p/_git/r", "https://dev.azure.com/one/q/_git/s", "https://gerrit.example/x", "https://unknown.example/y.git"].map(String::from).to_vec();
+    let got = details::hosts_to_ask(&urls, &[]);
+    let names: Vec<(ForgeKind, String)> = got.iter().map(|r| (r.kind, r.path.clone())).collect();
+    assert_eq!(names, vec![(ForgeKind::GitLab, "a/b".to_string()), (ForgeKind::Gitea, "e/f".to_string()), (ForgeKind::AzureDevOps, "one/p/r".to_string()), (ForgeKind::AzureDevOps, "two/p/r".to_string())], "gerrit has no API to ask, and the last isn't a host at all");
+}
+
+#[test]
+fn one_hosts_failure_stays_beside_what_the_others_found() {
+    let good = mock(|r| match r.path.split('?').next().unwrap() {
+        "/merge_requests" => (200, json!([{"iid":5,"title":"T","web_url":"http://h/o/a/-/merge_requests/5","references":{"full":"o/a!5"},"source_branch":"s","target_branch":"main"}]).to_string()),
+        _ => (404, "{}".to_string()),
+    });
+    let bad = mock(|_| (401, json!({"message":"bad token"}).to_string()));
+    let got = details::involved_on_hosts(vec![client(ForgeKind::Gitea, "o/r", &bad.base, ""), client(ForgeKind::GitLab, "o/r", &good.base, "")]);
+    assert_eq!(got.len(), 2);
+    assert!(got[0].found.as_ref().unwrap_err().contains("bad token"), "{:?}", got[0].found);
+    assert_eq!(got[1].found.as_ref().unwrap()[0].pr.number, 5);
+    assert_eq!(got[1].kind, ForgeKind::GitLab);
 }
