@@ -1309,7 +1309,7 @@ impl GitemApp {
                     ui.label(RichText::new(format!("{} {}", f.kind.label(), f.path)).small().color(p.faint));
                 }
                 if let Some((n, url)) = &tab.data.branch_pr {
-                    ui.hyperlink_to(RichText::new(format!("PR #{n}")).small(), url);
+                    crate::widgets::web_link(ui, RichText::new(format!("PR #{n}")).small(), url);
                 }
             });
         });

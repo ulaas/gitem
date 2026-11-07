@@ -266,7 +266,7 @@ impl LaunchpadView {
         egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.hyperlink_to(format!("#{}", pr.number), &pr.url);
+                crate::widgets::web_link(ui, format!("#{}", pr.number), &pr.url);
                 ui.add(egui::Label::new(RichText::new(&pr.title).strong()).truncate());
             });
             ui.horizontal_wrapped(|ui| {
@@ -423,7 +423,7 @@ impl LaunchpadView {
                 egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.hyperlink_to(&i.id, &i.url);
+                        crate::widgets::web_link(ui, &i.id, &i.url);
                         ui.add(egui::Label::new(RichText::new(&i.title).strong()).truncate());
                     });
                     ui.horizontal_wrapped(|ui| {

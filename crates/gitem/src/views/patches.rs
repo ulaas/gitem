@@ -182,7 +182,7 @@ impl PatchesView {
                     });
                 }
             } else {
-                ui.hyperlink_to("Open gist", &m.gist_url);
+                crate::widgets::web_link(ui, "Open gist", &m.gist_url);
             }
             if self.confirm_delete {
                 ui.colored_label(p.warn, "Delete this patch for good?");

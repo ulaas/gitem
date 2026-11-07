@@ -485,13 +485,27 @@ pub fn linked_text(ui: &mut Ui, text: &str, links: &[gitem_core::forge::LinkSpan
             if l.start > pos {
                 ui.label(RichText::new(&text[pos..l.start]).color(color));
             }
-            ui.hyperlink_to(&text[l.start..l.end], &l.url);
+            web_link(ui, RichText::new(&text[l.start..l.end]), &l.url);
             pos = l.end;
         }
         if pos < text.len() {
             ui.label(RichText::new(&text[pos..]).color(color));
         }
     });
+}
+
+/// Only web links reach the browser opener. Servers choose the URLs shown in Launchpad, and
+/// could send a `file:` one. Anything else is shown as plain text, so it's visibly no link.
+pub fn is_web_link(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
+pub fn web_link(ui: &mut Ui, text: impl Into<egui::WidgetText>, url: &str) {
+    if is_web_link(url) {
+        ui.hyperlink_to(text, url);
+    } else {
+        ui.label(text).on_hover_text("This isn't a web link, so gitem won't open it.");
+    }
 }
 
 #[cfg(test)]
