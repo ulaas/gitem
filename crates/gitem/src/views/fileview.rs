@@ -101,6 +101,11 @@ pub struct FileView {
     /// Jobs and not galleys, which are tied to the font atlas of the moment.
     long_jobs: HashMap<(usize, u32), egui::text::LayoutJob>,
     picture: Option<egui::TextureHandle>,
+    /// An SVG drawn, off the UI thread.
+    svg: Task<crate::svg::Drawn>,
+    svg_picture: Option<(egui::TextureHandle, bool)>,
+    /// Showing its text, not its picture.
+    svg_source: bool,
 }
 
 /// Bigger than this isn't decoded for showing. As in the diff view.
@@ -178,6 +183,9 @@ impl FileView {
             force_blame: false,
             long_jobs: HashMap::new(),
             picture: None,
+            svg: Default::default(),
+            svg_picture: None,
+            svg_source: false,
         }
     }
 
@@ -205,6 +213,29 @@ impl FileView {
         }
     }
 
+    /// The picture, or why there isn't one. The text is a click away in either case.
+    fn svg_view(&mut self, ui: &mut Ui, pal: &crate::theme::Palette) {
+        if self.svg.poll()
+            && let Some(d) = self.svg.value.take()
+        {
+            self.svg_picture = Some((ui.ctx().load_texture("file-view-svg", d.image, egui::TextureOptions::LINEAR), d.no_text));
+        }
+        if let Some((t, no_text)) = &self.svg_picture {
+            if *no_text {
+                ui.label(RichText::new("Its text isn't drawn here. Source has it.").small().color(pal.warn));
+            }
+            let size = t.size_vec2();
+            egui::ScrollArea::both().id_salt("file-svg").auto_shrink([false, false]).show(ui, |ui| {
+                let fit = (ui.available_width() / size.x).min(ui.available_height() / size.y).min(1.0);
+                ui.image((t.id(), size * fit));
+            });
+        } else if let Some(why) = &self.svg.error {
+            empty_state(ui, "This SVG can't be drawn", why, pal);
+        } else {
+            spinner_row(ui, "Drawing…", pal);
+        }
+    }
+
     fn load(&mut self, ctx: &egui::Context, cx: &Cx) {
         let (path, rev) = (self.path.clone(), self.rev.clone());
         let opts = BlameOpts { ignore_ws: self.ignore_ws, moves: self.moves, copies: self.copies, ignore_revs: self.ignore_revs };
@@ -212,6 +243,18 @@ impl FileView {
         let force_blame = self.force_blame;
         self.long_jobs.clear();
         self.picture = None;
+        if crate::svg::is_svg(&self.path) {
+            let (path, rev) = (self.path.clone(), self.rev.clone());
+            self.svg_picture = None;
+            self.svg.spawn_git(ctx, cx.repo, move |repo| -> Result<crate::svg::Drawn, String> {
+                let bytes = match &rev {
+                    Some(r) => repo.file_at(r, &path),
+                    None => repo.worktree_file(&path),
+                }
+                .map_err(|e| e.to_string())?;
+                crate::svg::render(&bytes)
+            });
+        }
         self.data.spawn_git(ctx, cx.repo, move |repo| -> Result<FileData, String> {
             let empty = |binary| FileData { lines: Vec::new(), binary, blame_skipped: false, lens_rows: Vec::new(), max_chars: 0, syntax: Vec::new(), encoding: None, image: None, blame: Vec::new(), changes: HashMap::new(), deletions: HashMap::new(), newest: 0, oldest: 0, lens: Vec::new() };
             let lower = path.to_lowercase();
@@ -331,6 +374,17 @@ impl FileView {
         };
         if let Some(image) = d.image.take() {
             self.picture = Some(ui.ctx().load_texture("file-view-picture", image, egui::TextureOptions::LINEAR));
+        }
+        if crate::svg::is_svg(&self.path) && !d.binary {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.svg_source, false, "Picture");
+                ui.selectable_value(&mut self.svg_source, true, "Source");
+            });
+            if !self.svg_source {
+                self.svg_view(ui, &pal);
+                self.data.value = Some(d);
+                return;
+            }
         }
         if d.binary && let Some(t) = &self.picture {
             let size = t.size_vec2();

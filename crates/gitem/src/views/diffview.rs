@@ -144,8 +144,13 @@ struct ImagePair {
     new: Option<egui::TextureHandle>,
     loaded_for: Option<String>,
     /// Both versions read and decoded, on their way to becoming textures.
-    decoding: Task<(Option<egui::ColorImage>, Option<egui::ColorImage>)>,
+    decoding: Task<PicturePair>,
+    /// What to say about what's left out or couldn't be drawn, with an SVG.
+    why: Option<String>,
 }
+
+/// Before, after, and what `ImagePair::why` will say.
+type PicturePair = (Option<egui::ColorImage>, Option<egui::ColorImage>, Option<String>);
 
 /// Side by side or not, the width and file they were worked out for, and each row's top.
 type WrappedTops = (bool, (u32, u32), usize, std::sync::Arc<Vec<f32>>);
@@ -182,6 +187,8 @@ pub struct DiffView {
     find_pos: usize,
     find_key: Option<(String, usize, bool, bool)>,
     images: ImagePair,
+    /// An SVG's diff shows its two pictures, not its text.
+    svg_pictures: bool,
     wrap_key: String,
     dark: Option<bool>,
     needs_load: bool,
@@ -224,6 +231,7 @@ impl DiffView {
             find_pos: 0,
             find_key: None,
             images: ImagePair::default(),
+            svg_pictures: false,
             wrap_key: String::new(),
             dark: None,
             needs_load: true,
@@ -697,7 +705,13 @@ impl DiffView {
                 }
             }
         });
-        if f.is_binary {
+        if crate::svg::is_svg(f.display_path()) && !f.is_binary {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.svg_pictures, false, "Text");
+                ui.selectable_value(&mut self.svg_pictures, true, "Pictures");
+            });
+        }
+        if f.is_binary || (self.svg_pictures && crate::svg::is_svg(f.display_path())) {
             self.binary(ui, cx, f);
             return;
         }
@@ -988,7 +1002,8 @@ impl DiffView {
     fn binary(&mut self, ui: &mut Ui, cx: &mut Cx, f: &FileDiff) {
         let pal = cx.pal.clone();
         let path = f.display_path().to_string();
-        let is_image = crate::widgets::PICTURE_TYPES.iter().any(|e| path.to_lowercase().ends_with(&format!(".{e}")));
+        let svg = crate::svg::is_svg(&path);
+        let is_image = svg || crate::widgets::PICTURE_TYPES.iter().any(|e| path.to_lowercase().ends_with(&format!(".{e}")));
         if !is_image {
             empty_state(ui, "Binary file", "This file can't be compared as text.", &pal);
             return;
@@ -998,7 +1013,7 @@ impl DiffView {
             self.images = ImagePair { loaded_for: Some(key), ..Default::default() };
             let (src, old_path, new_path) = (self.src.clone(), f.old_path.clone(), path.clone());
             // Up to 32 MB each to read and decode, which is no job for a frame.
-            self.images.decoding.spawn_git(ui.ctx(), cx.repo, move |repo| -> Result<(Option<egui::ColorImage>, Option<egui::ColorImage>), String> {
+            self.images.decoding.spawn_git(ui.ctx(), cx.repo, move |repo| -> Result<PicturePair, String> {
                 let (old_rev, new_rev): (Option<String>, Option<String>) = match &src {
                     DiffSource::Commit(s) => (Some(format!("{s}^")), Some(s.clone())),
                     DiffSource::Range(a, b) => (Some(a.clone()), Some(b.clone())),
@@ -1014,13 +1029,33 @@ impl DiffView {
                     Some(r) => repo.file_at(&r, &new_path).ok(),
                     None => repo.worktree_file(&new_path).ok(),
                 };
-                let decode = |bytes: Option<Vec<u8>>| bytes.filter(|b| b.len() < MAX_INLINE_IMAGE).and_then(|b| decode_image(&b));
-                Ok((decode(old), decode(new)))
+                let mut why = None;
+                let mut decode = |bytes: Option<Vec<u8>>| {
+                    let b = bytes.filter(|b| b.len() < MAX_INLINE_IMAGE)?;
+                    if !svg {
+                        return decode_image(&b);
+                    }
+                    match crate::svg::render(&b) {
+                        Ok(d) => {
+                            if d.no_text {
+                                why = Some("Text in an SVG isn't drawn here. Text, above, has it.".to_string());
+                            }
+                            Some(d.image)
+                        }
+                        Err(e) => {
+                            why = Some(format!("One of these can't be drawn: {e}"));
+                            None
+                        }
+                    }
+                };
+                let (old, new) = (decode(old), decode(new));
+                Ok((old, new, why))
             });
         }
         if self.images.decoding.poll()
-            && let Some((old, new)) = self.images.decoding.value.take()
+            && let Some((old, new, why)) = self.images.decoding.value.take()
         {
+            self.images.why = why;
             let load = |img: Option<egui::ColorImage>, name: &str| img.map(|i| ui.ctx().load_texture(name, i, egui::TextureOptions::LINEAR));
             self.images.old = load(old, "diff-old");
             self.images.new = load(new, "diff-new");
@@ -1028,6 +1063,9 @@ impl DiffView {
         if self.images.decoding.busy() {
             spinner_row(ui, "Loading images…", &pal);
             return;
+        }
+        if let Some(why) = &self.images.why {
+            ui.colored_label(pal.warn, why);
         }
         ui.columns(2, |c| {
             for (col, (tex, name)) in [(self.images.old.as_ref(), "Before"), (self.images.new.as_ref(), "After")].into_iter().enumerate() {

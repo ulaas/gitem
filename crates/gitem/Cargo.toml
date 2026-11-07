@@ -24,6 +24,9 @@ chrono = "0.4"
 regex = "1"
 ignore = "0.4.33"
 memmap2 = "0.9.12"
+# Drawing SVG files. No picture decoding, no compressed SVG, and no system fonts: see `svg.rs`.
+resvg = { version = "0.48", default-features = false }
+roxmltree = "0.21"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"

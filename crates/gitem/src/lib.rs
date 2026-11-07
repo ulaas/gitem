@@ -15,6 +15,7 @@ pub mod keys;
 pub mod menus;
 pub mod palette;
 pub mod standalone;
+pub mod svg;
 pub mod syntax;
 pub mod task;
 pub mod theme;

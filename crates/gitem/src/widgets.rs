@@ -156,8 +156,8 @@ fn fetch_image(url: &str) -> Option<egui::ColorImage> {
     decode_image(&bytes)
 }
 
-/// File names the file view and diffs try `decode_image` on. SVG isn't one: it needs a renderer,
-/// not a decoder, and shows as the text it is.
+/// File names the file view and diffs try `decode_image` on. SVG isn't one: `crate::svg` draws it,
+/// and it's text too, so that's a choice beside the text and not in place of it.
 pub const PICTURE_TYPES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
 
 pub fn decode_image(bytes: &[u8]) -> Option<egui::ColorImage> {
