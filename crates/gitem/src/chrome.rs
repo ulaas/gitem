@@ -206,7 +206,10 @@ pub fn repo_tab(ui: &mut Ui, name: &str, dirty: bool, selected: bool, path: &str
     const CLOSE: f32 = REPO_TAB_CLOSE;
     let color = if selected { p.text } else { p.dim };
     let room = (cap - repo_tab_chrome(dirty)).max(16.0);
-    let mut job = egui::text::LayoutJob::simple_singleline(name.to_string(), prop(12.5), color);
+    // Cut in the middle: repositories often differ only at the end of their names.
+    let natural = ui.painter().layout_no_wrap(name.to_string(), prop(12.5), color).size().x;
+    let shown = if natural > room { crate::widgets::middle_elided(name, ((room / natural) * name.chars().count() as f32) as usize) } else { name.to_string() };
+    let mut job = egui::text::LayoutJob::simple_singleline(shown, prop(12.5), color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(room);
     let galley = ui.painter().layout_job(job);
     let width = galley.size().x + repo_tab_chrome(dirty);

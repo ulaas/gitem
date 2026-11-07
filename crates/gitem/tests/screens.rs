@@ -67,7 +67,11 @@ fn fake_host() -> String {
                 let route = path.split('?').next().unwrap_or("");
                 let body = match route {
                     "/api/v1/user" => json!({"login":"me"}),
-                    "/api/v1/repos/o/r/pulls" if page_one => json!([pr(7, "topic", "Teach the parser about wide characters", false), pr(9, "fix/long-branch-name-that-keeps-on-going", "Fix the thing that broke when a very long title like this one has to fit in a card", false), pr(12, "draft-work", "Sketch a new layout", true), {let mut p = pr(14, "from-a-fork", "Someone else's fork", false); p["head"]["repo"]["full_name"] = json!("them/r"); p}]),
+                    "/api/v1/repos/o/r/pulls" if page_one => {
+                        let mut fork = pr(15, "from-a-fork", "Someone else's fork", false);
+                        fork["head"]["repo"]["full_name"] = json!("them/r");
+                        json!([pr(7, "topic", "Teach the parser about wide characters", false), pr(9, "fix/long-branch-name-that-keeps-on-going", "Fix the thing that broke when a very long title like this one has to fit in a card", false), pr(12, "draft-work", "Sketch a new layout", true), fork])
+                    },
                     "/api/v1/repos/o/r/issues" if page_one => json!([{"number":3,"title":"Crash when opening a file","state":"open","html_url":"http://127.0.0.1:9/issues/3","user":{"login":"someone-else"},"labels":[{"name":"bug","color":"ff0000"}]}]),
                     _ => json!([]),
                 };
