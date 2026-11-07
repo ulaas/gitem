@@ -1,0 +1,46 @@
+name: Release
+
+# On a version tag: tests, then a Windows installer and plain archives for each system, attached to
+# a draft release for a person to read and publish. Nothing here signs anything: that needs the
+# owner's certificate, as a secret this workflow doesn't have. It has never run.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+      - run: choco install innosetup --no-progress
+      - run: packaging\windows\build.ps1
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: target/dist/gitem-*-setup.exe
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: macos-latest
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
+      - run: cargo build --profile dist -p gitem
+      - run: tar -czf gitem-${{ matrix.name }}.tar.gz -C target/dist gitem
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: gitem-${{ matrix.name }}.tar.gz

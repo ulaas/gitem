@@ -57,7 +57,6 @@ const TABLE: &[(&str, &str, &str, &str)] = &[
     ("Copy message", "Copiar mensaje", "Mesajı kopyala", "复制说明"),
     ("Copy as patch", "Copiar como parche", "Yama olarak kopyala", "复制为补丁"),
     ("Open on remote", "Abrir en el remoto", "Uzak depoda aç", "在远程打开"),
-    ("Switch to", "Cambiar a", "Geçiş yap", "切换到"),
     ("Merge into current…", "Fusionar en la actual…", "Geçerli dala birleştir…", "合并到当前分支…"),
     ("Rename…", "Renombrar…", "Yeniden adlandır…", "重命名…"),
     ("Delete…", "Eliminar…", "Sil…", "删除…"),

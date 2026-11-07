@@ -61,6 +61,12 @@ fn api(host: &Shared, r: &Req) -> (u16, Vec<u8>) {
         ("GET", "/api/v1/repos/o/r/pulls") => ok(Value::Array(h.prs.clone())),
         ("GET", "/api/v1/repos/o/r/issues") => ok(Value::Array(h.issues.clone())),
         ("POST", "/api/v1/repos/o/r/pulls") => (201, json!({"html_url":"http://127.0.0.1:9/created/1"}).to_string().into_bytes()),
+        ("GET", "/api/v1/repos/o/r/pulls/7") => ok(json!({"head":{"sha":"headsha"},"base":{"sha":"basesha"}})),
+        ("GET", "/api/v1/repos/o/r/pulls/7.diff") => (200, b"diff --git a/topic.txt b/topic.txt\n--- /dev/null\n+++ b/topic.txt\n@@ -0,0 +1,2 @@\n+first added line\n+second added line\n".to_vec()),
+        ("GET", "/api/v1/repos/o/r/pulls/7/files") => ok(json!([{"filename":"topic.txt","status":"added","additions":2,"deletions":0}])),
+        ("GET", "/api/v1/repos/o/r/commits/headsha/statuses") => ok(json!([{"context":"build-job","status":"failure","description":"It broke","target_url":"http://127.0.0.1:9/ci/1"}])),
+        ("GET", "/api/v1/repos/o/r/issues/7/comments") => ok(json!([{"user":{"login":"bea"},"body":"A thought about this","created_at":"2026-01-02T00:00:00Z"}])),
+        ("GET", "/api/v1/repos/o/r/pulls/7/reviews") => ok(json!([])),
         ("POST", p) if p.starts_with("/api/v1/repos/o/r/pulls/") && p.ends_with("/merge") => {
             let n: u64 = p.split('/').nth(7).and_then(|x| x.parse().ok()).unwrap_or(0);
             h.prs.retain(|x| x["number"] != n);
@@ -563,7 +569,7 @@ fn merging_asks_then_posts_and_the_list_reloads() {
     open_launchpad(&mut h);
     let lists_before = f.requests("GET", "/api/v1/repos/o/r/pulls").len();
     click(&mut h, "Merge…");
-    wait_for_text(&mut h, "with the host's default strategy");
+    wait_for_label(&mut h, "How");
     assert!(f.requests("POST", "/api/v1/repos/o/r/pulls/7/merge").is_empty(), "not before it's confirmed");
     click(&mut h, "Merge");
     wait_for_text(&mut h, "Merged #7");
@@ -613,13 +619,148 @@ fn commenting_posts_what_was_typed() {
 #[test]
 fn approving_posts_and_says_so() {
     let f = Fx::new();
+    f.host.lock().unwrap().prs[0]["user"]["login"] = json!("someone-else");
     let mut h = f.harness(ForgeKind::Gitea, |_| {});
     open_launchpad(&mut h);
+    click(&mut h, "Other open (1)");
     click(&mut h, "Approve");
     wait_for_text(&mut h, "Approved #7");
     quiet(&mut h);
     no_errors(&h);
     assert_eq!(serde_json::from_str::<Value>(&f.requests("POST", "/api/v1/repos/o/r/pulls/7/reviews")[0].body).unwrap()["event"], "APPROVED");
+}
+
+#[test]
+fn your_own_pull_request_offers_no_approve() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    wait_for_label(&mut h, "Merge…");
+    assert!(h.query_by_label("Approve").is_none());
+}
+
+#[test]
+fn a_draft_or_conflicted_pull_request_cannot_be_merged_from_here() {
+    use egui_kittest::kittest::NodeT;
+    let f = Fx::new();
+    f.host.lock().unwrap().prs = vec![{
+        let mut p = gitea_pr(7, "topic", "The topic");
+        p["draft"] = json!(true);
+        p
+    }];
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    wait_for_label(&mut h, "Merge…");
+    assert!(h.get_by_label("Merge…").accesskit_node().is_disabled(), "a draft");
+    f.host.lock().unwrap().prs = vec![{
+        let mut p = gitea_pr(7, "topic", "The topic");
+        p["mergeable"] = json!(false);
+        p
+    }];
+    click_last(&mut h, "Refresh");
+    quiet(&mut h);
+    wait_for_text(&mut h, "Conflicts");
+    assert!(h.get_by_label("Merge…").accesskit_node().is_disabled(), "with conflicts");
+    click_last(&mut h, "Pin");
+    no_errors(&h);
+}
+
+fn open_details(f: &Fx, h: &mut Harness<'static, GitemApp>) {
+    f.host.lock().unwrap().prs[0]["body"] = json!("What this pull request does");
+    click_last(h, "Refresh");
+    quiet(h);
+    if f.host.lock().unwrap().prs[0]["user"]["login"] != "me" {
+        click(h, "Other open (1)");
+    }
+    click(h, "Show details");
+    wait_for_text(h, "What this pull request does");
+    quiet(h);
+}
+
+#[test]
+fn a_pull_requests_details_show_its_files_checks_and_conversation() {
+    let f = Fx::new();
+    f.host.lock().unwrap().prs[0]["user"]["login"] = json!("someone-else");
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    open_details(&f, &mut h);
+    no_errors(&h);
+    wait_for_label(&mut h, "Files (1)");
+    click(&mut h, "Files (1)");
+    wait_for_text(&mut h, "+first added line");
+    click(&mut h, "Checks (1)");
+    wait_for_label(&mut h, "build-job");
+    wait_for_text(&mut h, "It broke");
+    click(&mut h, "Conversation (1)");
+    wait_for_text(&mut h, "A thought about this");
+}
+
+#[test]
+fn a_review_with_a_verdict_is_posted_and_the_words_stay_if_it_fails() {
+    let f = Fx::new();
+    f.host.lock().unwrap().prs[0]["user"]["login"] = json!("someone-else");
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    open_details(&f, &mut h);
+    f.host.lock().unwrap().fail.push(("/api/v1/repos/o/r/pulls/7/reviews".to_string(), 500, json!({"message":"Host is down"}).to_string()));
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
+    h.step();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text("Needs a test");
+    h.step();
+    h.step();
+    click(&mut h, "Request changes");
+    pump(&mut h, |a| !a.errors_showing().is_empty(), "the error");
+    assert!(h.state().errors_showing()[0].contains("Host is down"));
+    assert_eq!(h.state().repos[0].open_tab_unsaved("pr:7").as_deref(), Some("A review you're writing."), "what was written is kept");
+    f.host.lock().unwrap().fail.clear();
+    h.state_mut().errors_clear_for_test();
+    click(&mut h, "Request changes");
+    wait_for_text(&mut h, "Requested changes on #7");
+    quiet(&mut h);
+    let posted = f.requests("POST", "/api/v1/repos/o/r/pulls/7/reviews");
+    let body: Value = serde_json::from_str(&posted.last().unwrap().body).unwrap();
+    assert_eq!(body["event"], "REQUEST_CHANGES");
+    assert_eq!(body["body"], "Needs a test");
+    assert_eq!(h.state().repos[0].open_tab_unsaved("pr:7"), None, "and it's cleared once the host has it");
+}
+
+#[test]
+fn a_comment_on_a_line_goes_to_that_line() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    open_details(&f, &mut h);
+    click(&mut h, "Files (1)");
+    wait_for_text(&mut h, "+second added line");
+    click(&mut h, "    2");
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).focus();
+    h.step();
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).type_text("On this line");
+    h.step();
+    h.step();
+    click(&mut h, "Post comment");
+    wait_for_text(&mut h, "Commented on line 2 of topic.txt");
+    quiet(&mut h);
+    let posted = f.requests("POST", "/api/v1/repos/o/r/pulls/7/reviews");
+    let body: Value = serde_json::from_str(&posted[0].body).unwrap();
+    assert_eq!(body["comments"][0], json!({"path":"topic.txt","body":"On this line","new_position":2}));
+    assert_eq!(body["commit_id"], "headsha");
+}
+
+#[test]
+fn a_merge_from_the_details_can_squash() {
+    let f = Fx::new();
+    let mut h = f.harness(ForgeKind::Gitea, |_| {});
+    open_launchpad(&mut h);
+    open_details(&f, &mut h);
+    click(&mut h, "Merge…");
+    wait_for_label(&mut h, "How");
+    h.state_mut().form_set_for_test("style", "Squash into one commit");
+    click(&mut h, "Merge");
+    wait_for_text(&mut h, "Merged #7");
+    quiet(&mut h);
+    let merged = f.requests("POST", "/api/v1/repos/o/r/pulls/7/merge");
+    assert_eq!(serde_json::from_str::<Value>(&merged[0].body).unwrap()["Do"], "squash");
 }
 
 #[test]

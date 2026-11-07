@@ -1,0 +1,618 @@
+//! What the Pull Request view reads and posts beyond a list's card: changed files with their
+//! diffs, each check, the conversation and inline comments, a merge by a chosen method, and a
+//! review verdict. The field names come from each host's documentation as remembered, and are
+//! only tested against hand-written replies: see `tests/http_clients.rs`.
+use serde_json::{Value, json};
+
+use super::*;
+
+/// How a pull request's commits land on its base branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeStyle {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "Merge commit",
+            Self::Squash => "Squash into one commit",
+            Self::Rebase => "Rebase onto the base branch",
+        }
+    }
+}
+
+impl ForgeKind {
+    /// What can be asked for by name. Anything else is whatever the host is set up to do.
+    pub fn merge_styles(self) -> &'static [MergeStyle] {
+        match self {
+            Self::GitHub | Self::Gitea | Self::AzureDevOps => &[MergeStyle::Merge, MergeStyle::Squash, MergeStyle::Rebase],
+            Self::GitLab | Self::Bitbucket => &[MergeStyle::Merge, MergeStyle::Squash],
+            Self::BitbucketServer | Self::Gerrit | Self::GoogleSource => &[],
+        }
+    }
+
+    /// GitLab has approvals and comments, but no verdict that blocks a merge request by name.
+    pub fn can_request_changes(self) -> bool {
+        matches!(self, Self::GitHub | Self::Gitea | Self::Bitbucket | Self::BitbucketServer | Self::AzureDevOps)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrFile {
+    pub path: String,
+    /// Where it was before, for a rename.
+    pub old_path: String,
+    pub status: String,
+    pub additions: u32,
+    pub deletions: u32,
+    /// Its hunks, where the host gives them. Empty for a binary file or a very large change.
+    pub patch: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Passed,
+    Failed,
+    Running,
+    /// Skipped, neutral, or a word this doesn't know.
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCheck {
+    pub name: String,
+    pub state: CheckState,
+    /// The host's own word for it, or a line about it.
+    pub detail: String,
+    /// Where its log is. Logs stay on the host: every host keeps them differently.
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrComment {
+    pub author: String,
+    pub body: String,
+    pub when: i64,
+    /// Where it's pinned, for an inline comment.
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    /// `APPROVED` and the like, for a review.
+    pub verdict: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrDetails {
+    pub head_sha: String,
+    pub base_sha: String,
+    /// Where the diff starts, which an inline comment on GitLab has to name.
+    pub start_sha: String,
+    pub files: Vec<PrFile>,
+    pub checks: Vec<PrCheck>,
+    pub comments: Vec<PrComment>,
+    /// What couldn't be read, with what could shown beside it.
+    pub problems: Vec<String>,
+}
+
+/// One line of a file's hunks, numbered as the two sides have it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchLine {
+    pub kind: PatchLineKind,
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchLineKind {
+    Hunk,
+    Context,
+    Added,
+    Removed,
+}
+
+/// Numbers from each `@@ -a,b +c,d @@`. Lines before the first hunk are a file's header, or
+/// nothing, and are left out.
+pub fn patch_lines(patch: &str) -> Vec<PatchLine> {
+    let (mut out, mut old, mut new, mut started) = (Vec::new(), 0u32, 0u32, false);
+    for l in patch.lines() {
+        if let Some(rest) = l.strip_prefix("@@ -") {
+            let start = |s: &str| s.split(',').next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(1);
+            let mut parts = rest.split(' ');
+            old = start(parts.next().unwrap_or(""));
+            new = start(parts.next().unwrap_or("").trim_start_matches('+'));
+            started = true;
+            out.push(PatchLine { kind: PatchLineKind::Hunk, old: None, new: None, text: l.to_string() });
+        } else if !started || l.starts_with('\\') {
+            continue;
+        } else if let Some(t) = l.strip_prefix('+') {
+            out.push(PatchLine { kind: PatchLineKind::Added, old: None, new: Some(new), text: t.to_string() });
+            new += 1;
+        } else if let Some(t) = l.strip_prefix('-') {
+            out.push(PatchLine { kind: PatchLineKind::Removed, old: Some(old), new: None, text: t.to_string() });
+            old += 1;
+        } else {
+            out.push(PatchLine { kind: PatchLineKind::Context, old: Some(old), new: Some(new), text: l.strip_prefix(' ').unwrap_or(l).to_string() });
+            old += 1;
+            new += 1;
+        }
+    }
+    out
+}
+
+/// Each file's part of a whole diff, by the name after `+++` or else `diff --git`.
+pub fn split_diff(diff: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for chunk in diff.split("diff --git ").skip(1) {
+        let first = chunk.lines().next().unwrap_or("");
+        let plus = chunk.lines().find_map(|l| l.strip_prefix("+++ ")).filter(|n| *n != "/dev/null").and_then(|n| n.strip_prefix("b/").or(Some(n)));
+        let minus = chunk.lines().find_map(|l| l.strip_prefix("--- ")).filter(|n| *n != "/dev/null").and_then(|n| n.strip_prefix("a/").or(Some(n)));
+        // `a/x b/x`, for when neither of those is there: an empty file or a pure rename.
+        let named = first.rsplit_once(" b/").map(|x| x.1);
+        let Some(path) = plus.or(minus).or(named) else { continue };
+        out.push((path.trim().to_string(), chunk.split_once('\n').map_or("", |x| x.1).to_string()));
+    }
+    out
+}
+
+fn state_of(word: &str) -> CheckState {
+    match word.to_ascii_lowercase().as_str() {
+        "success" | "successful" | "passed" | "succeeded" | "completed_success" => CheckState::Passed,
+        "failure" | "failed" | "error" | "errored" | "timed_out" | "cancelled" | "canceled" | "action_required" | "stopped" => CheckState::Failed,
+        "pending" | "running" | "in_progress" | "queued" | "waiting" | "created" | "inprogress" | "notstarted" | "preparing" | "scheduled" => CheckState::Running,
+        _ => CheckState::Other,
+    }
+}
+
+fn num(v: Option<&Value>) -> u32 {
+    v.and_then(Value::as_u64).unwrap_or(0) as u32
+}
+
+fn line_of(v: Option<&Value>) -> Option<u32> {
+    v.and_then(Value::as_u64).map(|n| n as u32)
+}
+
+/// Keeps what's left readable when one part of the reply can't be had.
+struct Gather {
+    problems: Vec<String>,
+}
+
+impl Gather {
+    fn take<T: Default>(&mut self, what: &str, r: Result<T>) -> T {
+        r.unwrap_or_else(|e| {
+            self.problems.push(format!("{what}: {e}"));
+            T::default()
+        })
+    }
+}
+
+impl ForgeClient {
+    /// A pull request's diff in full, for the hosts whose lists of files don't have it. Not JSON,
+    /// which is the one reason this isn't `request`.
+    fn get_text(&self, url: &str) -> Result<String> {
+        let auth = match self.repo.kind {
+            ForgeKind::Gitea => format!("token {}", self.token),
+            ForgeKind::Bitbucket | ForgeKind::AzureDevOps => format!("Basic {}", base64(&format!("{}:{}", self.user, self.token))),
+            _ => format!("Bearer {}", self.token),
+        };
+        let mut resp = agent().get(url).header("authorization", &auth).call().map_err(|e| Error::Other(format!("{url}: {e}")))?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().map_err(|e| Error::Other(format!("reading the reply from {url}: {e}")))?;
+        if status >= 400 {
+            return Err(Error::Other(format!("HTTP {status}: {}", text.chars().take(300).collect::<String>())));
+        }
+        Ok(text)
+    }
+
+    /// Everything the view shows about one pull request. Only a failure to read the pull request
+    /// itself is an error: a host that won't list its checks still has files to show.
+    pub fn pr_details(&self, n: u64) -> Result<PrDetails> {
+        self.needs_api()?;
+        let mut g = Gather { problems: Vec::new() };
+        let mut d = match self.repo.kind {
+            ForgeKind::GitHub => self.github_details(n, &mut g)?,
+            ForgeKind::Gitea => self.gitea_details(n, &mut g)?,
+            ForgeKind::GitLab => self.gitlab_details(n, &mut g)?,
+            ForgeKind::Bitbucket => self.bitbucket_details(n, &mut g)?,
+            ForgeKind::BitbucketServer => self.server_details(n, &mut g)?,
+            ForgeKind::AzureDevOps => self.azure_details(n, &mut g)?,
+            ForgeKind::Gerrit | ForgeKind::GoogleSource => unreachable!("rejected by needs_api"),
+        };
+        d.problems = g.problems;
+        d.comments.sort_by_key(|c| c.when);
+        Ok(d)
+    }
+
+    fn paged_get(&self, url: impl Fn(usize) -> String, pointer: &str, what: &str) -> Result<Vec<Value>> {
+        paged(|page| {
+            let v = self.request(Method::Get, &url(page))?;
+            let items = list_in(&v, pointer, what)?;
+            let more = items.len() == PER_PAGE;
+            Ok((items, more))
+        })
+    }
+
+    fn github_details(&self, n: u64, g: &mut Gather) -> Result<PrDetails> {
+        let (base, path) = (self.api_base(), self.repo.path.clone());
+        let pr = self.get(&format!("/repos/{path}/pulls/{n}"))?;
+        let (head_sha, base_sha) = (s(pr.pointer("/head/sha")), s(pr.pointer("/base/sha")));
+        let files = self.paged_get(|p| format!("{base}/repos/{path}/pulls/{n}/files?per_page={PER_PAGE}&page={p}"), "", "Files");
+        let files = g.take("Files", files).iter().map(|f| PrFile { path: s(f.get("filename")), old_path: s(f.get("previous_filename")), status: s(f.get("status")), additions: num(f.get("additions")), deletions: num(f.get("deletions")), patch: s(f.get("patch")) }).collect();
+        let mut checks = Vec::new();
+        let runs = self.get(&format!("/repos/{path}/commits/{head_sha}/check-runs?per_page=100")).and_then(|v| list_in(&v, "/check_runs", "Checks"));
+        for c in g.take("Checks", runs) {
+            let (status, conclusion) = (s(c.get("status")), s(c.get("conclusion")));
+            let word = if conclusion.is_empty() { status } else { conclusion };
+            checks.push(PrCheck { name: s(c.get("name")), state: state_of(&word), detail: word, url: s(c.get("html_url")) });
+        }
+        let statuses = self.get(&format!("/repos/{path}/commits/{head_sha}/status")).and_then(|v| list_in(&v, "/statuses", "Commit statuses"));
+        for c in g.take("Commit statuses", statuses) {
+            checks.push(PrCheck { name: s(c.get("context")), state: state_of(&s(c.get("state"))), detail: s(c.get("description")), url: s(c.get("target_url")) });
+        }
+        let mut comments = Vec::new();
+        let said = self.paged_get(|p| format!("{base}/repos/{path}/issues/{n}/comments?per_page={PER_PAGE}&page={p}"), "", "Comments");
+        for c in g.take("Comments", said) {
+            comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("created_at")), ..Default::default() });
+        }
+        let inline = self.paged_get(|p| format!("{base}/repos/{path}/pulls/{n}/comments?per_page={PER_PAGE}&page={p}"), "", "Inline comments");
+        for c in g.take("Inline comments", inline) {
+            comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("created_at")), path: Some(s(c.get("path"))), line: line_of(c.get("line")).or(line_of(c.get("original_line"))), verdict: String::new() });
+        }
+        let reviews = self.paged_get(|p| format!("{base}/repos/{path}/pulls/{n}/reviews?per_page={PER_PAGE}&page={p}"), "", "Reviews");
+        for c in g.take("Reviews", reviews) {
+            comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("submitted_at")), verdict: s(c.get("state")), ..Default::default() });
+        }
+        Ok(PrDetails { head_sha, base_sha, files, checks, comments, ..Default::default() })
+    }
+
+    fn gitea_details(&self, n: u64, g: &mut Gather) -> Result<PrDetails> {
+        let (base, path) = (self.api_base(), self.repo.path.clone());
+        let pr = self.get(&format!("/repos/{path}/pulls/{n}"))?;
+        let (head_sha, base_sha) = (s(pr.pointer("/head/sha")), s(pr.pointer("/base/sha")));
+        let diff = g.take("The diff", self.get_text(&format!("{base}/repos/{path}/pulls/{n}.diff")));
+        let parts = split_diff(&diff);
+        let listed = self.paged_get(|p| format!("{base}/repos/{path}/pulls/{n}/files?limit={PER_PAGE}&page={p}"), "", "Files");
+        let files = g
+            .take("Files", listed)
+            .iter()
+            .map(|f| {
+                let path = s(f.get("filename"));
+                let patch = parts.iter().find(|(p, _)| *p == path).map(|x| x.1.clone()).unwrap_or_default();
+                PrFile { path, old_path: s(f.get("previous_filename")), status: s(f.get("status")), additions: num(f.get("additions")), deletions: num(f.get("deletions")), patch }
+            })
+            .collect();
+        let statuses = self.get(&format!("/repos/{path}/commits/{head_sha}/statuses")).and_then(|v| list_in(&v, "", "Checks"));
+        let checks = g.take("Checks", statuses).iter().map(|c| PrCheck { name: s(c.get("context")), state: state_of(&s(c.get("status"))), detail: s(c.get("description")), url: s(c.get("target_url")) }).collect();
+        let mut comments = Vec::new();
+        let said = self.paged_get(|p| format!("{base}/repos/{path}/issues/{n}/comments?limit={PER_PAGE}&page={p}"), "", "Comments");
+        for c in g.take("Comments", said) {
+            comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("created_at")), ..Default::default() });
+        }
+        let reviews = self.paged_get(|p| format!("{base}/repos/{path}/pulls/{n}/reviews?limit={PER_PAGE}&page={p}"), "", "Reviews");
+        for r in g.take("Reviews", reviews) {
+            comments.push(PrComment { author: s(r.pointer("/user/login")), body: s(r.get("body")), when: ts(r.get("submitted_at")), verdict: s(r.get("state")), ..Default::default() });
+            let id = r.get("id").and_then(Value::as_u64).unwrap_or(0);
+            if r.get("comments_count").and_then(Value::as_u64).unwrap_or(0) > 0 {
+                let inner = self.get(&format!("/repos/{path}/pulls/{n}/reviews/{id}/comments")).and_then(|v| list_in(&v, "", "Inline comments"));
+                for c in g.take("Inline comments", inner) {
+                    comments.push(PrComment { author: s(c.pointer("/user/login")), body: s(c.get("body")), when: ts(c.get("created_at")), path: Some(s(c.get("path"))), line: line_of(c.get("position")), verdict: String::new() });
+                }
+            }
+        }
+        Ok(PrDetails { head_sha, base_sha, files, checks, comments, ..Default::default() })
+    }
+
+    fn gitlab_details(&self, n: u64, g: &mut Gather) -> Result<PrDetails> {
+        let (base, id) = (self.api_base(), url_encode(&self.repo.path));
+        let mr = self.get(&format!("/projects/{id}/merge_requests/{n}/changes"))?;
+        let files = list_in(&mr, "/changes", "Files");
+        let files = g
+            .take("Files", files)
+            .iter()
+            .map(|f| {
+                let status = if f.get("new_file").and_then(Value::as_bool) == Some(true) {
+                    "added"
+                } else if f.get("deleted_file").and_then(Value::as_bool) == Some(true) {
+                    "removed"
+                } else if f.get("renamed_file").and_then(Value::as_bool) == Some(true) {
+                    "renamed"
+                } else {
+                    "modified"
+                };
+                let patch = s(f.get("diff"));
+                let lines = patch_lines(&patch);
+                PrFile { path: s(f.get("new_path")), old_path: s(f.get("old_path")), status: status.to_string(), additions: lines.iter().filter(|l| l.kind == PatchLineKind::Added).count() as u32, deletions: lines.iter().filter(|l| l.kind == PatchLineKind::Removed).count() as u32, patch }
+            })
+            .collect();
+        let mut checks = Vec::new();
+        let pipelines = self.get(&format!("/projects/{id}/merge_requests/{n}/pipelines")).and_then(|v| list_in(&v, "", "Pipelines"));
+        // Newest first, and only that one says what's true now.
+        if let Some(latest) = g.take("Pipelines", pipelines).first() {
+            let pid = latest.get("id").and_then(Value::as_u64).unwrap_or(0);
+            let jobs = self.get(&format!("/projects/{id}/pipelines/{pid}/jobs?per_page=100")).and_then(|v| list_in(&v, "", "Jobs"));
+            for j in g.take("Jobs", jobs) {
+                let word = s(j.get("status"));
+                checks.push(PrCheck { name: s(j.get("name")), state: state_of(&word), detail: word, url: s(j.get("web_url")) });
+            }
+        }
+        let notes = self.paged_get(|p| format!("{base}/projects/{id}/merge_requests/{n}/notes?per_page={PER_PAGE}&page={p}"), "", "Comments");
+        let comments = g
+            .take("Comments", notes)
+            .iter()
+            .filter(|c| c.get("system").and_then(Value::as_bool) != Some(true))
+            .map(|c| PrComment { author: s(c.pointer("/author/username")), body: s(c.get("body")), when: ts(c.get("created_at")), path: c.pointer("/position/new_path").and_then(Value::as_str).map(String::from), line: line_of(c.pointer("/position/new_line")), verdict: String::new() })
+            .collect();
+        Ok(PrDetails { head_sha: s(mr.pointer("/diff_refs/head_sha")), base_sha: s(mr.pointer("/diff_refs/base_sha")), start_sha: s(mr.pointer("/diff_refs/start_sha")), files, checks, comments, problems: Vec::new() })
+    }
+
+    fn bitbucket_details(&self, n: u64, g: &mut Gather) -> Result<PrDetails> {
+        let (base, path) = (self.api_base(), self.repo.path.clone());
+        let pr = self.get(&format!("/repositories/{path}/pullrequests/{n}"))?;
+        let diff = g.take("The diff", self.get_text(&format!("{base}/repositories/{path}/pullrequests/{n}/diff")));
+        let parts = split_diff(&diff);
+        let page_of = |what: &'static str, tail: String| {
+            paged(|page| {
+                let v = self.get(&format!("/repositories/{path}/pullrequests/{n}/{tail}?pagelen={PER_PAGE}&page={page}"))?;
+                let more = v.get("next").is_some_and(|x| !x.is_null());
+                Ok((list_in(&v, "/values", what)?, more))
+            })
+        };
+        let stat = page_of("Files", "diffstat".to_string());
+        let files = g
+            .take("Files", stat)
+            .iter()
+            .map(|f| {
+                let path = s(f.pointer("/new/path")).trim().to_string();
+                let path = if path.is_empty() { s(f.pointer("/old/path")) } else { path };
+                let patch = parts.iter().find(|(p, _)| *p == path).map(|x| x.1.clone()).unwrap_or_default();
+                PrFile { path, old_path: s(f.pointer("/old/path")), status: s(f.get("status")), additions: num(f.get("lines_added")), deletions: num(f.get("lines_removed")), patch }
+            })
+            .collect();
+        let statuses = page_of("Checks", "statuses".to_string());
+        let checks = g.take("Checks", statuses).iter().map(|c| PrCheck { name: s(c.get("name")), state: state_of(&s(c.get("state"))), detail: s(c.get("description")), url: s(c.get("url")) }).collect();
+        let said = page_of("Comments", "comments".to_string());
+        let comments = g
+            .take("Comments", said)
+            .iter()
+            .map(|c| PrComment { author: s(c.pointer("/user/display_name")), body: s(c.pointer("/content/raw")), when: ts(c.get("created_on")), path: c.pointer("/inline/path").and_then(Value::as_str).map(String::from), line: line_of(c.pointer("/inline/to")), verdict: String::new() })
+            .collect();
+        Ok(PrDetails { head_sha: s(pr.pointer("/source/commit/hash")), base_sha: s(pr.pointer("/destination/commit/hash")), files, checks, comments, ..Default::default() })
+    }
+
+    fn server_details(&self, n: u64, g: &mut Gather) -> Result<PrDetails> {
+        let (b, p, r) = self.server_api();
+        let at = format!("{b}/projects/{p}/repos/{r}/pull-requests/{n}");
+        let pr = self.request(Method::Get, &at)?;
+        let head_sha = s(pr.pointer("/fromRef/latestCommit"));
+        let diff = g.take("The diff", self.get_text(&format!("{at}.diff")));
+        let parts = split_diff(&diff);
+        let changes = self.request(Method::Get, &format!("{at}/changes?limit=1000")).and_then(|v| list_in(&v, "/values", "Files"));
+        let files = g
+            .take("Files", changes)
+            .iter()
+            .map(|f| {
+                let path = s(f.pointer("/path/toString"));
+                let patch = parts.iter().find(|(x, _)| *x == path).map(|x| x.1.clone()).unwrap_or_default();
+                let lines = patch_lines(&patch);
+                PrFile { path, old_path: s(f.pointer("/srcPath/toString")), status: s(f.get("type")).to_lowercase(), additions: lines.iter().filter(|l| l.kind == PatchLineKind::Added).count() as u32, deletions: lines.iter().filter(|l| l.kind == PatchLineKind::Removed).count() as u32, patch }
+            })
+            .collect();
+        let root = self.repo.root();
+        let builds = self.request(Method::Get, &format!("{root}/rest/build-status/1.0/commits/{head_sha}")).and_then(|v| list_in(&v, "/values", "Checks"));
+        let checks = g.take("Checks", builds).iter().map(|c| PrCheck { name: s(c.get("name")), state: state_of(&s(c.get("state"))), detail: s(c.get("description")), url: s(c.get("url")) }).collect();
+        let acts = self.request(Method::Get, &format!("{at}/activities?limit=200")).and_then(|v| list_in(&v, "/values", "Comments"));
+        let comments = g
+            .take("Comments", acts)
+            .iter()
+            .filter_map(|a| match s(a.get("action")).as_str() {
+                "COMMENTED" => Some(PrComment { author: s(a.pointer("/comment/author/name")), body: s(a.pointer("/comment/text")), when: a.pointer("/comment/createdDate").and_then(Value::as_i64).unwrap_or(0) / 1000, path: a.pointer("/commentAnchor/path").and_then(Value::as_str).map(String::from), line: line_of(a.pointer("/commentAnchor/line")), verdict: String::new() }),
+                verdict @ ("APPROVED" | "REVIEWED") => Some(PrComment { author: s(a.pointer("/user/name")), when: a.get("createdDate").and_then(Value::as_i64).unwrap_or(0) / 1000, verdict: verdict.to_string(), ..Default::default() }),
+                _ => None,
+            })
+            .collect();
+        Ok(PrDetails { head_sha, base_sha: s(pr.pointer("/toRef/latestCommit")), files, checks, comments, ..Default::default() })
+    }
+
+    fn azure_details(&self, n: u64, g: &mut Gather) -> Result<PrDetails> {
+        let (org, proj, repo) = self.azure_parts()?;
+        let at = format!("{}/{org}/{proj}/_apis/git/repositories/{repo}/pullrequests/{n}", self.azure_root());
+        const V: &str = "api-version=7.0";
+        let pr = self.request(Method::Get, &format!("{at}?{V}"))?;
+        let mut files = Vec::new();
+        let iterations = self.request(Method::Get, &format!("{at}/iterations?{V}")).and_then(|v| list_in(&v, "/value", "Files"));
+        // The latest is all that matters. Azure's lists hold names only, so no diff comes with them.
+        if let Some(last) = g.take("Files", iterations).last().and_then(|i| i.get("id")).and_then(Value::as_u64) {
+            let changes = self.request(Method::Get, &format!("{at}/iterations/{last}/changes?{V}")).and_then(|v| list_in(&v, "/changeEntries", "Files"));
+            files = g.take("Files", changes).iter().map(|f| PrFile { path: s(f.pointer("/item/path")).trim_start_matches('/').to_string(), old_path: s(f.get("originalPath")).trim_start_matches('/').to_string(), status: s(f.get("changeType")), ..Default::default() }).collect();
+        }
+        let statuses = self.request(Method::Get, &format!("{at}/statuses?{V}")).and_then(|v| list_in(&v, "/value", "Checks"));
+        let checks = g.take("Checks", statuses).iter().map(|c| PrCheck { name: s(c.pointer("/context/name")), state: state_of(&s(c.get("state"))), detail: s(c.get("description")), url: s(c.get("targetUrl")) }).collect();
+        let threads = self.request(Method::Get, &format!("{at}/threads?{V}")).and_then(|v| list_in(&v, "/value", "Comments"));
+        let mut comments = Vec::new();
+        for t in g.take("Comments", threads) {
+            for c in t.get("comments").and_then(Value::as_array).into_iter().flatten() {
+                // The system's own notes about pushes and votes.
+                if s(c.get("commentType")).eq_ignore_ascii_case("system") {
+                    continue;
+                }
+                comments.push(PrComment { author: s(c.pointer("/author/displayName")), body: s(c.get("content")), when: ts(c.get("publishedDate")), path: t.pointer("/threadContext/filePath").and_then(Value::as_str).map(|x| x.trim_start_matches('/').to_string()), line: line_of(t.pointer("/threadContext/rightFileStart/line")), verdict: String::new() });
+            }
+        }
+        Ok(PrDetails { head_sha: s(pr.pointer("/lastMergeSourceCommit/commitId")), base_sha: s(pr.pointer("/lastMergeTargetCommit/commitId")), files, checks, comments, ..Default::default() })
+    }
+
+    /// Merge by a chosen method, or `None` for whatever the host does by default.
+    pub fn merge_pr_as(&self, n: u64, style: Option<MergeStyle>) -> Result<()> {
+        self.needs_api()?;
+        match self.repo.kind {
+            ForgeKind::BitbucketServer => {
+                let (b, p, r) = self.server_api();
+                let pr = self.request(Method::Get, &format!("{b}/projects/{p}/repos/{r}/pull-requests/{n}"))?;
+                let version = pr.get("version").and_then(Value::as_u64).unwrap_or(0);
+                self.request(Method::Post(json!({"version":version})), &format!("{b}/projects/{p}/repos/{r}/pull-requests/{n}/merge")).map(|_| ())
+            }
+            ForgeKind::Gerrit | ForgeKind::GoogleSource => unreachable!("rejected by needs_api"),
+            ForgeKind::GitHub => {
+                let body = match style {
+                    None => json!({}),
+                    Some(MergeStyle::Merge) => json!({"merge_method":"merge"}),
+                    Some(MergeStyle::Squash) => json!({"merge_method":"squash"}),
+                    Some(MergeStyle::Rebase) => json!({"merge_method":"rebase"}),
+                };
+                self.request(Method::Put(body), &format!("{}/repos/{}/pulls/{n}/merge", self.api_base(), self.repo.path)).map(|_| ())
+            }
+            ForgeKind::Gitea => {
+                let how = match style {
+                    None | Some(MergeStyle::Merge) => "merge",
+                    Some(MergeStyle::Squash) => "squash",
+                    Some(MergeStyle::Rebase) => "rebase",
+                };
+                self.request(Method::Post(json!({"Do":how})), &format!("{}/repos/{}/pulls/{n}/merge", self.api_base(), self.repo.path)).map(|_| ())
+            }
+            ForgeKind::GitLab => {
+                let body = if style == Some(MergeStyle::Squash) { json!({"squash":true}) } else { json!({}) };
+                self.request(Method::Put(body), &format!("{}/projects/{}/merge_requests/{n}/merge", self.api_base(), url_encode(&self.repo.path))).map(|_| ())
+            }
+            ForgeKind::Bitbucket => {
+                let body = match style {
+                    None => json!({}),
+                    Some(MergeStyle::Squash) => json!({"merge_strategy":"squash"}),
+                    Some(_) => json!({"merge_strategy":"merge_commit"}),
+                };
+                self.request(Method::Post(body), &format!("{}/repositories/{}/pullrequests/{n}/merge", self.api_base(), self.repo.path)).map(|_| ())
+            }
+            ForgeKind::AzureDevOps => {
+                let (org, proj, repo) = self.azure_parts()?;
+                let base = format!("{}/{org}/{proj}/_apis/git/repositories/{repo}/pullrequests/{n}?api-version=7.0", self.azure_root());
+                let pr = self.request(Method::Get, &base)?;
+                let last = pr.get("lastMergeSourceCommit").cloned().unwrap_or(Value::Null);
+                let mut body = json!({"status":"completed","lastMergeSourceCommit":last});
+                if let Some(st) = style {
+                    let name = match st {
+                        MergeStyle::Merge => "noFastForward",
+                        MergeStyle::Squash => "squash",
+                        MergeStyle::Rebase => "rebase",
+                    };
+                    body["completionOptions"] = json!({"mergeStrategy":name});
+                }
+                self.request(Method::Patch(body), &base).map(|_| ())
+            }
+        }
+    }
+
+    /// Your vote on Azure DevOps: 10 approves, -10 is "rejected".
+    fn azure_vote(&self, n: u64, vote: i32) -> Result<()> {
+        let (org, proj, repo) = self.azure_parts()?;
+        let who = self.request(Method::Get, &format!("{}/{org}/_apis/connectionData", self.azure_root()))?;
+        let id = s(who.pointer("/authenticatedUser/id"));
+        if id.is_empty() {
+            return Err(Error::Other("The host didn't say who you are, so no vote was sent.".into()));
+        }
+        self.request(Method::Put(json!({"vote":vote})), &format!("{}/{org}/{proj}/_apis/git/repositories/{repo}/pullrequests/{n}/reviewers/{id}?api-version=7.0", self.azure_root())).map(|_| ())
+    }
+
+    /// Post a verdict, with what you had to say about it.
+    pub fn review_pr(&self, n: u64, verdict: Verdict, body: &str) -> Result<()> {
+        self.needs_api()?;
+        if verdict == Verdict::RequestChanges && !self.repo.kind.can_request_changes() {
+            return Err(Error::Other(format!("{} has no way to request changes by name. Leave a comment instead.", self.repo.kind.label())));
+        }
+        if verdict == Verdict::Comment {
+            return self.comment_pr(n, body);
+        }
+        match self.repo.kind {
+            ForgeKind::GitHub | ForgeKind::Gitea => {
+                let event = match (self.repo.kind, verdict) {
+                    (_, Verdict::RequestChanges) => "REQUEST_CHANGES",
+                    (ForgeKind::GitHub, _) => "APPROVE",
+                    _ => "APPROVED",
+                };
+                return self.request(Method::Post(json!({"event":event,"body":body})), &format!("{}/repos/{}/pulls/{n}/reviews", self.api_base(), self.repo.path)).map(|_| ());
+            }
+            ForgeKind::BitbucketServer => {
+                let (b, p, r) = self.server_api();
+                let status = if verdict == Verdict::Approve { "APPROVED" } else { "NEEDS_WORK" };
+                if self.user.is_empty() {
+                    return Err(Error::Other("Give a username with Connect: this host needs it to record your verdict.".into()));
+                }
+                self.request(Method::Put(json!({"status":status})), &format!("{b}/projects/{p}/repos/{r}/pull-requests/{n}/participants/{}", url_encode(&self.user)))?;
+            }
+            ForgeKind::GitLab => {
+                self.request(Method::Post(json!({})), &format!("{}/projects/{}/merge_requests/{n}/approve", self.api_base(), url_encode(&self.repo.path)))?;
+            }
+            ForgeKind::Bitbucket => {
+                let what = if verdict == Verdict::Approve { "approve" } else { "request-changes" };
+                self.request(Method::Post(json!({})), &format!("{}/repositories/{}/pullrequests/{n}/{what}", self.api_base(), self.repo.path))?;
+            }
+            ForgeKind::AzureDevOps => self.azure_vote(n, if verdict == Verdict::Approve { 10 } else { -10 })?,
+            ForgeKind::Gerrit | ForgeKind::GoogleSource => unreachable!("rejected by needs_api"),
+        }
+        // Those hosts take the verdict and any words separately.
+        if body.trim().is_empty() { Ok(()) } else { self.comment_pr(n, body) }
+    }
+
+    /// A comment on one line of the new side of a file.
+    pub fn comment_line(&self, n: u64, d: &PrDetails, file: &PrFile, line: u32, body: &str) -> Result<()> {
+        self.needs_api()?;
+        match self.repo.kind {
+            ForgeKind::GitHub => self.request(Method::Post(json!({"body":body,"commit_id":d.head_sha,"path":file.path,"line":line,"side":"RIGHT"})), &format!("{}/repos/{}/pulls/{n}/comments", self.api_base(), self.repo.path)).map(|_| ()),
+            ForgeKind::Gitea => self.request(Method::Post(json!({"event":"COMMENT","body":"","commit_id":d.head_sha,"comments":[{"path":file.path,"body":body,"new_position":line}]})), &format!("{}/repos/{}/pulls/{n}/reviews", self.api_base(), self.repo.path)).map(|_| ()),
+            ForgeKind::GitLab => {
+                let old = if file.old_path.is_empty() { &file.path } else { &file.old_path };
+                let position = json!({"position_type":"text","base_sha":d.base_sha,"start_sha":d.start_sha,"head_sha":d.head_sha,"old_path":old,"new_path":file.path,"new_line":line});
+                self.request(Method::Post(json!({"body":body,"position":position})), &format!("{}/projects/{}/merge_requests/{n}/discussions", self.api_base(), url_encode(&self.repo.path))).map(|_| ())
+            }
+            ForgeKind::Bitbucket => self.request(Method::Post(json!({"content":{"raw":body},"inline":{"path":file.path,"to":line}})), &format!("{}/repositories/{}/pullrequests/{n}/comments", self.api_base(), self.repo.path)).map(|_| ()),
+            ForgeKind::BitbucketServer => {
+                let (b, p, r) = self.server_api();
+                self.request(Method::Post(json!({"text":body,"anchor":{"line":line,"lineType":"ADDED","fileType":"TO","path":file.path}})), &format!("{b}/projects/{p}/repos/{r}/pull-requests/{n}/comments")).map(|_| ())
+            }
+            ForgeKind::AzureDevOps => {
+                let (org, proj, repo) = self.azure_parts()?;
+                let context = json!({"filePath":format!("/{}", file.path),"rightFileStart":{"line":line,"offset":1},"rightFileEnd":{"line":line,"offset":1}});
+                self.request(Method::Post(json!({"comments":[{"content":body,"commentType":1}],"status":1,"threadContext":context})), &format!("{}/{org}/{proj}/_apis/git/repositories/{repo}/pullrequests/{n}/threads?api-version=7.0", self.azure_root())).map(|_| ())
+            }
+            ForgeKind::Gerrit | ForgeKind::GoogleSource => unreachable!("rejected by needs_api"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hunks_number_each_side_on_their_own() {
+        let lines = patch_lines("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -3,2 +10,3 @@ fn x()\n same\n-old\n+new\n+newer\n\\ No newline at end of file\n@@ -40 +50 @@\n-a\n+b\n");
+        let got: Vec<(PatchLineKind, Option<u32>, Option<u32>)> = lines.iter().map(|l| (l.kind, l.old, l.new)).collect();
+        use PatchLineKind::*;
+        assert_eq!(got, vec![(Hunk, None, None), (Context, Some(3), Some(10)), (Removed, Some(4), None), (Added, None, Some(11)), (Added, None, Some(12)), (Hunk, None, None), (Removed, Some(40), None), (Added, None, Some(50))]);
+        assert_eq!(lines[3].text, "new");
+    }
+
+    #[test]
+    fn a_whole_diff_splits_by_file_including_a_deleted_one_and_a_bare_rename() {
+        let d = "diff --git a/x y.txt b/x y.txt\n--- a/x y.txt\n+++ b/x y.txt\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/gone b/gone\ndeleted file mode 100644\n--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\ndiff --git a/old b/new\nsimilarity index 100%\nrename from old\nrename to new\n";
+        let parts = split_diff(d);
+        let names: Vec<&str> = parts.iter().map(|x| x.0.as_str()).collect();
+        assert_eq!(names, vec!["x y.txt", "gone", "new"]);
+        assert!(parts[0].1.contains("+b"));
+        assert_eq!(patch_lines(&parts[1].1).len(), 2);
+    }
+
+    #[test]
+    fn every_word_a_host_uses_lands_somewhere_sensible() {
+        for (w, st) in [("SUCCESS", CheckState::Passed), ("failed", CheckState::Failed), ("in_progress", CheckState::Running), ("skipped", CheckState::Other), ("", CheckState::Other)] {
+            assert_eq!(state_of(w), st, "{w}");
+        }
+    }
+}

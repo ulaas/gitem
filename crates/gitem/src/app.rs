@@ -429,6 +429,11 @@ impl RepoTab {
         self.queue.push_back(Queued { op, open_after: None, batch: 0 });
     }
 
+    /// What closing an open tab would lose. For tests.
+    pub fn open_tab_unsaved(&self, key: &str) -> Option<String> {
+        self.dock.iter_all_tabs().find(|(_, t)| t.key() == key).and_then(|(_, t)| t.unsaved())
+    }
+
     /// Brings the next scheduled fetch forward to now, for tests: the shortest wait is a minute.
     pub fn make_fetch_due(&mut self) {
         self.last_auto_fetch = Instant::now().checked_sub(Duration::from_secs(24 * 3600)).unwrap_or_else(Instant::now);
@@ -830,6 +835,14 @@ pub struct GitemApp {
     repo_scan: Option<RepoScan>,
     /// The CA file setting last handed to the HTTP clients.
     ca_file_applied: String,
+    /// A look for a newer release, by schedule or from About.
+    update_task: crate::task::Task<Option<gitem_core::update::Release>>,
+    /// From About, so its answer is shown even when that's "no".
+    update_asked: bool,
+    /// Whether this run has looked at the schedule. Once is enough.
+    update_scheduled: bool,
+    update_found: Option<gitem_core::update::Release>,
+    update_answer: Option<String>,
     pub shot: Option<Shot>,
     pub shot_tabs: Vec<Tab>,
     pub shot_inspect: Option<String>,
@@ -956,6 +969,11 @@ impl GitemApp {
             settings_dirty: false,
             repo_scan: None,
             ca_file_applied: String::new(),
+            update_task: Default::default(),
+            update_asked: false,
+            update_scheduled: false,
+            update_found: None,
+            update_answer: None,
             shot: None,
             shot_tabs: Vec::new(),
             shot_inspect: None,
@@ -989,6 +1007,23 @@ impl GitemApp {
     }
 
     /// The errors waiting to be seen, oldest first.
+    /// Sets a field of the open form as typing or choosing would. For tests.
+    pub fn form_set_for_test(&mut self, key: &str, value: &str) {
+        if let Some(f) = &mut self.form {
+            f.set_for_test(key, value);
+        }
+    }
+
+    /// Opens About, as its button would. For tests.
+    pub fn apply_about_for_test(&mut self) {
+        self.about_open = true;
+    }
+
+    /// Dismisses what's showing, as its window would. For tests.
+    pub fn errors_clear_for_test(&mut self) {
+        self.errors.clear();
+    }
+
     pub fn errors_showing(&self) -> &[String] {
         &self.errors
     }
@@ -1870,6 +1905,24 @@ impl GitemApp {
             if !env!("GITEM_BUILD_DIRTY").is_empty() {
                 ui.add_space(6.0);
                 ui.label(RichText::new("Built with uncommitted changes, so this commit doesn't fully describe it.").small().color(p.warn));
+            }
+            ui.add_space(8.0);
+            if let Some(r) = self.update_found.clone() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(p.good, format!("Version {} is available.", r.version));
+                    if ui.button("Open its page").on_hover_text("Nothing is downloaded or run from here.").clicked() {
+                        out.push(Action::OpenUrl(r.page.clone()));
+                    }
+                });
+            } else if let Some(answer) = &self.update_answer {
+                ui.label(RichText::new(answer).small().color(p.dim));
+            }
+            let url = self.settings.update_url.trim().to_string();
+            let reason = if url.is_empty() { "Give an address to ask in Settings > Workflow." } else { "Already asking." };
+            if ui.add_enabled(!url.is_empty() && !self.update_task.busy(), egui::Button::new("Check for updates")).on_disabled_hover_text(reason).clicked() {
+                self.update_asked = true;
+                self.update_answer = None;
+                self.update_task.spawn(ctx, move || gitem_core::update::check(&url, env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string()));
             }
             ui.add_space(10.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -2806,11 +2859,47 @@ impl GitemApp {
         }
     }
 
+    /// A scheduled look, if the user turned that on, and what any look found. A screenshot and a
+    /// helper window never get here with the setting doing anything: neither saves, or asks.
+    fn look_for_updates(&mut self, ctx: &egui::Context) {
+        if !self.update_scheduled && self.shot.is_none() {
+            self.update_scheduled = true;
+            let now = gitem_core::util::now_ts();
+            if gitem_core::update::due(self.settings.check_updates, &self.settings.update_url, self.settings.last_update_check, now) {
+                self.settings.last_update_check = now;
+                self.settings_dirty = true;
+                let url = self.settings.update_url.trim().to_string();
+                self.update_task.spawn(ctx, move || gitem_core::update::check(&url, env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string()));
+            }
+        }
+        if !self.update_task.poll() {
+            return;
+        }
+        let asked = std::mem::take(&mut self.update_asked);
+        if let Some(found) = self.update_task.value.take() {
+            match found {
+                Some(r) => {
+                    self.toasts.push((format!("gitem {} is available. About has a link to it.", r.version), Instant::now()));
+                    self.update_found = Some(r);
+                }
+                None if asked => self.update_answer = Some("This is the newest release.".to_string()),
+                None => {}
+            }
+        }
+        // Being offline is no reason to interrupt anyone who didn't ask.
+        if let Some(e) = self.update_task.error.take()
+            && asked
+        {
+            self.update_answer = Some(format!("Couldn't find out: {e}"));
+        }
+    }
+
     /// The whole UI for one frame. Separated from `eframe::App` for testing.
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.apply_ca_file(&ctx);
+        self.look_for_updates(&ctx);
         self.handle_shot(ui);
         self.check_window_close(&ctx);
         let mut out: Vec<Action> = Vec::new();

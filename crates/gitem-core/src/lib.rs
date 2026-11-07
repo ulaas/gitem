@@ -28,6 +28,7 @@ pub mod settings;
 pub mod treemap;
 pub mod trust;
 pub mod undo;
+pub mod update;
 pub mod util;
 
 pub use model::*;

@@ -561,6 +561,12 @@ impl SettingsView {
                 field(ui, &mut s.start_work_format, "${id}-${title}", 240.0);
             });
         });
+        group(ui, "Updates", p, |g| {
+            g.switch(&mut s.check_updates, "Check for updates", "Asks once a day whether there's a newer release, and tells you. Nothing is downloaded. About has a button for asking now.");
+            g.row("Where to ask", "A releases/latest address in GitHub's format.", |ui| {
+                field(ui, &mut s.update_url, "https://…/releases/latest", 320.0);
+            });
+        });
         group(ui, "Safety and speed", p, |g| {
             g.switch(&mut s.confirm_destructive, "Ask before destructive commands", "Such as deleting a branch or discarding changes.");
             g.switch(&mut s.auto_maintenance, "Run maintenance when opening a repository", "Git's safe upkeep, in the background.");

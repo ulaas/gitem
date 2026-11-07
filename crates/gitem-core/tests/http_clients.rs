@@ -733,7 +733,8 @@ fn comments_and_approvals_reach_each_hosts_address() {
     let (method, path, body) = last(&m);
     assert_eq!((method.as_str(), body["comments"][0]["content"].as_str()), ("POST", Some("hi")));
     assert!(path.starts_with("/o/p/_apis/git/repositories/r/pullrequests/4/threads"), "{path}");
-    assert!(c.approve_pr(4).unwrap_err().to_string().contains("Open on Remote"));
+    // Approving there is a vote, which goes under your id. This mock doesn't know who you are.
+    assert!(c.approve_pr(4).unwrap_err().to_string().contains("didn't say who you are"));
 }
 
 // ---- AI replies (SN-10, SN-26), against the same mock
@@ -842,4 +843,221 @@ fn a_certificate_nobody_vouches_for_is_refused_before_anything_is_sent() {
     let e = ai::complete(&ai_cfg(AiProvider::Anthropic, &base), Some("FAKE_KEY"), "s", "u").unwrap_err().to_string();
     assert!(e.to_lowercase().contains("certificate"), "{e}");
     assert_eq!(*requests.lock().unwrap(), 0, "a request reached the server");
+}
+
+// ---- one pull request in full. Every reply here is hand-written from memory of each host's
+// documentation, so this shows what gitem sends and reads, not what a host really does.
+
+#[test]
+fn github_pull_request_details_and_review() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/repos/o/r/pulls/5") => (200, json!({"head":{"sha":"h1"},"base":{"sha":"b1"}}).to_string()),
+        ("GET", "/repos/o/r/pulls/5/files") => (200, json!([{"filename":"a.rs","status":"modified","additions":2,"deletions":1,"patch":"@@ -1 +1,2 @@\n-a\n+b\n+c"},{"filename":"new.rs","previous_filename":"old.rs","status":"renamed"}]).to_string()),
+        ("GET", "/repos/o/r/commits/h1/check-runs") => (200, json!({"check_runs":[{"name":"build","status":"completed","conclusion":"failure","html_url":"http://ci/1"},{"name":"lint","status":"in_progress","conclusion":null,"html_url":"http://ci/2"}]}).to_string()),
+        ("GET", "/repos/o/r/commits/h1/status") => (200, json!({"statuses":[{"context":"legacy","state":"success","description":"fine","target_url":"http://ci/3"}]}).to_string()),
+        ("GET", "/repos/o/r/issues/5/comments") => (200, json!([{"user":{"login":"bea"},"body":"Looks fine","created_at":"2026-01-02T00:00:00Z"}]).to_string()),
+        ("GET", "/repos/o/r/pulls/5/comments") => (200, json!([{"user":{"login":"cy"},"body":"Why?","path":"a.rs","line":2,"created_at":"2026-01-03T00:00:00Z"}]).to_string()),
+        ("GET", "/repos/o/r/pulls/5/reviews") => (200, json!([{"user":{"login":"bea"},"state":"CHANGES_REQUESTED","body":"Fix it","submitted_at":"2026-01-01T00:00:00Z"}]).to_string()),
+        ("POST", "/repos/o/r/pulls/5/reviews") | ("POST", "/repos/o/r/pulls/5/comments") | ("POST", "/repos/o/r/issues/5/comments") => (201, "{}".to_string()),
+        ("PUT", "/repos/o/r/pulls/5/merge") => (200, "{}".to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::GitHub, "o/r", &m.base, "");
+    let d = c.pr_details(5).unwrap();
+    assert!(d.problems.is_empty(), "{:?}", d.problems);
+    assert_eq!((d.head_sha.as_str(), d.base_sha.as_str()), ("h1", "b1"));
+    assert_eq!(d.files[0].additions, 2);
+    assert_eq!(d.files[1].old_path, "old.rs");
+    use gitem_core::forge::details::{CheckState, MergeStyle, Verdict};
+    let states: Vec<(&str, CheckState)> = d.checks.iter().map(|x| (x.name.as_str(), x.state)).collect();
+    assert_eq!(states, vec![("build", CheckState::Failed), ("lint", CheckState::Running), ("legacy", CheckState::Passed)]);
+    let order: Vec<&str> = d.comments.iter().map(|x| x.author.as_str()).collect();
+    assert_eq!(order, vec!["bea", "bea", "cy"], "oldest first");
+    assert_eq!(d.comments[0].verdict, "CHANGES_REQUESTED");
+    assert_eq!(d.comments[2].path.as_deref(), Some("a.rs"));
+    assert_eq!(d.comments[2].line, Some(2));
+
+    c.review_pr(5, Verdict::RequestChanges, "No").unwrap();
+    c.review_pr(5, Verdict::Approve, "Fine").unwrap();
+    c.review_pr(5, Verdict::Comment, "Hm").unwrap();
+    c.comment_line(5, &d, &d.files[0], 2, "Here").unwrap();
+    c.merge_pr_as(5, Some(MergeStyle::Squash)).unwrap();
+    let log = m.log.lock().unwrap();
+    let posts: Vec<Value> = log.iter().filter(|r| r.method != "GET").map(Req::json).collect();
+    assert_eq!(posts[0], json!({"event":"REQUEST_CHANGES","body":"No"}));
+    assert_eq!(posts[1], json!({"event":"APPROVE","body":"Fine"}));
+    assert_eq!(posts[2], json!({"body":"Hm"}));
+    assert_eq!(posts[3], json!({"body":"Here","commit_id":"h1","path":"a.rs","line":2,"side":"RIGHT"}));
+    assert_eq!(posts[4], json!({"merge_method":"squash"}));
+}
+
+#[test]
+fn details_keep_what_could_be_read_when_part_of_it_fails() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/repos/o/r/pulls/5") => (200, json!({"head":{"sha":"h1"},"base":{"sha":"b1"}}).to_string()),
+        ("GET", "/repos/o/r/pulls/5/files") => (200, json!([{"filename":"a.rs","status":"modified"}]).to_string()),
+        (_, p) if p.contains("check-runs") => (403, json!({"message":"token can't read checks"}).to_string()),
+        _ => (200, "[]".to_string()),
+    });
+    let c = client(ForgeKind::GitHub, "o/r", &m.base, "");
+    let d = c.pr_details(5).unwrap();
+    assert_eq!(d.files.len(), 1);
+    assert!(d.problems.iter().any(|p| p.contains("Checks") && p.contains("can't read checks")), "{:?}", d.problems);
+}
+
+#[test]
+fn a_pull_request_that_cannot_be_read_at_all_is_an_error() {
+    let m = mock(|_| (404, json!({"message":"gone"}).to_string()));
+    let c = client(ForgeKind::GitHub, "o/r", &m.base, "");
+    assert!(c.pr_details(5).unwrap_err().to_string().contains("gone"));
+}
+
+#[test]
+fn gitea_pull_request_details_and_review() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/repos/o/r/pulls/3") => (200, json!({"head":{"sha":"h"},"base":{"sha":"b"}}).to_string()),
+        ("GET", "/repos/o/r/pulls/3.diff") => (200, "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n".to_string()),
+        ("GET", "/repos/o/r/pulls/3/files") => (200, json!([{"filename":"a.txt","status":"changed","additions":1,"deletions":1}]).to_string()),
+        ("GET", "/repos/o/r/commits/h/statuses") => (200, json!([{"context":"ci","status":"pending","target_url":"http://ci"}]).to_string()),
+        ("GET", "/repos/o/r/issues/3/comments") => (200, json!([{"user":{"login":"bea"},"body":"Hi","created_at":"2026-01-02T00:00:00Z"}]).to_string()),
+        ("GET", "/repos/o/r/pulls/3/reviews") => (200, json!([{"id":9,"user":{"login":"cy"},"state":"APPROVED","body":"","comments_count":1,"submitted_at":"2026-01-03T00:00:00Z"}]).to_string()),
+        ("GET", "/repos/o/r/pulls/3/reviews/9/comments") => (200, json!([{"user":{"login":"cy"},"body":"Nit","path":"a.txt","position":1,"created_at":"2026-01-03T00:00:01Z"}]).to_string()),
+        ("POST", _) => (201, "{}".to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::Gitea, "o/r", &m.base, "");
+    let d = c.pr_details(3).unwrap();
+    assert!(d.problems.is_empty(), "{:?}", d.problems);
+    assert!(d.files[0].patch.contains("+b"));
+    assert_eq!(d.checks[0].name, "ci");
+    assert_eq!(d.comments.iter().map(|x| x.body.as_str()).collect::<Vec<_>>(), vec!["Hi", "", "Nit"]);
+    use gitem_core::forge::details::{MergeStyle, Verdict};
+    c.review_pr(3, Verdict::RequestChanges, "No").unwrap();
+    c.comment_line(3, &d, &d.files[0], 1, "Here").unwrap();
+    c.merge_pr_as(3, Some(MergeStyle::Rebase)).unwrap();
+    let log = m.log.lock().unwrap();
+    let posts: Vec<Value> = log.iter().filter(|r| r.method != "GET").map(Req::json).collect();
+    assert_eq!(posts[0], json!({"event":"REQUEST_CHANGES","body":"No"}));
+    assert_eq!(posts[1]["comments"][0], json!({"path":"a.txt","body":"Here","new_position":1}));
+    assert_eq!(posts[2], json!({"Do":"rebase"}));
+}
+
+#[test]
+fn gitlab_merge_request_details_and_review() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/projects/o%2Fr/merge_requests/4/changes") => (200, json!({"diff_refs":{"base_sha":"b","head_sha":"h","start_sha":"s"},"changes":[{"old_path":"a","new_path":"a","diff":"@@ -1 +1 @@\n-x\n+y\n"},{"old_path":"n","new_path":"n","new_file":true,"diff":""}]}).to_string()),
+        ("GET", "/projects/o%2Fr/merge_requests/4/pipelines") => (200, json!([{"id":77},{"id":76}]).to_string()),
+        ("GET", "/projects/o%2Fr/pipelines/77/jobs") => (200, json!([{"name":"test","status":"failed","web_url":"http://j"}]).to_string()),
+        ("GET", "/projects/o%2Fr/merge_requests/4/notes") => (200, json!([{"body":"pushed","system":true,"author":{"username":"bot"}},{"body":"Nit","author":{"username":"bea"},"created_at":"2026-01-01T00:00:00Z","position":{"new_path":"a","new_line":1}}]).to_string()),
+        ("POST", _) | ("PUT", _) => (201, "{}".to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::GitLab, "o/r", &m.base, "");
+    let d = c.pr_details(4).unwrap();
+    assert!(d.problems.is_empty(), "{:?}", d.problems);
+    assert_eq!((d.files[0].additions, d.files[0].deletions), (1, 1));
+    assert_eq!(d.files[1].status, "added");
+    assert_eq!(d.checks[0].name, "test");
+    assert_eq!(d.comments.len(), 1, "the host's own notes are left out");
+    use gitem_core::forge::details::{MergeStyle, Verdict};
+    assert!(c.review_pr(4, Verdict::RequestChanges, "No").unwrap_err().to_string().contains("no way to request changes"));
+    c.review_pr(4, Verdict::Approve, "Fine").unwrap();
+    c.comment_line(4, &d, &d.files[0], 1, "Here").unwrap();
+    c.merge_pr_as(4, Some(MergeStyle::Squash)).unwrap();
+    let log = m.log.lock().unwrap();
+    let posts: Vec<(&str, Value)> = log.iter().filter(|r| r.method != "GET").map(|r| (r.path.as_str(), r.json())).collect();
+    assert!(posts[0].0.ends_with("/approve"));
+    assert_eq!(posts[1].1, json!({"body":"Fine"}), "words go separately");
+    assert_eq!(posts[2].1["position"]["start_sha"], "s");
+    assert_eq!(posts[2].1["position"]["new_line"], 1);
+    assert_eq!(posts[3].1, json!({"squash":true}));
+}
+
+#[test]
+fn bitbucket_pull_request_details_and_review() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/repositories/o/r/pullrequests/2") => (200, json!({"source":{"commit":{"hash":"h"}},"destination":{"commit":{"hash":"b"}}}).to_string()),
+        ("GET", "/repositories/o/r/pullrequests/2/diff") => (200, "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\n".to_string()),
+        ("GET", "/repositories/o/r/pullrequests/2/diffstat") => (200, json!({"values":[{"status":"modified","lines_added":1,"lines_removed":1,"new":{"path":"a"},"old":{"path":"a"}}]}).to_string()),
+        ("GET", "/repositories/o/r/pullrequests/2/statuses") => (200, json!({"values":[{"name":"ci","state":"SUCCESSFUL","url":"http://ci"}]}).to_string()),
+        ("GET", "/repositories/o/r/pullrequests/2/comments") => (200, json!({"values":[{"user":{"display_name":"Bea"},"content":{"raw":"Nit"},"created_on":"2026-01-01T00:00:00Z","inline":{"path":"a","to":1}}]}).to_string()),
+        ("POST", _) => (200, "{}".to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::Bitbucket, "o/r", &m.base, "u");
+    let d = c.pr_details(2).unwrap();
+    assert!(d.problems.is_empty(), "{:?}", d.problems);
+    assert!(d.files[0].patch.contains("+y"));
+    assert_eq!(d.checks[0].state, gitem_core::forge::details::CheckState::Passed);
+    assert_eq!(d.comments[0].line, Some(1));
+    use gitem_core::forge::details::{MergeStyle, Verdict};
+    c.review_pr(2, Verdict::RequestChanges, "").unwrap();
+    c.comment_line(2, &d, &d.files[0], 1, "Here").unwrap();
+    c.merge_pr_as(2, Some(MergeStyle::Squash)).unwrap();
+    let log = m.log.lock().unwrap();
+    let posts: Vec<(&str, Value)> = log.iter().filter(|r| r.method != "GET").map(|r| (r.path.as_str(), r.json())).collect();
+    assert!(posts[0].0.ends_with("/request-changes"));
+    assert_eq!(posts[1].1["inline"], json!({"path":"a","to":1}));
+    assert_eq!(posts[2].1, json!({"merge_strategy":"squash"}));
+}
+
+#[test]
+fn bitbucket_server_pull_request_details_and_review() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/rest/projects/P/repos/r/pull-requests/2") => (200, json!({"fromRef":{"latestCommit":"h"},"toRef":{"latestCommit":"b"}}).to_string()),
+        ("GET", "/rest/projects/P/repos/r/pull-requests/2.diff") => (200, "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\n".to_string()),
+        ("GET", "/rest/projects/P/repos/r/pull-requests/2/changes") => (200, json!({"values":[{"type":"MODIFY","path":{"toString":"a"}}]}).to_string()),
+        ("GET", "/rest/projects/P/repos/r/pull-requests/2/activities") => (200, json!({"values":[{"action":"COMMENTED","comment":{"text":"Nit","author":{"name":"bea"},"createdDate":1000},"commentAnchor":{"path":"a","line":1}},{"action":"APPROVED","user":{"name":"cy"},"createdDate":2000},{"action":"OPENED"}]}).to_string()),
+        ("POST", _) | ("PUT", _) => (200, "{}".to_string()),
+        _ => (200, json!({"values":[]}).to_string()),
+    });
+    let c = client(ForgeKind::BitbucketServer, "scm/P/r", &format!("{}/rest", m.base), "ann");
+    let d = c.pr_details(2).unwrap();
+    assert!(d.problems.iter().all(|p| !p.contains("Files")), "{:?}", d.problems);
+    assert_eq!(d.files[0].status, "modify");
+    assert_eq!(d.files[0].additions, 1);
+    assert_eq!(d.comments.len(), 2);
+    assert_eq!(d.comments[1].verdict, "APPROVED");
+    use gitem_core::forge::details::Verdict;
+    c.review_pr(2, Verdict::RequestChanges, "").unwrap();
+    c.comment_line(2, &d, &d.files[0], 1, "Here").unwrap();
+    let log = m.log.lock().unwrap();
+    let posts: Vec<(&str, Value)> = log.iter().filter(|r| r.method != "GET").map(|r| (r.path.as_str(), r.json())).collect();
+    assert!(posts[0].0.ends_with("/participants/ann"));
+    assert_eq!(posts[0].1, json!({"status":"NEEDS_WORK"}));
+    assert_eq!(posts[1].1["anchor"]["path"], "a");
+}
+
+#[test]
+fn azure_pull_request_details_and_a_vote() {
+    let m = mock(|r| match (r.method.as_str(), r.path.split('?').next().unwrap()) {
+        ("GET", "/org/_apis/connectionData") => (200, json!({"authenticatedUser":{"id":"me-id","providerDisplayName":"Me"}}).to_string()),
+        ("GET", "/org/p/_apis/git/repositories/r/pullrequests/8") => (200, json!({"lastMergeSourceCommit":{"commitId":"h"},"lastMergeTargetCommit":{"commitId":"b"}}).to_string()),
+        ("GET", "/org/p/_apis/git/repositories/r/pullrequests/8/iterations") => (200, json!({"value":[{"id":1},{"id":2}]}).to_string()),
+        ("GET", "/org/p/_apis/git/repositories/r/pullrequests/8/iterations/2/changes") => (200, json!({"changeEntries":[{"changeType":"edit","item":{"path":"/a.txt"}}]}).to_string()),
+        ("GET", "/org/p/_apis/git/repositories/r/pullrequests/8/statuses") => (200, json!({"value":[{"context":{"name":"ci"},"state":"failed","description":"Boom","targetUrl":"http://ci"}]}).to_string()),
+        ("GET", "/org/p/_apis/git/repositories/r/pullrequests/8/threads") => (200, json!({"value":[{"threadContext":{"filePath":"/a.txt","rightFileStart":{"line":3}},"comments":[{"author":{"displayName":"Bea"},"content":"Nit","publishedDate":"2026-01-01T00:00:00Z","commentType":"text"},{"author":{"displayName":"System"},"content":"voted","commentType":"system"}]}]}).to_string()),
+        ("PUT", _) | ("POST", _) | ("PATCH", _) => (200, "{}".to_string()),
+        _ => (404, json!({"message":format!("no route {}", r.path)}).to_string()),
+    });
+    let c = client(ForgeKind::AzureDevOps, "org/p/r", &m.base, "u");
+    let d = c.pr_details(8).unwrap();
+    assert!(d.problems.is_empty(), "{:?}", d.problems);
+    assert_eq!(d.files[0].path, "a.txt");
+    assert_eq!(d.files[0].patch, "", "it lists names only");
+    assert_eq!(d.comments.len(), 1, "the system's own notes are left out");
+    assert_eq!(d.comments[0].line, Some(3));
+    use gitem_core::forge::details::{MergeStyle, Verdict};
+    c.approve_pr(8).unwrap();
+    c.review_pr(8, Verdict::RequestChanges, "No").unwrap();
+    c.comment_line(8, &d, &d.files[0], 3, "Here").unwrap();
+    c.merge_pr_as(8, Some(MergeStyle::Squash)).unwrap();
+    let log = m.log.lock().unwrap();
+    let writes: Vec<(&str, Value)> = log.iter().filter(|r| r.method != "GET").map(|r| (r.path.as_str(), r.json())).collect();
+    assert!(writes[0].0.contains("/reviewers/me-id"));
+    assert_eq!(writes[0].1, json!({"vote":10}));
+    assert_eq!(writes[1].1, json!({"vote":-10}));
+    assert!(writes[2].0.contains("/threads"), "the words for that vote");
+    assert_eq!(writes[3].1["threadContext"]["filePath"], "/a.txt");
+    assert_eq!(writes[4].1["completionOptions"]["mergeStrategy"], "squash");
 }

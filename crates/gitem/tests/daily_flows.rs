@@ -312,3 +312,86 @@ fn undo_commit_can_be_redone() {
     settle(&mut h);
     assert_eq!(f.head(), tip);
 }
+
+// ---- the update check, against a mock on this machine
+
+fn release_server(reply: String) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/releases/latest", listener.local_addr().unwrap());
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = asked.clone();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            let mut b = [0u8; 2048];
+            let _ = s.read(&mut b);
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
+        }
+    });
+    (url, asked)
+}
+
+fn newer_release() -> String {
+    serde_json::json!({"tag_name":"v99.0.0","html_url":"http://127.0.0.1:9/r","body":"Notes"}).to_string()
+}
+
+#[test]
+fn nothing_asks_about_updates_unless_it_was_turned_on() {
+    let (url, asked) = release_server(newer_release());
+    let f = Fx::new();
+    let mut h = f.harness(|s| {
+        s.check_updates = false;
+        s.update_url = url;
+    });
+    settle(&mut h);
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_scheduled_check_says_what_it_found_once_a_day_only() {
+    let (url, asked) = release_server(newer_release());
+    let f = Fx::new();
+    let mut h = f.harness(|s| {
+        s.check_updates = true;
+        s.update_url = url.clone();
+    });
+    wait_for_text(&mut h, "gitem 99.0.0 is available");
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(h.state().settings.last_update_check > 0, "so the next run waits");
+
+    let (url2, asked2) = release_server(newer_release());
+    let mut h = f.harness(|s| {
+        s.check_updates = true;
+        s.update_url = url2;
+        s.last_update_check = gitem_core::util::now_ts() - 60;
+    });
+    settle(&mut h);
+    assert_eq!(asked2.load(std::sync::atomic::Ordering::SeqCst), 0, "asked a minute ago");
+}
+
+#[test]
+fn asking_from_about_answers_either_way_and_opens_nothing_by_itself() {
+    let (url, asked) = release_server(serde_json::json!({"tag_name":"v0.0.1","html_url":"http://127.0.0.1:9/r"}).to_string());
+    let f = Fx::new();
+    let mut h = f.harness(|s| s.update_url = url);
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+    h.state_mut().apply_about_for_test();
+    click(&mut h, "Check for updates");
+    wait_for_text(&mut h, "This is the newest release.");
+
+    let (url, _) = release_server(newer_release());
+    let mut h = f.harness(|s| s.update_url = url);
+    h.state_mut().apply_about_for_test();
+    click(&mut h, "Check for updates");
+    wait_for_label(&mut h, "Open its page");
+    assert!(h.query_by_label_contains("Version 99.0.0 is available").is_some());
+
+    // A broken address is said in the box and isn't an error window.
+    let mut h = f.harness(|s| s.update_url = "http://example.invalid/latest".to_string());
+    h.state_mut().apply_about_for_test();
+    click(&mut h, "Check for updates");
+    wait_for_text(&mut h, "Couldn't find out");
+    assert!(h.state().errors_showing().is_empty());
+}

@@ -147,6 +147,14 @@ pub struct Settings {
     /// The toolbar's Pull stashes local changes first, and puts them back after.
     #[serde(default)]
     pub pull_autostash: bool,
+    /// Ask once a day whether there's a newer release. Off unless turned on.
+    #[serde(default)]
+    pub check_updates: bool,
+    /// Where to ask.
+    #[serde(default)]
+    pub update_url: String,
+    #[serde(default)]
+    pub last_update_check: i64,
     pub pull_mode: String,
     pub graph_page_size: usize,
     pub default_external_editor: String,
@@ -258,6 +266,9 @@ impl Default for Settings {
             commit_sign: false,
             commit_signoff: false,
             pull_autostash: false,
+            check_updates: false,
+            update_url: crate::update::DEFAULT_RELEASE_URL.to_string(),
+            last_update_check: 0,
             prune_on_fetch: true,
             pull_mode: "default".to_string(),
             graph_page_size: 2000,

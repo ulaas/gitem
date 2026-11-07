@@ -447,6 +447,8 @@ pub fn is_plain_branch_name(s: &str) -> bool {
     !s.is_empty() && !s.starts_with('-') && !s.contains("..") && !s.chars().any(|c| c.is_control() || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
 }
 
+pub mod details;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PullRequest {
     pub number: u64,
@@ -478,6 +480,22 @@ pub struct PullRequest {
 }
 
 impl PullRequest {
+    /// Whether `me` opened it. With no name to go on, nothing counts as yours.
+    pub fn is_by(&self, me: &str) -> bool {
+        !me.is_empty() && (self.author.eq_ignore_ascii_case(me) || self.author_id.eq_ignore_ascii_case(me))
+    }
+
+    /// Why a merge shouldn't be offered. A host would refuse these too, but later and less clearly.
+    pub fn merge_refusal(&self) -> Option<&'static str> {
+        if self.draft {
+            Some("It's a draft. Mark it ready on the host first.")
+        } else if self.mergeable == "CONFLICTING" {
+            Some("It has conflicts with its base branch, which have to be resolved first.")
+        } else {
+            None
+        }
+    }
+
     /// Whether this pull request is what `branch` holds: its own branch here, or the branch
     /// Check out made for it.
     pub fn is_on_branch(&self, branch: &str) -> bool {
@@ -588,7 +606,7 @@ fn list_in(v: &Value, pointer: &str, what: &str) -> Result<Vec<Value>> {
 }
 
 pub fn launchpad_group(pr: &PullRequest, me: &str) -> LaunchpadGroup {
-    let mine = !me.is_empty() && (pr.author.eq_ignore_ascii_case(me) || pr.author_id.eq_ignore_ascii_case(me));
+    let mine = pr.is_by(me);
     if pr.requested_reviewers.iter().any(|r| r.eq_ignore_ascii_case(me)) && !me.is_empty() {
         return LaunchpadGroup::NeedsYourReview;
     }
@@ -1112,27 +1130,7 @@ impl ForgeClient {
 
     /// Merge a pull request with the host's default strategy.
     pub fn merge_pr(&self, n: u64) -> Result<()> {
-        self.needs_api()?;
-        match self.repo.kind {
-            ForgeKind::BitbucketServer => {
-                let (b, p, r) = self.server_api();
-                let pr = self.request(Method::Get, &format!("{b}/projects/{p}/repos/{r}/pull-requests/{n}"))?;
-                let version = pr.get("version").and_then(Value::as_u64).unwrap_or(0);
-                self.request(Method::Post(json!({"version":version})), &format!("{b}/projects/{p}/repos/{r}/pull-requests/{n}/merge")).map(|_| ())
-            }
-            ForgeKind::Gerrit | ForgeKind::GoogleSource => unreachable!("rejected by needs_api"),
-            ForgeKind::GitHub => self.request(Method::Put(json!({})), &format!("{}/repos/{}/pulls/{n}/merge", self.api_base(), self.repo.path)).map(|_| ()),
-            ForgeKind::Gitea => self.request(Method::Post(json!({"Do":"merge"})), &format!("{}/repos/{}/pulls/{n}/merge", self.api_base(), self.repo.path)).map(|_| ()),
-            ForgeKind::GitLab => self.request(Method::Put(json!({})), &format!("{}/projects/{}/merge_requests/{n}/merge", self.api_base(), url_encode(&self.repo.path))).map(|_| ()),
-            ForgeKind::Bitbucket => self.request(Method::Post(json!({})), &format!("{}/repositories/{}/pullrequests/{n}/merge", self.api_base(), self.repo.path)).map(|_| ()),
-            ForgeKind::AzureDevOps => {
-                let (org, proj, repo) = self.azure_parts()?;
-                let base = format!("{}/{org}/{proj}/_apis/git/repositories/{repo}/pullrequests/{n}?api-version=7.0", self.azure_root());
-                let pr = self.request(Method::Get, &base)?;
-                let last = pr.get("lastMergeSourceCommit").cloned().unwrap_or(Value::Null);
-                self.request(Method::Patch(json!({"status":"completed","lastMergeSourceCommit":last})), &base).map(|_| ())
-            }
-        }
+        self.merge_pr_as(n, None)
     }
 
     pub fn comment_pr(&self, n: u64, body: &str) -> Result<()> {
@@ -1170,7 +1168,7 @@ impl ForgeClient {
             ForgeKind::Gitea => self.request(Method::Post(json!({"event":"APPROVED"})), &format!("{}/repos/{}/pulls/{n}/reviews", self.api_base(), self.repo.path)).map(|_| ()),
             ForgeKind::GitLab => self.request(Method::Post(json!({})), &format!("{}/projects/{}/merge_requests/{n}/approve", self.api_base(), url_encode(&self.repo.path))).map(|_| ()),
             ForgeKind::Bitbucket => self.request(Method::Post(json!({})), &format!("{}/repositories/{}/pullrequests/{n}/approve", self.api_base(), self.repo.path)).map(|_| ()),
-            ForgeKind::AzureDevOps => Err(Error::Other("Approving from gitem is not available on Azure DevOps. Use Open on Remote.".into())),
+            ForgeKind::AzureDevOps => self.review_pr(n, details::Verdict::Approve, ""),
         }
     }
 

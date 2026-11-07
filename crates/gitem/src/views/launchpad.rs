@@ -305,7 +305,7 @@ impl LaunchpadView {
             if !pinned.is_empty() {
                 egui::CollapsingHeader::new(RichText::new(format!("Pinned ({})", pinned.len())).strong()).id_salt("pinned").default_open(true).show(ui, |ui| {
                     for pr in pinned {
-                        self.pr_card(ui, cx, pr, cur.as_deref(), prs);
+                        self.pr_card(ui, cx, pr, cur.as_deref(), prs, me);
                     }
                 });
             }
@@ -316,14 +316,14 @@ impl LaunchpadView {
                 }
                 egui::CollapsingHeader::new(RichText::new(format!("{} ({})", g.label(), group.len())).strong()).id_salt(g.label()).default_open(g != LaunchpadGroup::Other).show(ui, |ui| {
                     for pr in group {
-                        self.pr_card(ui, cx, pr, cur.as_deref(), prs);
+                        self.pr_card(ui, cx, pr, cur.as_deref(), prs, me);
                     }
                 });
             }
             if !snoozed.is_empty() {
                 egui::CollapsingHeader::new(RichText::new(format!("Snoozed ({})", snoozed.len())).strong()).id_salt("snoozed").default_open(false).show(ui, |ui| {
                     for pr in snoozed {
-                        self.pr_card(ui, cx, pr, cur.as_deref(), prs);
+                        self.pr_card(ui, cx, pr, cur.as_deref(), prs, me);
                     }
                 });
             }
@@ -331,7 +331,7 @@ impl LaunchpadView {
         self.prs.value = Some(loaded);
     }
 
-    fn pr_card(&mut self, ui: &mut Ui, cx: &mut Cx, pr: &PullRequest, cur: Option<&str>, all: &[PullRequest]) {
+    fn pr_card(&mut self, ui: &mut Ui, cx: &mut Cx, pr: &PullRequest, cur: Option<&str>, all: &[PullRequest], me: &str) {
         let p = cx.pal.clone();
         let here = cur.is_some_and(|b| pr.is_on_branch(b));
         // A fork's branch can share a name with one here, without being what a pull request sits on.
@@ -343,7 +343,7 @@ impl LaunchpadView {
                 ui.add(egui::Label::new(RichText::new(&pr.title).strong()).truncate());
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("{} · {} → {} · {}", pr.author, pr.head, pr.base, time_label(pr.updated, cx.settings.date_relative))).small().color(p.dim));
+                ui.label(RichText::new(card_line(pr, cx.settings.date_relative)).small().color(p.dim));
                 if pr.additions + pr.deletions > 0 {
                     ui.label(RichText::new(format!("+{}", pr.additions)).small().color(p.add_fg));
                     ui.label(RichText::new(format!("-{}", pr.deletions)).small().color(p.del_fg));
@@ -419,6 +419,9 @@ impl LaunchpadView {
                 if ui.small_button("Open").clicked() {
                     cx.url(pr.url.clone());
                 }
+                if ui.small_button("Show details").on_hover_text("Its files, checks and conversation, and a review from here").clicked() {
+                    cx.open(Tab::PullRequest(Box::new(crate::views::pullrequest::PullRequestView::new(pr.clone(), me))));
+                }
                 let key = format!("{}#{}", repo.as_ref().map(|f| f.path.as_str()).unwrap_or(""), pr.number);
                 let is_pinned = cx.settings.pinned_prs.contains(&key);
                 if ui.small_button(if is_pinned { "Unpin" } else { "Pin" }).clicked() {
@@ -460,7 +463,8 @@ impl LaunchpadView {
                     }
                 if let Some(r) = repo {
                     let n = pr.number;
-                    if ui.small_button("Approve").clicked() {
+                    // A host refuses your own, and saying so here beats a failed request.
+                    if !pr.is_by(me) && ui.small_button("Approve").clicked() {
                         let g = cx.repo.git.clone();
                         let r2 = r.clone();
                         self.action.spawn(ui.ctx(), move || -> Result<String, String> {
@@ -480,16 +484,9 @@ impl LaunchpadView {
                             }))])
                         }));
                     }
-                    if ui.small_button("Merge…").clicked() {
-                        let g = cx.repo.git.clone();
-                        let r2 = r.clone();
-                        cx.form(FormDialog::new(format!("Merge #{n} on {}", r.kind.label()), "Merge").danger().info(format!("Merge \"{}\" into {} with the host's default strategy?", pr.title, pr.base)).on_submit(move |_| {
-                            let (g, r2) = (g.clone(), r2.clone());
-                            Ok(vec![Action::Later(Box::new(move || {
-                                resolve_client(&g, &r2)?.merge_pr(n).map_err(|e| e.to_string())?;
-                                Ok(Later::ForgeChanged(format!("Merged #{n}")))
-                            }))])
-                        }));
+                    let refusal = pr.merge_refusal();
+                    if ui.add_enabled(refusal.is_none(), egui::Button::new("Merge…").small()).on_disabled_hover_text(refusal.unwrap_or_default()).clicked() {
+                        cx.form(crate::views::pullrequest::merge_form(&cx.repo.git, &r, pr));
                     }
                 }
             });
@@ -528,7 +525,7 @@ impl LaunchpadView {
                         ui.add(egui::Label::new(RichText::new(&i.title).strong()).truncate());
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(format!("{} · {} · {}", i.source, i.state, time_label(i.updated, cx.settings.date_relative))).small().color(p.dim));
+                        ui.label(RichText::new(issue_line(i, cx.settings.date_relative)).small().color(p.dim));
                         if !i.assignees.is_empty() {
                             ui.label(RichText::new(i.assignees.join(", ")).small().color(p.dim));
                         }
@@ -634,6 +631,23 @@ impl LaunchpadView {
             }
         });
     }
+}
+
+/// A host that sends no date for it gets none shown, rather than one from 1970.
+fn when(ts: i64, relative: bool) -> Option<String> {
+    (ts > 0).then(|| time_label(ts, relative))
+}
+
+fn card_line(pr: &PullRequest, relative: bool) -> String {
+    let mut parts = vec![pr.author.clone(), format!("{} → {}", pr.head, pr.base)];
+    parts.extend(when(pr.updated, relative));
+    parts.join(" · ")
+}
+
+fn issue_line(i: &Issue, relative: bool) -> String {
+    let mut parts = vec![i.source.clone(), i.state.clone()];
+    parts.extend(when(i.updated, relative));
+    parts.join(" · ")
 }
 
 pub fn start_work_form(repo: &gitem_core::Repo, i: &Issue, format: &str, base: Option<String>) -> FormDialog {
@@ -750,4 +764,19 @@ fn push_to_fork_form(pr: &forge::PullRequest, local: &str, repo: Option<&forge::
         out.push(Action::Run(ops::push_pr_to_fork(&name, &local, &head)));
         Ok(out)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_card_with_no_date_says_none_rather_than_56_years_ago() {
+        let pr = PullRequest { author: "ann".into(), head: "t".into(), base: "main".into(), ..Default::default() };
+        assert_eq!(card_line(&pr, true), "ann · t → main");
+        let dated = PullRequest { updated: gitem_core::util::now_ts() - 120, ..pr };
+        assert!(card_line(&dated, true).contains("ago"), "{}", card_line(&dated, true));
+        let i = Issue { source: "Jira".into(), state: "Open".into(), ..Default::default() };
+        assert_eq!(issue_line(&i, true), "Jira · Open");
+    }
 }
