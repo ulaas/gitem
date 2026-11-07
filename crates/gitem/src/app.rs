@@ -192,6 +192,11 @@ impl RepoTab {
         items
     }
 
+    /// Whether any side panel is showing, or Zen mode has hidden them.
+    pub fn panels_showing(&self) -> bool {
+        self.show_sidebar || self.show_inspect
+    }
+
     pub fn open_tab(&mut self, tab: Tab) {
         // Diffs opened from lists reuse one preview tab, unless it's been pinned.
         if let Tab::Diff(new) = &tab {
@@ -212,7 +217,18 @@ impl RepoTab {
         } else {
             let key = tab.key();
             if let Some(path) = self.dock.find_tab_from(|t| t.key() == key) {
-                let _ = self.dock.set_active_tab(path);
+                let mut tab = Some(tab);
+                if let Some((_, open)) = self.dock.iter_all_tabs_mut().find(|(p, _)| *p == path)
+                    && let Some(new) = tab.take()
+                {
+                    tab = open.retarget(new);
+                }
+                match tab {
+                    Some(own) => self.open_tab(own),
+                    None => {
+                        let _ = self.dock.set_active_tab(path);
+                    }
+                }
                 return;
             }
         }
@@ -496,8 +512,10 @@ struct Viewer<'a> {
 impl TabViewer for Viewer<'_> {
     type Tab = Tab;
 
+    /// With the repository in it: egui keeps undo history and scroll positions by id, and
+    /// one repository's message mustn't come back with Ctrl+Z in another's commit box.
     fn id(&mut self, tab: &mut Tab) -> egui::Id {
-        egui::Id::new(tab.key())
+        egui::Id::new((&self.cx.repo.root, tab.key()))
     }
 
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
@@ -1070,7 +1088,7 @@ impl GitemApp {
     }
 
     /// Closes a repository's tab, or asks first if that would lose something.
-    fn request_close_repo(&mut self, i: usize) {
+    pub fn request_close_repo(&mut self, i: usize) {
         let Some(r) = self.repos.get(i) else { return };
         let mut items = r.at_stake("It finishes in the background, and a failure is still reported.");
         if self.form_repo.as_ref() == Some(&r.repo.root)
@@ -1094,6 +1112,10 @@ impl GitemApp {
         if self.form_repo.as_ref() == Some(&r.repo.root) {
             self.form = None;
             self.form_repo = None;
+        }
+        // The one on show stays on show, wherever it now is in the list.
+        if i < self.active {
+            self.active -= 1;
         }
         self.active = self.active.min(self.repos.len().saturating_sub(1));
         self.settings_dirty = true;
@@ -1146,7 +1168,7 @@ impl GitemApp {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                go = ui.add(egui::Button::new(RichText::new("Close anyway").color(Color32::WHITE)).fill(danger)).clicked();
+                go = ui.add(egui::Button::new(RichText::new("Close anyway").color(theme::ink_on(danger))).fill(danger)).clicked();
                 stay |= ui.button("Keep it open").clicked();
             });
         });
@@ -1340,6 +1362,14 @@ impl GitemApp {
             Action::Refresh => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.data.refresh(ctx, &r.repo);
+                    r.data.forge_gen += 1;
+                }
+            }
+            Action::ForgeChanged(message) => {
+                self.toasts.push((message, Instant::now()));
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    r.data.refresh(ctx, &r.repo);
+                    r.data.forge_gen += 1;
                 }
             }
             Action::Retry => {
@@ -1358,15 +1388,6 @@ impl GitemApp {
                 for r in &mut self.repos {
                     r.data.custom_hosts = self.settings.custom_hosts.clone();
                     r.data.recompute_forge();
-                }
-            }
-            Action::SetCommitMessage(m) => {
-                if let Some(r) = self.repos.get_mut(self.active) {
-                    for (_, t) in r.dock.iter_all_tabs_mut() {
-                        if let Tab::Changes(c) = t {
-                            c.message = m.clone();
-                        }
-                    }
                 }
             }
             Action::OpenPalette => self.palette = Some(PaletteState::new()),
@@ -1615,10 +1636,15 @@ impl GitemApp {
             ui.separator();
             ui.label(RichText::new("Recent").small().color(self.pal.faint));
             for r in self.settings.recent_repos.clone().iter().take(12) {
-                if ui.button(r.as_str()).clicked() {
-                    out.push(Action::OpenRepo(r.into()));
-                    ui.close();
-                }
+                ui.horizontal(|ui| {
+                    if ui.button(r.as_str()).clicked() {
+                        out.push(Action::OpenRepo(r.into()));
+                        ui.close();
+                    }
+                    if ui.small_button("✖").on_hover_text("Remove from this list. The folder isn't touched.").clicked() {
+                        out.push(forget_recent(r));
+                    }
+                });
             }
         }
     }
@@ -1671,9 +1697,16 @@ impl GitemApp {
                 ui.add_space(18.0);
                 ui.label(RichText::new("Recent").color(p.faint));
                 for r in self.settings.recent_repos.clone().iter().take(12) {
-                    if ui.link(r.as_str()).clicked() {
+                    let link = ui.link(r.as_str()).on_hover_text("Right-click to remove it from this list");
+                    if link.clicked() {
                         out.push(Action::OpenRepo(r.into()));
                     }
+                    link.context_menu(|ui| {
+                        if ui.button("Remove from this list").on_hover_text("The folder isn't touched.").clicked() {
+                            out.push(forget_recent(r));
+                            ui.close();
+                        }
+                    });
                 }
             }
         });
@@ -1789,7 +1822,7 @@ impl GitemApp {
                 if ui.small_button("Cancel").clicked() {
                     g.cancel.store(true, Ordering::Relaxed);
                 }
-            } else if !tab.data.last_blame.is_empty() {
+            } else if !tab.data.last_blame.is_empty() && matches!(tab.dock.find_active_focused(), Some((_, Tab::File(_)))) {
                 ui.add(egui::Label::new(RichText::new(&tab.data.last_blame).small().color(p.dim)).truncate());
             } else {
                 let last = tab.repo.git.log.lock().ok().and_then(|l| l.iter().rev().find(|e| e.is_write).map(|e| (e.command.clone(), e.code)));
@@ -1812,7 +1845,9 @@ impl GitemApp {
                 if let Some(f) = tab.data.forge() {
                     ui.label(RichText::new(format!("{} {}", f.kind.label(), f.path)).small().color(p.faint));
                 }
-                if let Some((n, url)) = &tab.data.branch_pr {
+                // Found for one branch, it says nothing about another.
+                let current = tab.data.status.get().and_then(|s| s.branch.clone());
+                if let Some((_, n, url)) = tab.data.branch_pr.as_ref().filter(|(b, _, _)| Some(b) == current.as_ref()) {
                     crate::widgets::web_link(ui, RichText::new(format!("PR #{n}")).small(), url);
                 }
             });
@@ -1890,7 +1925,7 @@ impl GitemApp {
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    go = ui.add(egui::Button::new(RichText::new(c.label.as_str()).color(Color32::WHITE)).fill(p.danger)).clicked();
+                    go = ui.add(egui::Button::new(RichText::new(c.label.as_str()).color(theme::ink_on(p.danger))).fill(p.danger)).clicked();
                     close = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
                 });
             });
@@ -1998,7 +2033,9 @@ impl GitemApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, out: &mut Vec<Action>) {
-        if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z))
+        // In a text field the same keys are Redo.
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z))
             && let Some(r) = self.repos.get_mut(self.active) {
                 let on = !(r.show_sidebar || r.show_inspect);
                 r.show_sidebar = on;
@@ -2246,13 +2283,13 @@ impl GitemApp {
             if *show_sidebar {
                 egui::Panel::left("sidebar").resizable(true).default_size(270.0).size_range(180.0..=600.0).show(ui, |ui| {
                     let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
-                    sidebar.ui(ui, &mut cx);
+                    ui.push_id(&cx.repo.root, |ui| sidebar.ui(ui, &mut cx));
                 });
             }
             if *show_inspect {
                 egui::Panel::right("inspect").resizable(true).default_size(340.0).size_range(220.0..=800.0).show(ui, |ui| {
                     let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open };
-                    inspect.ui(ui, &mut cx);
+                    ui.push_id(&cx.repo.root, |ui| inspect.ui(ui, &mut cx));
                 });
             }
             let style = theme::dock_style(ui.style(), &pal);
@@ -2323,6 +2360,11 @@ impl eframe::App for GitemApp {
     }
 }
 
+fn forget_recent(path: &str) -> Action {
+    let path = path.to_string();
+    Action::Settings(Box::new(move |s| s.recent_repos.retain(|r| *r != path)))
+}
+
 /// A new terminal window in `dir`, optionally running a command there. The folder
 /// is passed as the working directory, so its name is never parsed by a shell.
 fn open_terminal(dir: &Path, command: Option<&str>, errors: &mut Vec<String>) {
@@ -2331,13 +2373,34 @@ fn open_terminal(dir: &Path, command: Option<&str>, errors: &mut Vec<String>) {
     }
 }
 
+/// Quoted for a POSIX shell, as a single word.
+#[cfg_attr(windows, allow(dead_code))]
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// AppleScript for Terminal to run a command in a folder.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_terminal_script(dir: &Path, cmd: &str) -> String {
+    let shell = format!("cd {} && {cmd}", sh_quote(&dir.to_string_lossy()));
+    format!("tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell", shell.replace('\\', r"\\").replace('"', r#"\""#))
+}
+
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn unix_terminal_args(cmd: &str) -> Vec<String> {
+    vec!["-e".to_string(), "sh".to_string(), "-c".to_string(), format!("{cmd}; exec \"${{SHELL:-sh}}\"")]
+}
+
 fn terminal_command(dir: &Path, command: Option<&str>) -> std::process::Command {
     #[cfg(windows)]
     let mut c = {
         use std::os::windows::process::CommandExt;
         let mut c = std::process::Command::new("cmd.exe");
         if let Some(cmd) = command {
-            c.arg("/K").arg(cmd);
+            // As written: Rust's quoting is for programs that parse arguments the C way, and
+            // cmd sees `\"` as a quote that ends one and leaves the prompt split into words.
+            // `/S` takes the outer quotes off and runs what's between them just as it is.
+            c.raw_arg(format!("/S /K \"{cmd}\""));
             // cmd looks in the current folder before PATH, and the folder is a repository,
             // so a tracked `claude.cmd` would run in place of the real one. A plain
             // terminal stays as the user expects it, since they type there themselves.
@@ -2348,16 +2411,27 @@ fn terminal_command(dir: &Path, command: Option<&str>) -> std::process::Command 
     };
     #[cfg(target_os = "macos")]
     let mut c = {
-        let mut c = std::process::Command::new("open");
-        c.args(["-a", "Terminal"]).arg(dir);
-        let _ = command;
+        let mut c;
+        match command {
+            // `open` can only show a folder, so a command needs Terminal asked directly.
+            Some(cmd) => {
+                c = std::process::Command::new("osascript");
+                c.args(["-e", &macos_terminal_script(dir, cmd)]);
+            }
+            None => {
+                c = std::process::Command::new("open");
+                c.args(["-a", "Terminal"]).arg(dir);
+            }
+        }
         c
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut c = {
         let mut c = std::process::Command::new("x-terminal-emulator");
         if let Some(cmd) = command {
-            c.args(["-e", cmd]);
+            // Emulators differ on whether `-e` takes one string or a program and arguments,
+            // but all of them run this form. The shell at the end keeps the window open.
+            c.args(unix_terminal_args(cmd));
         }
         c
     };
@@ -2459,5 +2533,44 @@ mod terminal_tests {
         let c = terminal_command(Path::new("."), None);
         assert!(!c.get_envs().any(|(k, _)| k == "NoDefaultCurrentDirectoryInExePath"));
         assert_eq!(c.get_args().count(), 0);
+    }
+
+    /// A prompt in quotes reaches the program as one argument. cmd is what parses it, so
+    /// it has to run for real.
+    #[test]
+    fn a_quoted_prompt_reaches_the_agent_in_one_piece() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("args.txt");
+        // Its own exe shows what a program would be given, with no quoting of ours in the way.
+        let script = d.path().join("show.cmd");
+        std::fs::write(&script, format!("@echo [%1]>\"{}\"\r\n@echo [%2]>>\"{}\"\r\n", out.display(), out.display())).unwrap();
+        let bin = d.path().to_string_lossy().into_owned();
+        let mut c = terminal_command(d.path(), Some("show \"Address the review notes in C:/repo/.git/notes.md\" second & exit"));
+        c.env("PATH", format!("{bin};{}", std::env::var("PATH").unwrap_or_default()));
+        use std::os::windows::process::CommandExt;
+        assert!(c.stdin(std::process::Stdio::null()).creation_flags(0x0800_0000).status().unwrap().success());
+        let text = std::fs::read_to_string(&out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines, ["[\"Address the review notes in C:/repo/.git/notes.md\"]", "[second]"]);
+    }
+}
+
+#[cfg(test)]
+mod terminal_script_tests {
+    use super::*;
+
+    #[test]
+    fn a_macos_terminal_runs_the_command_in_the_folder() {
+        let s = macos_terminal_script(Path::new("/tmp/it's a repo"), "claude \"do the thing\"");
+        assert!(s.contains("do script"), "{s}");
+        assert!(s.contains(r#"it'\\''s a repo"#), "{s}");
+        assert!(s.contains(r#"claude \"do the thing\"#), "{s}");
+    }
+
+    #[test]
+    fn a_unix_terminal_gets_a_program_and_arguments() {
+        let a = unix_terminal_args("claude --resume 1");
+        assert_eq!(&a[..3], ["-e", "sh", "-c"]);
+        assert!(a[3].starts_with("claude --resume 1; exec"), "{}", a[3]);
     }
 }

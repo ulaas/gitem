@@ -1,6 +1,6 @@
 //! Visual file history: commits on a time axis with one lane per author, where
 //! bubble area shows lines changed, and a bar strip below shows churn.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use egui::{Align2, Rect, RichText, Sense, Stroke, Ui, pos2};
 use gitem_core::model::*;
@@ -26,11 +26,49 @@ pub struct VisualView {
     selected: Option<String>,
     /// Zoomed time window; `None` shows everything.
     window: Option<(i64, i64)>,
+    /// One file was asked for. Otherwise a point's own path is just one of the commit's files.
+    one_file: bool,
+    /// The commit a menu was opened on. The menu outlives the pointer leaving its bubble.
+    menu_for: Option<FileHistoryPoint>,
+    /// Worked out once per history: it's every commit, and the frame shouldn't have to.
+    lanes: Option<Lanes>,
+}
+
+/// Who gets a lane of their own, in order of first appearance.
+struct Lanes {
+    names: Vec<String>,
+    kept: HashSet<String>,
+}
+
+fn lanes_of(pts: &[FileHistoryPoint]) -> Lanes {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for x in pts {
+        *counts.entry(x.author.as_str()).or_default() += 1;
+    }
+    let mut by_count: Vec<(&str, usize)> = counts.iter().map(|(a, c)| (*a, *c)).collect();
+    by_count.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let kept: HashSet<String> = by_count.iter().take(MAX_AUTHORS - usize::from(by_count.len() > MAX_AUTHORS)).map(|x| x.0.to_string()).collect();
+    let mut names: Vec<String> = Vec::new();
+    for x in pts.iter().rev() {
+        if kept.contains(&x.author) && !names.contains(&x.author) {
+            names.push(x.author.clone());
+        }
+    }
+    if by_count.len() > kept.len() {
+        names.push(format!("Other ({})", by_count.len() - kept.len()));
+    }
+    Lanes { names, kept }
 }
 
 impl VisualView {
     pub fn new(path: &str) -> Self {
-        Self { path: path.to_string(), rev: "HEAD".to_string(), points: Task::default(), started: false, selected: None, window: None, limit: VISUAL_PAGE }
+        Self { path: path.to_string(), rev: "HEAD".to_string(), points: Task::default(), started: false, selected: None, window: None, limit: VISUAL_PAGE, one_file: false, menu_for: None, lanes: None }
+    }
+
+    /// The history of another branch or commit.
+    pub fn on_rev(mut self, rev: &str) -> Self {
+        self.rev = rev.to_string();
+        self
     }
 
     pub fn key(&self) -> String {
@@ -43,14 +81,18 @@ impl VisualView {
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        self.points.poll();
+        if self.points.poll() {
+            self.lanes = None;
+        }
         if !self.started {
             self.started = true;
             self.selected = None;
             let repo = cx.repo.clone();
             let (path, rev, limit) = (self.path.clone(), self.rev.clone(), self.limit);
             // Renames can only be followed for a single file on the current history.
-            let is_file = !path.is_empty() && repo.root.join(&path).is_file() && rev == "HEAD";
+            let on_disk = !path.is_empty() && repo.root.join(&path).is_file();
+            self.one_file = on_disk;
+            let is_file = on_disk && rev == "HEAD";
             self.points.spawn(ui.ctx(), move || {
                 if is_file {
                     repo.file_history_points(&path, limit)
@@ -89,7 +131,9 @@ impl VisualView {
             error_box(ui, e, &p);
         }
         let Some(pts) = self.points.value.take() else {
-            spinner_row(ui, "Reading file history…", &p);
+            if self.points.busy() {
+                spinner_row(ui, "Reading file history…", &p);
+            }
             return;
         };
         if pts.is_empty() {
@@ -104,23 +148,8 @@ impl VisualView {
         let p = cx.pal.clone();
         // Lanes ordered by first appearance so an author keeps lane and colour
         // regardless of zoom. Busiest authors get their own lane.
-        let mut counts: HashMap<&str, usize> = HashMap::new();
-        for x in pts {
-            *counts.entry(x.author.as_str()).or_default() += 1;
-        }
-        let mut by_count: Vec<(&str, usize)> = counts.iter().map(|(a, c)| (*a, *c)).collect();
-        by_count.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        let kept: Vec<&str> = by_count.iter().take(MAX_AUTHORS - usize::from(by_count.len() > MAX_AUTHORS)).map(|x| x.0).collect();
-        let has_other = by_count.len() > kept.len();
-        let mut lanes: Vec<String> = Vec::new();
-        for x in pts.iter().rev() {
-            if kept.contains(&x.author.as_str()) && !lanes.contains(&x.author) {
-                lanes.push(x.author.clone());
-            }
-        }
-        if has_other {
-            lanes.push(format!("Other ({})", by_count.len() - kept.len()));
-        }
+        let Lanes { names: lanes, kept } = &*self.lanes.get_or_insert_with(|| lanes_of(pts));
+        let (lanes, kept) = (lanes.clone(), kept.clone());
         let lane_of = |author: &str| -> usize { lanes.iter().position(|l| l == author).unwrap_or(lanes.len() - 1) };
 
         let (mut t0, mut t1) = pts.iter().fold((i64::MAX, i64::MIN), |(a, b), x| (a.min(x.time), b.max(x.time)));
@@ -219,7 +248,7 @@ impl VisualView {
         let hover_pos = ui.input(|i| i.pointer.hover_pos()).filter(|h| plot.contains(*h));
         let clip = painter.with_clip_rect(plot);
         let mut best_d = f32::MAX;
-        let lane_at = |x: &FileHistoryPoint| if kept.contains(&x.author.as_str()) { lane_of(&x.author) } else { lanes.len() - 1 };
+        let lane_at = |x: &FileHistoryPoint| if kept.contains(&x.author) { lane_of(&x.author) } else { lanes.len() - 1 };
         let mut largest: HashMap<(usize, i32), u32> = HashMap::new();
         for x in &in_window {
             let at = largest.entry((lane_at(x), pixel(x.time))).or_default();
@@ -252,7 +281,9 @@ impl VisualView {
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with("visual-tip"), egui::PopupAnchor::Pointer).show(|ui| {
                 commit_card(ui, &x.sha, &x.author, &x.email, x.time, &x.subject, &p, cx.settings.gravatar);
                 ui.label(RichText::new(format!("+{} −{} lines", x.additions, x.deletions)).monospace());
-                if x.path != self.path {
+                // A renamed file. For a folder or the whole repository, it'd be one file picked
+                // out of the commit for no reason.
+                if self.one_file && x.path != self.path {
                     ui.label(RichText::new(format!("as {}", x.path)).small().color(p.faint));
                 }
             });
@@ -261,16 +292,28 @@ impl VisualView {
                 cx.inspect(&x.sha);
             }
             if resp.double_clicked() {
-                cx.diff(DiffSource::Commit(x.sha.clone()), Some(&x.path));
+                cx.diff(DiffSource::Commit(x.sha.clone()), self.one_file.then_some(x.path.as_str()));
             }
-            let (sha, xp) = (x.sha.clone(), x.path.clone());
+        }
+        // Outside the check on what's hovered, or the menu would go as the pointer moved to it.
+        if resp.secondary_clicked() {
+            self.menu_for = hovered.cloned();
+        }
+        if let Some(x) = self.menu_for.clone() {
+            let file = self.one_file.then(|| x.path.clone()).filter(|p| !p.is_empty());
             resp.context_menu(|ui| {
                 if ui.button("Open changes").clicked() {
-                    cx.diff(DiffSource::Commit(sha.clone()), Some(&xp));
+                    cx.diff(DiffSource::Commit(x.sha.clone()), file.as_deref());
                     ui.close();
                 }
-                if ui.button("Open this revision").clicked() {
-                    cx.open(Tab::file(&xp, Some(sha.clone()), None));
+                if ui.button("Show details").clicked() {
+                    cx.inspect(&x.sha);
+                    ui.close();
+                }
+                if let Some(f) = &file
+                    && ui.button("Open this revision").clicked()
+                {
+                    cx.open(Tab::file(f, Some(x.sha.clone()), None));
                     ui.close();
                 }
             });

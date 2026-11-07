@@ -86,6 +86,8 @@ pub struct ChangesView {
     pub message: String,
     amend: bool,
     signoff: bool,
+    /// The two settings as last seen, so changing one reaches a Changes tab that's open.
+    sign_settings: (bool, bool),
     sign: bool,
     no_verify: bool,
     author: String,
@@ -144,10 +146,13 @@ impl ChangesView {
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
+        let sign_settings = (cx.settings.commit_sign, cx.settings.commit_signoff);
+        if !self.init || self.sign_settings != sign_settings {
+            self.sign_settings = sign_settings;
+            (self.sign, self.signoff) = sign_settings;
+        }
         if !self.init {
             self.init = true;
-            self.sign = cx.settings.commit_sign;
-            self.signoff = cx.settings.commit_signoff;
             if cx.data.persist && self.message.is_empty()
                 && let Ok(draft) = std::fs::read_to_string(draft_path(&cx.repo.root))
             {

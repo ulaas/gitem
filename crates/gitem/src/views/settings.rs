@@ -88,6 +88,9 @@ pub struct SettingsView {
     editor_check: Option<(String, bool)>,
     git_pick: Task<Option<std::path::PathBuf>>,
     editor_pick: Task<Option<std::path::PathBuf>>,
+    /// Whether Jira, Linear and Trello have a secret saved, and when that was last looked at.
+    tracker_secrets: Task<[bool; 3]>,
+    tracker_checked: Option<std::time::Instant>,
 }
 
 // ---- building blocks ---------------------------------------------------------
@@ -427,7 +430,7 @@ impl SettingsView {
             g.row("Code font size", "", |ui| {
                 ui.add(egui::Slider::new(&mut s.editor_font_size, 9.0..=22.0).step_by(1.0).suffix(" pt"));
             });
-            g.row("Language", "Experimental. Covers navigation, toolbars, and menus.", |ui| {
+            g.row("Language", "Experimental and partial: the rail, some toolbar buttons, and some menu items.", |ui| {
                 let options: Vec<(String, &str)> = crate::i18n::LANGUAGES.iter().map(|(code, name)| (code.to_string(), *name)).collect();
                 segmented(ui, &mut s.language, &options, p);
             });
@@ -520,6 +523,11 @@ impl SettingsView {
         group(ui, "Files", p, |g| {
             g.stacked("Settings file", "", |ui| {
                 ui.add(egui::Label::new(RichText::new(Settings::path().display().to_string()).monospace().size(11.5).color(p.dim)).wrap());
+            });
+            g.row("Reset preferences", "Back to how gitem came. Open and recent repositories, workspaces, favorites, and saved secrets stay.", |ui| {
+                if ui.button("Reset…").clicked() {
+                    cx.form(FormDialog::new("Reset preferences", "Reset").danger().info("Put every preference back to how gitem came? That includes the theme, AI provider, self-hosted servers, and autolinks. Open and recent repositories, workspaces, favorites, and saved secrets stay.").on_submit(|_| Ok(vec![Action::Settings(Box::new(|s| *s = s.with_default_preferences()))])));
+                }
             });
         });
     }
@@ -639,6 +647,22 @@ impl SettingsView {
     }
 
     fn trackers(&mut self, ui: &mut Ui, cx: &mut Cx, s: &mut Settings, p: &Palette) {
+        // Saving one happens in a dialog, so this looks again every so often while it's open.
+        self.tracker_secrets.poll();
+        if self.tracker_checked.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3)) && !self.tracker_secrets.busy() {
+            self.tracker_checked = Some(std::time::Instant::now());
+            self.tracker_secrets.spawn(ui.ctx(), || -> Result<[bool; 3], String> {
+                let saved = |name: &str| cred::get(&format!("{}{name}", cred::PREFIX_FORGE)).ok().flatten().is_some();
+                Ok([saved("jira"), saved("linear"), saved("trello")])
+            });
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(3));
+        let saved = self.tracker_secrets.get().copied();
+        let note = |i: usize| match saved.map(|s| s[i]) {
+            Some(true) => "Saved in the system's credential store.",
+            Some(false) => "Not set. Kept in the system's credential store.",
+            None => "Kept in the system's credential store.",
+        };
         let t = &mut s.issue_trackers;
         group(ui, "Jira", p, |g| {
             g.row("Site", "", |ui| {
@@ -651,7 +675,7 @@ impl SettingsView {
                 wide_field(ui, &mut t.jira_jql, "assignee = currentUser() AND resolution = Unresolved");
             });
             g.switch(&mut t.jira_server, "Self-hosted", "Jira Data Center or Server.");
-            g.row("API token", "Kept in the system's credential store.", |ui| {
+            g.row("API token", note(0), |ui| {
                 if ui.button("Set token…").clicked() {
                     cx.form(secret_form("Jira API token", "jira"));
                 }
@@ -659,7 +683,7 @@ impl SettingsView {
         });
         group(ui, "Linear", p, |g| {
             g.switch(&mut t.linear_enabled, "Show assigned issues", "");
-            g.row("API key", "Kept in the system's credential store.", |ui| {
+            g.row("API key", note(1), |ui| {
                 if ui.button("Set key…").clicked() {
                     cx.form(secret_form("Linear API key", "linear"));
                 }
@@ -667,7 +691,7 @@ impl SettingsView {
         });
         group(ui, "Trello", p, |g| {
             g.switch(&mut t.trello_enabled, "Show my cards", "");
-            g.row("Credential", "Your API key and token, written as apikey:token.", |ui| {
+            g.row("Credential", if saved.is_some_and(|s| s[2]) { "Saved in the system's credential store." } else { "Your API key and token, written as apikey:token." }, |ui| {
                 if ui.button("Set credential…").clicked() {
                     cx.form(secret_form("Trello credential", "trello"));
                 }

@@ -32,10 +32,12 @@ pub struct CredentialsView {
     test_host: String,
     test: Task<String>,
     helper_value: Option<String>,
-    signing: Option<(String, String, String, String)>,
-    signing_gen: u64,
+    /// Format, key, commits signed, tags signed, and the allowed signers file.
+    signing: Task<(String, String, String, String, Option<String>)>,
+    /// What it was read for: the status, and how many times it's been changed here.
+    signing_for: Option<(u64, u32)>,
+    signing_changes: u32,
     signers: Option<String>,
-    signers_file: Option<Option<String>>,
     pending_delete: Option<String>,
     revealed_at: Option<Instant>,
     last_frame: u64,
@@ -227,7 +229,7 @@ impl CredentialsView {
             ui.label(delete_warning(&target));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                delete = ui.add(egui::Button::new(RichText::new("Delete secret").color(egui::Color32::WHITE)).fill(cx.pal.danger)).clicked();
+                delete = ui.add(egui::Button::new(RichText::new("Delete secret").color(crate::theme::ink_on(cx.pal.danger))).fill(cx.pal.danger)).clicked();
                 keep |= ui.button("Keep it").clicked();
             });
         });
@@ -364,18 +366,21 @@ impl CredentialsView {
 
     fn signing(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        if self.signing_gen != cx.data.status_gen {
-            self.signing_gen = cx.data.status_gen;
-            self.signing = None;
-            self.signers_file = None;
+        self.signing.poll();
+        let want = (cx.data.status_gen, self.signing_changes);
+        if self.signing_for != Some(want) {
+            self.signing_for = Some(want);
+            self.signing.spawn_git(ui.ctx(), cx.repo, |r| -> Result<_, String> {
+                let get = |k: &str| r.config_get(k).unwrap_or_default();
+                // Global config only. A repository's own config could otherwise pick which file
+                // this page shows and overwrites.
+                Ok((get("gpg.format"), get("user.signingkey"), get("commit.gpgsign"), get("tag.gpgsign"), r.global_config_path("gpg.ssh.allowedSignersFile")))
+            });
         }
-        let (fmt, key, sign, tag) = self
-            .signing
-            .get_or_insert_with(|| {
-                let get = |k: &str| cx.repo.config_get(k).unwrap_or_default();
-                (get("gpg.format"), get("user.signingkey"), get("commit.gpgsign"), get("tag.gpgsign"))
-            })
-            .clone();
+        let Some((fmt, key, sign, tag, configured)) = self.signing.get().cloned() else {
+            spinner_row(ui, "Reading signing settings…", &p);
+            return;
+        };
         egui::Grid::new("sign-grid").num_columns(2).show(ui, |ui| {
             ui.label("Format");
             ui.label(if fmt.is_empty() { "openpgp (default)" } else { &fmt });
@@ -394,11 +399,11 @@ impl CredentialsView {
         ui.horizontal(|ui| {
             if ui.button(if sign == "true" { "Stop signing commits" } else { "Sign all commits" }).clicked() {
                 cx.run(ops::config_set("commit.gpgsign", if sign == "true" { "false" } else { "true" }, "global"));
-                self.signing = None;
+                self.signing_changes += 1;
             }
             if ui.button(if tag == "true" { "Stop signing tags" } else { "Sign all tags" }).clicked() {
                 cx.run(ops::config_set("tag.gpgsign", if tag == "true" { "false" } else { "true" }, "global"));
-                self.signing = None;
+                self.signing_changes += 1;
             }
             if ui.button("Set signing key…").clicked() {
                 cx.form(FormDialog::new("Set signing key", "Save").text("key", "GPG key ID, or path to an SSH public key", &key).check("ssh", "It's an SSH key", fmt == "ssh").on_submit(|v| {
@@ -410,9 +415,6 @@ impl CredentialsView {
         ui.label(RichText::new("Signing status appears on each commit in the Inspect panel.").small().color(p.faint));
         section(ui, "SSH allowed signers", &p);
         ui.label(RichText::new("Whose SSH signatures to trust, one per line: email, then the public key.").small().color(p.faint));
-        // Global config only. A repository's own config could otherwise pick which file
-        // this page shows and overwrites.
-        let configured = self.signers_file.get_or_insert_with(|| cx.repo.global_config_path("gpg.ssh.allowedSignersFile")).clone();
         let path = configured.clone().map(std::path::PathBuf::from).unwrap_or_else(|| cred::ssh_dir().join("allowed_signers"));
         let text = self.signers.get_or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
         ui.add(egui::Label::new(RichText::new(path.display().to_string()).monospace().small().color(p.dim)).selectable(true));

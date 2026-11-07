@@ -1257,6 +1257,10 @@ fn undo_commit_from_the_context_menu() {
     h.step();
     h.step();
     click(&mut h, "Undo commit");
+    pump_for_label(&mut h, "Take the last commit back? Its changes stay staged.");
+    assert_eq!(f.subjects().len(), 2, "it asks first");
+    wait_until_quiet(&mut h);
+    click(&mut h, "Undo commit");
     wait_for(&mut h, "commit undone", || f.subjects() == vec!["first"]);
     assert!(f.git(&["status", "--short"]).contains("A  b.txt"), "changes stay staged");
 }
@@ -5683,4 +5687,878 @@ fn a_right_click_outside_the_selection_is_about_that_line() {
     }
     h.step();
     pump_for_any(&mut h, "Line history (5-5)");
+}
+
+use egui_kittest::kittest::NodeT;
+
+fn pump_for_any_contains(h: &mut Harness<GitemApp>, text: &str) {
+    let t = Instant::now();
+    while h.query_all_by_label_contains(text).next().is_none() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "nothing says {text:?}");
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+// ---- secondary views: a second request to an open tab (AS-18, VS-5, VS-14, VS-15)
+
+fn tab_keys(h: &Harness<GitemApp>) -> Vec<String> {
+    h.state().repos[0].dock.iter_all_tabs().map(|(_, t)| t.key()).collect()
+}
+
+fn open_tab_now(h: &mut Harness<GitemApp>, tab: Tab) {
+    h.state_mut().repos[0].open_tab(tab);
+    h.step();
+    h.step();
+}
+
+#[test]
+fn a_new_search_replaces_what_an_open_search_tab_shows() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::search("=:first"));
+    pump_for_label(&mut h, "first");
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("second").is_none());
+
+    open_tab_now(&mut h, Tab::search("=:second"));
+    pump_for_label(&mut h, "second");
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("first").is_none(), "the old results are gone");
+    assert_eq!(tab_keys(&h).iter().filter(|k| *k == "search").count(), 1, "in the same tab");
+
+    // Plain Search commits leaves it alone.
+    open_tab_now(&mut h, Tab::Search(Box::default()));
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("second").is_some(), "just opening the tab asks nothing new");
+}
+
+#[test]
+fn a_bad_date_in_a_search_says_so() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::search("before:notadate"));
+    wait_until_quiet(&mut h);
+    let boxes = error_boxes(&h);
+    assert!(boxes.iter().any(|b| b.contains("notadate")), "{boxes:?}");
+}
+
+#[test]
+fn save_as_patch_with_the_patches_tab_open_starts_a_new_patch() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Patches(Box::default()));
+    pump_for_label(&mut h, "New from staged");
+    assert!(h.query_by_label("New patch").is_none());
+    open_tab_now(&mut h, Tab::Patches(Box::new(gitem::views::patches::PatchesView::create_from(DiffSource::Commit("HEAD".into()), "from a commit"))));
+    pump_for_label(&mut h, "New patch");
+}
+
+#[test]
+fn compare_refs_opens_without_an_error_and_waits_for_two_refs() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::compare("", ""));
+    pump_for_label(&mut h, "Pick two refs");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn a_second_job_with_the_same_title_runs() {
+    use gitem::views::textview::{TextView, UndoSlot};
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let job = |text: &'static str| -> Box<dyn FnOnce() -> Result<String, String> + Send> { Box::new(move || Ok(text.to_string())) };
+    open_tab_now(&mut h, Tab::Text(Box::new(TextView::new("Explain", job("first answer")))));
+    pump_for_label(&mut h, "first answer");
+    open_tab_now(&mut h, Tab::Text(Box::new(TextView::new("Explain", job("second answer")))));
+    pump_for_label(&mut h, "second answer");
+    assert!(h.query_by_label("first answer").is_none());
+    assert_eq!(tab_keys(&h).iter().filter(|k| k.starts_with("text:")).count(), 1);
+
+    // An answer that can still be undone isn't thrown away for a new one.
+    let slot = UndoSlot::default();
+    *slot.lock().unwrap() = Some(ops::undo_commit());
+    open_tab_now(&mut h, Tab::Text(Box::new(TextView::with_undo("Rebase", job("rebased"), slot))));
+    pump_for_label(&mut h, "rebased");
+    open_tab_now(&mut h, Tab::Text(Box::new(TextView::with_undo("Rebase", job("rebased again"), UndoSlot::default()))));
+    pump_for_label(&mut h, "rebased again");
+    assert_eq!(tab_keys(&h).iter().filter(|k| k.starts_with("text:Rebase")).count(), 2, "{:?}", tab_keys(&h));
+}
+
+#[test]
+fn a_link_to_a_line_of_an_open_file_goes_to_it() {
+    let f = Fx::new();
+    let text: String = (0..500).map(|i| format!("line {i}\n")).collect();
+    f.write("long.txt", &text);
+    f.commit("long");
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::file("long.txt", None, None));
+    wait_until_quiet(&mut h);
+    open_tab_now(&mut h, Tab::file("long.txt", None, Some(400)));
+    wait_until_quiet(&mut h);
+    for _ in 0..5 {
+        h.step();
+    }
+    assert_eq!(tab_keys(&h).iter().filter(|k| k.starts_with("file:long.txt")).count(), 1);
+    let wanted = h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::File(v) = t { v.current_line() } else { None });
+    assert_eq!(wanted, Some(399), "the line asked for, counting from 0");
+}
+
+// ---- Visual History (VS-9, VS-10, VS-35)
+
+/// Moves the pointer over the chart until a bubble's tooltip shows.
+fn find_bubble(h: &mut Harness<GitemApp>, subject: &str) -> egui::Pos2 {
+    let size = h.ctx.content_rect();
+    for y in (120..size.height() as i32 - 150).step_by(14) {
+        for x in (400..size.width() as i32 - 340).step_by(14) {
+            let at = egui::pos2(x as f32, y as f32);
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            if h.query_by_label(subject).is_some() {
+                return at;
+            }
+        }
+    }
+    panic!("no bubble for {subject}");
+}
+
+fn right_click_at(h: &mut Harness<GitemApp>, pos: egui::Pos2) {
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.step();
+}
+
+#[test]
+fn visual_history_menu_survives_the_pointer_leaving_and_means_the_whole_commit() {
+    let f = Fx::new();
+    f.write("a.txt", "one\n");
+    f.write("z.txt", "two\n");
+    f.commit("touches two files");
+    let sha = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::visual(""));
+    wait_until_quiet(&mut h);
+    let at = find_bubble(&mut h, "touches two files");
+    assert!(h.query_by_label_contains("as a.txt").is_none(), "one file picked out of the commit for no reason");
+    right_click_at(&mut h, at);
+    pump_for_label(&mut h, "Open changes");
+    assert!(h.query_by_label("Open this revision").is_none(), "there's no one file to open here");
+
+    // On the way to the menu.
+    h.event(egui::Event::PointerMoved(at + egui::vec2(60.0, 40.0)));
+    for _ in 0..5 {
+        h.step();
+    }
+    click(&mut h, "Open changes");
+    wait_until_quiet(&mut h);
+    let want = format!("diff:{:?}:None", DiffSource::Commit(sha));
+    assert!(tab_keys(&h).contains(&want), "the whole commit: {:?}", tab_keys(&h));
+    no_errors(&h);
+}
+
+#[test]
+fn visual_history_of_one_file_offers_that_file() {
+    let f = Fx::new();
+    f.write("a.txt", "one\n");
+    f.commit("about a");
+    let sha = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::visual("a.txt"));
+    wait_until_quiet(&mut h);
+    let at = find_bubble(&mut h, "about a");
+    right_click_at(&mut h, at);
+    pump_for_label(&mut h, "Open this revision");
+    click(&mut h, "Open changes");
+    wait_until_quiet(&mut h);
+    let want = format!("diff:{:?}:{:?}", DiffSource::Commit(sha), Some("a.txt"));
+    assert!(tab_keys(&h).contains(&want), "{:?}", tab_keys(&h));
+}
+
+#[test]
+fn visual_history_of_a_bad_branch_shows_the_error_and_stops_there() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Visual(Box::new(gitem::views::visual::VisualView::new("").on_rev("no-such-branch"))));
+    wait_until_quiet(&mut h);
+    assert!(!error_boxes(&h).is_empty(), "the error");
+    assert!(h.query_by_label("Reading file history…").is_none(), "nothing's still being read");
+}
+
+// ---- Start work (VS-2)
+
+#[test]
+fn work_started_from_home_on_the_default_base_offers_publish() {
+    let f = Fx::new();
+    sample_history(&f);
+    let bare = tempfile::tempdir().unwrap();
+    let dir = bare.path().to_string_lossy().replace('\\', "/");
+    f.git.run(None, &["init", "-q", "--bare", "-b", "main", &dir]).unwrap();
+    f.git(&["remote", "add", "origin", &dir]);
+    f.git(&["push", "-q", "origin", "main"]);
+    f.git(&["fetch", "-q", "origin"]);
+    f.git(&["remote", "set-head", "origin", "main"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::home());
+    click(&mut h, "Start work…");
+    pump_for_label(&mut h, "Based on");
+    wait_until_quiet(&mut h);
+    h.event(egui::Event::Text("feature/x".into()));
+    h.step();
+    click(&mut h, "Start");
+    wait_for(&mut h, "on the new branch", || f.git(&["branch", "--show-current"]).trim() == "feature/x");
+    assert!(!f.git.run_raw(Some(&f.root), &["config", "--get", "branch.feature/x.remote"]).unwrap().ok(), "it doesn't track main");
+    wait_until_quiet(&mut h);
+    pump_for_any(&mut h, "Publish");
+    no_errors(&h);
+}
+
+// ---- Changes picks up settings (VS-16)
+
+#[test]
+fn turning_on_signoff_reaches_an_open_changes_tab() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("c.txt", "new\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::changes());
+    pump_for_label(&mut h, "Sign-off");
+    assert_eq!(h.get_by_label("Sign-off").accesskit_node().toggled(), Some(egui::accesskit::Toggled::False));
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Settings(Box::new(|s| s.commit_signoff = true)));
+    h.step();
+    h.step();
+    assert_eq!(h.get_by_label("Sign-off").accesskit_node().toggled(), Some(egui::accesskit::Toggled::True));
+
+    // Unticking it for one commit isn't undone by nothing having changed.
+    click(&mut h, "Sign-off");
+    h.step();
+    assert_eq!(h.get_by_label("Sign-off").accesskit_node().toggled(), Some(egui::accesskit::Toggled::False));
+}
+
+// ---- Bisect (VS-19)
+
+#[test]
+fn bisect_says_when_it_has_found_the_commit() {
+    let f = Fx::new();
+    f.write("a.txt", "good\n");
+    f.commit("the good one");
+    let good = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    f.write("a.txt", "bug\n");
+    f.commit("the bug");
+    f.git(&["bisect", "start", "HEAD", &good]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Bisect(Box::default()));
+    pump_for_label(&mut h, "Bisect found the commit");
+    pump_for_label(&mut h, "the bug");
+    assert!(h.query_by_label("✔ Good").is_none(), "nothing's left to mark");
+    assert!(h.query_by_label("Now testing").is_none());
+    click(&mut h, "End bisect");
+    wait_for(&mut h, "bisect ended", || !f.root.join(".git/BISECT_LOG").exists());
+    no_errors(&h);
+}
+
+// ---- Worktrees (VS-20, VS-44, VS-45)
+
+#[test]
+fn the_worktree_a_tab_is_open_on_cant_be_removed_from_it() {
+    let f = Fx::new();
+    sample_history(&f);
+    let wt = f.root.parent().unwrap().join(format!("{}-wt", f.root.file_name().unwrap().to_string_lossy()));
+    let wt_str = wt.to_string_lossy().replace('\\', "/");
+    let wt_str = wt_str.strip_prefix("//?/").unwrap_or(&wt_str).to_string();
+    f.git(&["worktree", "add", "-q", "-b", "side", &wt_str]);
+    let linked = Fx { _dir: tempfile::tempdir().unwrap(), root: wt.canonicalize().unwrap(), git: f.git.clone() };
+    let mut h = harness(&linked);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Worktrees(Box::default()));
+    pump_for_label(&mut h, "open here");
+    let ups = h.query_all_by_label("More ▾").count();
+    assert_eq!(ups, 2);
+    let current_is_second = h.get_by_label("open here").rect().top() > h.get_by_label("main worktree").rect().top();
+    h.query_all_by_label("More ▾").nth(usize::from(current_is_second)).unwrap().click();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "Copy path");
+    assert!(h.query_by_label("Remove…").is_none(), "git would empty the folder and then fail");
+    assert!(h.query_by_label("Force remove…").is_none());
+    assert!(wt.exists());
+    std::fs::remove_dir_all(&wt).ok();
+}
+
+// ---- Workspaces (VS-42)
+
+#[test]
+fn a_repository_can_be_taken_out_of_a_workspace_and_names_stay_unique() {
+    let f = Fx::new();
+    sample_history(&f);
+    let path = f.root.to_string_lossy().replace('\\', "/");
+    let mut h = harness(&f);
+    h.state_mut().settings.workspaces.push(gitem_core::settings::Workspace { name: "work".into(), repos: vec![path.clone()] });
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::home());
+    pump_for_label(&mut h, "New workspace…");
+    click(&mut h, "New workspace…");
+    pump_for_label(&mut h, "New workspace");
+    h.event(egui::Event::Text("work".into()));
+    h.step();
+    click(&mut h, "Create");
+    pump_for_label(&mut h, "There's already a workspace called work.");
+    assert_eq!(h.state().settings.workspaces.len(), 1);
+    click(&mut h, "Cancel");
+
+    let name = f.root.file_name().unwrap().to_string_lossy().to_string();
+    wait_until_quiet(&mut h);
+    let row = h.query_all_by_label(&name).last().unwrap().rect().center();
+    right_click_at(&mut h, row);
+    click(&mut h, "Remove from this workspace");
+    wait_for(&mut h, "removed", || true);
+    h.step();
+    assert!(h.state().settings.workspaces[0].repos.is_empty(), "{:?}", h.state().settings.workspaces);
+}
+
+// ---- Two repositories (AS-15, AS-16)
+
+#[test]
+fn undo_in_one_repositorys_commit_box_stays_in_that_repository() {
+    let (a, b) = (Fx::new(), Fx::new());
+    sample_history(&a);
+    sample_history(&b);
+    let mut h = harness(&a);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    pump_for_any(&mut h, "Commit to main");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text("MESSAGE-FROM-REPO-A");
+    for _ in 0..3 {
+        h.step();
+    }
+
+    h.state_mut().open_repo(&ctx, &b.root, false);
+    wait_until_quiet(&mut h);
+    h.state_mut().repos[1].open_tab(Tab::changes());
+    pump_for_any(&mut h, "Commit to main");
+    h.get_by_role(input).focus();
+    h.step();
+    for _ in 0..2 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.step();
+    }
+    let message = |h: &Harness<GitemApp>, i: usize| h.state().repos[i].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Changes(c) = t { Some(c.message.clone()) } else { None }).unwrap();
+    assert_eq!(message(&h, 1), "", "the other repository's message came back");
+    assert_eq!(message(&h, 0), "MESSAGE-FROM-REPO-A");
+}
+
+#[test]
+fn closing_a_repository_before_the_one_on_show_keeps_showing_it() {
+    let (a, b, c) = (Fx::new(), Fx::new(), Fx::new());
+    for f in [&a, &b, &c] {
+        sample_history(f);
+    }
+    let mut h = harness(&a);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().open_repo(&ctx, &b.root, false);
+    h.state_mut().open_repo(&ctx, &c.root, false);
+    h.state_mut().active = 1;
+    h.step();
+    let showing = h.state().repos[1].repo.root.clone();
+    h.state_mut().request_close_repo(0);
+    h.step();
+    assert_eq!(h.state().repos.len(), 2);
+    assert_eq!(h.state().repos[h.state().active].repo.root, showing);
+}
+
+// ---- Inspect after a write (AS-20)
+
+#[test]
+fn the_inspect_panel_shows_a_note_as_soon_as_it_is_written() {
+    let f = Fx::new();
+    sample_history(&f);
+    let sha = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].inspect.set(&sha);
+    wait_until_quiet(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::note_set(&sha, "NOTE-XYZ")));
+    pump_for_any_contains(&mut h, "NOTE-XYZ");
+}
+
+// ---- Keys (AS-31)
+
+#[test]
+fn redo_in_a_text_field_leaves_the_panels_alone() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::changes());
+    pump_for_label(&mut h, "Commit to main");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    h.get_by_role(input).focus();
+    h.step();
+    let shift_command = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+    h.key_press_modifiers(shift_command, egui::Key::Z);
+    h.step();
+    h.step();
+    assert!(h.state().repos[0].panels_showing(), "Redo, in a text field");
+
+    // Elsewhere it's still Zen mode.
+    h.get_by_label("Commit to main");
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    h.ctx.memory_mut(|m| m.stop_text_input());
+    h.step();
+    h.key_press_modifiers(shift_command, egui::Key::Z);
+    h.step();
+    h.step();
+    assert!(!h.state().repos[0].panels_showing());
+}
+
+// ---- Status bar (AS-28, AS-35)
+
+#[test]
+fn the_status_bar_only_speaks_of_the_file_and_branch_in_front() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "other"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].data.branch_pr = Some(("main".to_string(), 7, "https://example.invalid/pr/7".to_string()));
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "PR #7");
+    f.git(&["switch", "-q", "other"]);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Refresh);
+    let t = Instant::now();
+    while h.query_by_label("PR #7").is_some() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "still links to main's pull request on another branch");
+    }
+
+    h.state_mut().repos[0].data.last_blame = "BLAME-TEXT".to_string();
+    open_tab_now(&mut h, Tab::file("a.txt", None, None));
+    wait_until_quiet(&mut h);
+    open_tab_now(&mut h, Tab::graph());
+    assert!(h.query_by_label("BLAME-TEXT").is_none(), "that file isn't in front");
+}
+
+// ---- Launchpad (VS-22, VS-23, VS-24, VS-50). A `.invalid` host: nothing ever answers.
+
+fn launchpad_repo(host: &str) -> (Fx, gitem_core::settings::CustomHost) {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["remote", "add", "origin", &format!("https://{host}/group/project.git")]);
+    let custom = gitem_core::settings::CustomHost { host: format!("https://{host}/"), kind: gitem_core::forge::ForgeKind::GitLab, api_base: String::new(), templates: Default::default() };
+    (f, custom)
+}
+
+#[test]
+fn launchpad_reloads_when_a_token_is_saved() {
+    let host = "reload-on-save.invalid";
+    let (f, custom) = launchpad_repo(host);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Settings(Box::new(move |s| s.custom_hosts.push(custom))));
+    open_tab_now(&mut h, Tab::Launchpad(Box::default()));
+    wait_until_quiet(&mut h);
+    let no_token = |h: &Harness<GitemApp>| error_boxes(h).iter().any(|b| b.contains("No token"));
+    assert!(no_token(&h), "{:?}", error_boxes(&h));
+
+    gitem_core::cred::set_forge_token(host, "", "FAKE_SECRET_VALUE").unwrap();
+    wait_until_quiet(&mut h);
+    assert!(no_token(&h), "nothing has told it yet");
+    // What saving the token form does.
+    h.state_mut().apply_action(&ctx, Action::Refresh);
+    h.step();
+    wait_until_quiet(&mut h);
+    assert!(!no_token(&h), "still says there's no token: {:?}", error_boxes(&h));
+    gitem_core::cred::delete(&format!("{}{host}", gitem_core::cred::PREFIX_FORGE)).unwrap();
+}
+
+#[test]
+fn create_pull_request_with_launchpad_open_goes_to_the_form_for_that_branch() {
+    let host = "retarget.invalid";
+    let (f, custom) = launchpad_repo(host);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Settings(Box::new(move |s| s.custom_hosts.push(custom))));
+    open_tab_now(&mut h, Tab::Launchpad(Box::default()));
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("Open in browser instead").is_none());
+    open_tab_now(&mut h, Tab::Launchpad(Box::new(gitem::views::launchpad::LaunchpadView::create_pr_for("topic", "main"))));
+    pump_for_label(&mut h, "Open in browser instead");
+    assert_eq!(tab_keys(&h).iter().filter(|k| *k == "launchpad").count(), 1);
+}
+
+// ---- Repository Tools writes (TQ-3 item 6, CG-33)
+
+#[test]
+fn hooks_are_made_turned_off_and_on_and_deleted() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Tools(Box::default()));
+    click(&mut h, "Hooks");
+    wait_until_quiet(&mut h);
+    let hook = f.root.join(".git/hooks/pre-commit");
+    let off = f.root.join(".git/hooks/pre-commit.disabled");
+    std::fs::remove_file(&hook).ok();
+    let y = h.get_by_label("pre-commit").rect().center().y;
+    let create = h.query_all_by_label("Create").find(|n| (n.rect().center().y - y).abs() < 12.0).expect("a Create on its row").rect().center();
+    click_at(&mut h, create);
+    wait_until_quiet(&mut h);
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), "#!/bin/sh\n\nexit 0\n");
+
+    click(&mut h, "Enabled");
+    wait_until_quiet(&mut h);
+    assert!(off.exists() && !hook.exists(), "turned off by renaming it");
+    click(&mut h, "Enabled");
+    wait_until_quiet(&mut h);
+    assert!(hook.exists() && !off.exists(), "and back");
+
+    click(&mut h, "Delete…");
+    click(&mut h, "Delete it");
+    wait_until_quiet(&mut h);
+    assert!(!hook.exists());
+    no_errors(&h);
+}
+
+#[test]
+fn the_ignore_page_saves_what_is_typed_and_reloads_what_is_there() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write(".gitignore", "*.log\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Tools(Box::default()));
+    click(&mut h, ".gitignore");
+    pump_for_label(&mut h, "Save");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text("build/\n");
+    h.step();
+    h.step();
+    click(&mut h, "Save");
+    wait_until_quiet(&mut h);
+    let saved = std::fs::read_to_string(f.root.join(".gitignore")).unwrap();
+    assert!(saved.contains("build/") && saved.contains("*.log"), "{saved:?}");
+    assert!(f.git.run_raw(Some(&f.root), &["check-ignore", "-q", "build/x"]).unwrap().ok(), "git goes by it");
+
+    std::fs::write(f.root.join(".gitignore"), "changed-outside\n").unwrap();
+    click(&mut h, "Reload");
+    h.step();
+    h.step();
+    assert_eq!(h.get_by_role(input).accesskit_node().value().unwrap_or_default().trim(), "changed-outside");
+    no_errors(&h);
+}
+
+#[test]
+fn clean_deletes_what_it_lists_and_says_what_it_leaves() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("junk/file.txt", "x");
+    f.write("nested/inner.txt", "y");
+    f.git.run(Some(&f.root.join("nested")), &["init", "-q"]).unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Tools(Box::default()));
+    click(&mut h, "Clean");
+    click(&mut h, "Include folders");
+    wait_until_quiet(&mut h);
+    pump_for_label(&mut h, "1 item(s) would be deleted");
+    pump_for_any_contains(&mut h, "Left alone");
+    assert!(h.query_by_label_contains("nested/").is_some());
+    click(&mut h, "Delete these…");
+    pump_for_label(&mut h, "Delete");
+    wait_until_quiet(&mut h);
+    click(&mut h, "Delete");
+    wait_for(&mut h, "deleted", || !f.root.join("junk").exists());
+    assert!(f.root.join("nested/inner.txt").exists());
+    no_errors(&h);
+}
+
+#[test]
+fn sparse_patterns_are_read_and_applied() {
+    let f = Fx::new();
+    f.write("keep/a.txt", "a\n");
+    f.write("drop/b.txt", "b\n");
+    f.commit("two folders");
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Tools(Box::default()));
+    click(&mut h, "Sparse checkout");
+    pump_for_label(&mut h, "Disable sparse checkout");
+    let input = egui::accesskit::Role::MultilineTextInput;
+    h.get_by_role(input).focus();
+    h.step();
+    h.get_by_role(input).type_text("keep");
+    h.step();
+    h.step();
+    click(&mut h, "Apply");
+    wait_for(&mut h, "sparse applied", || !f.root.join("drop/b.txt").exists());
+    assert!(f.root.join("keep/a.txt").exists());
+    click(&mut h, "Disable sparse checkout");
+    wait_for(&mut h, "sparse off", || f.root.join("drop/b.txt").exists());
+    no_errors(&h);
+}
+
+#[test]
+fn object_counts_change_after_garbage_collection() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Tools(Box::default()));
+    click(&mut h, "Maintenance");
+    wait_until_quiet(&mut h);
+    pump_for_any_contains(&mut h, "in-pack: 0");
+    click(&mut h, "Garbage collect");
+    wait_for(&mut h, "packed", || !f.git(&["count-objects", "-v"]).contains("in-pack: 0"));
+    let t = Instant::now();
+    while h.query_by_label_contains("in-pack: 0").is_some() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "still the counts from before");
+    }
+}
+
+// ---- Review (VS-36, VS-39)
+
+#[test]
+fn review_with_a_base_that_doesnt_exist_asks_for_another() {
+    let f = Fx::new();
+    f.write("a.txt", "a\n");
+    f.commit("first");
+    f.git(&["branch", "-m", "work"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Review(Box::default()));
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label_contains("Can't compare with").is_some(), "{:?}", error_boxes(&h));
+    no_errors(&h);
+}
+
+#[test]
+fn a_review_note_can_be_dismissed_and_brought_back() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "base", "HEAD~1"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Review(Box::default()));
+    wait_until_quiet(&mut h);
+    h.query_all_by_role(egui::accesskit::Role::TextInput).last().unwrap().focus();
+    h.step();
+    h.event(egui::Event::Text("look at this".into()));
+    h.step();
+    click(&mut h, "Add");
+    pump_for_label(&mut h, "look at this");
+    click(&mut h, "Dismiss");
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("look at this").is_none());
+    click(&mut h, "Show dismissed (1)");
+    pump_for_label(&mut h, "look at this");
+    click(&mut h, "Restore");
+    wait_until_quiet(&mut h);
+    assert!(h.query_by_label("look at this").is_some());
+    assert!(h.query_by_label_contains("Show dismissed").is_some());
+}
+
+#[test]
+fn a_reviewed_mark_goes_when_the_file_changes() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "main-base", "HEAD~1"]);
+    f.git(&["switch", "-qc", "topic"]);
+    f.write("t.txt", "one\n");
+    f.commit("topic work");
+    let mut h = harness(&f);
+    settle(&mut h);
+    let review = f.root.join(".git/gitem-review.json");
+    std::fs::write(&review, r#"{"base":"main","reviewed":[],"threads":[]}"#).unwrap();
+    open_tab_now(&mut h, Tab::Review(Box::default()));
+    pump_for_label(&mut h, "0 of 1 files reviewed");
+    wait_until_quiet(&mut h);
+    // The file's row is the only tick box here.
+    h.get_by_role(egui::accesskit::Role::CheckBox).click();
+    h.step();
+    h.step();
+    pump_for_label(&mut h, "1 of 1 files reviewed");
+
+    f.write("t.txt", "two\n");
+    f.commit("more");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Refresh);
+    pump_for_label(&mut h, "0 of 1 files reviewed");
+    no_errors(&h);
+}
+
+// ---- Recents (AS-44)
+
+#[test]
+fn a_recent_repository_can_be_forgotten() {
+    let settings = gitem_core::settings::Settings { recent_repos: vec!["Z:/gone/one".to_string(), "Z:/gone/two".to_string()], ..Default::default() };
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, settings);
+    app.git = Ok(real_git());
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1200.0, 800.0)).with_max_steps(5);
+    let mut h = builder.build_ui_state(|ui, app: &mut GitemApp| app.frame(ui), app);
+    h.step();
+    pump_for_label(&mut h, "Z:/gone/one");
+    let at = h.get_by_label("Z:/gone/one").rect().center();
+    right_click_at(&mut h, at);
+    click(&mut h, "Remove from this list");
+    h.step();
+    assert_eq!(h.state().settings.recent_repos, ["Z:/gone/two"]);
+    assert!(h.state().errors_showing().is_empty(), "nothing tried to open it");
+}
+
+// ---- Graph (Current filter, Phase 6 remainder)
+
+#[test]
+fn the_current_filter_works_on_a_branch_with_no_upstream() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["switch", "-qc", "lonely"]);
+    f.write("c.txt", "c\n");
+    f.commit("on lonely");
+    f.git(&["switch", "-qc", "elsewhere", "main"]);
+    f.write("d.txt", "d\n");
+    f.commit("on elsewhere");
+    f.git(&["switch", "-q", "lonely"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::graph());
+    pump_for_label(&mut h, "on elsewhere");
+    click(&mut h, "Current");
+    let t = Instant::now();
+    while h.query_by_label("on elsewhere").is_some() {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the filter did nothing");
+    }
+    pump_for_label(&mut h, "on lonely");
+    assert!(h.query_by_label("second").is_some(), "the branch's history, not an empty graph");
+    no_errors(&h);
+}
+
+// ---- Pick lists (CG-11)
+
+#[test]
+fn a_tag_and_branch_of_one_name_are_told_apart_in_pick_lists() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "same"]);
+    f.git(&["tag", "same", "HEAD~1"]);
+    f.git(&["tag", "only-tag"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    let names = h.state().repos[0].data.ref_names();
+    assert!(names.contains(&"refs/heads/same".to_string()), "{names:?}");
+    assert!(names.contains(&"refs/tags/same".to_string()), "{names:?}");
+    assert!(!names.contains(&"same".to_string()), "{names:?}");
+    assert!(names.contains(&"only-tag".to_string()), "{names:?}");
+    for n in &names {
+        assert_eq!(names.iter().filter(|x| *x == n).count(), 1, "{n}");
+        f.git(&["rev-parse", "--verify", "-q", n]);
+    }
+    let branch = f.git(&["rev-parse", "refs/heads/same"]);
+    let tag = f.git(&["rev-parse", "refs/tags/same"]);
+    assert_ne!(branch, tag, "each means what it says");
+}
+
+// ---- Console (VS-50)
+
+#[test]
+fn a_console_with_nothing_to_show_says_why() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    settle(&mut h);
+    open_tab_now(&mut h, Tab::Console(Box::default()));
+    pump_for_label(&mut h, "Nothing to show");
+}
+
+// ---- Palette (VS-43)
+
+#[test]
+fn the_palette_finds_commands_people_look_for() {
+    let f = Fx::new();
+    sample_history(&f);
+    let names: Vec<String> = gitem::palette::commands().into_iter().map(|c| c.label).collect();
+    let _ = f;
+    for (typed, expect) in [("blame", "Blame a File…"), ("amend", "Amend Last Commit's Message…"), ("delete", "Delete a Branch…"), ("commit", "Commit Changes"), ("theme", "Change Theme…")] {
+        let best = names.iter().filter_map(|n| gitem_core::util::fuzzy_match(typed, n).map(|m| (m.0, n))).max_by_key(|x| x.0).map(|x| x.1.as_str());
+        assert!(names.iter().any(|n| n == expect), "{expect}");
+        assert!(gitem_core::util::fuzzy_match(typed, expect).is_some(), "{typed} doesn't reach {expect}: best was {best:?}");
+    }
+}
+
+/// Through the palette, with what it would do on the first result for the typed text.
+fn run_from_palette(h: &mut Harness<GitemApp>, typed: &str) {
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::OpenPalette);
+    h.step();
+    h.step();
+    h.event(egui::Event::Text(typed.into()));
+    h.step();
+    h.step();
+    h.key_press(egui::Key::Enter);
+    h.step();
+    h.step();
+}
+
+#[test]
+fn undo_last_commit_from_the_palette_on_a_first_commit_says_so() {
+    let f = Fx::new();
+    f.write("a.txt", "a
+");
+    f.commit("only");
+    let mut h = harness(&f);
+    settle(&mut h);
+    run_from_palette(&mut h, "Undo Last Commit");
+    pump_for_any_contains(&mut h, "first commit on this branch");
+    assert!(h.state().errors_showing().is_empty(), "{:?}", h.state().errors_showing());
+    assert_eq!(f.subjects(), ["only"]);
+}
+
+#[test]
+fn checking_out_a_remote_branch_with_a_local_one_of_that_name_switches_to_it() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+    f.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    f.git(&["switch", "-qc", "other"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    run_from_palette(&mut h, "origin/main");
+    wait_for(&mut h, "switched", || f.git(&["branch", "--show-current"]).trim() == "main");
+    no_errors(&h);
 }

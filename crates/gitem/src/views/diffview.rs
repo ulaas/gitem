@@ -601,6 +601,16 @@ impl DiffView {
             ui.painter().text(pos2(rect.left() + gutter - 6.0, rect.center().y), Align2::RIGHT_CENTER, n.to_string(), mono(font - 1.5), pal.faint);
         }
         let changed = matches!(kind, Some(LineKind::Add | LineKind::Del));
+        // Red and green can look alike. Unified has these signs in its text already.
+        match kind {
+            Some(LineKind::Add) => {
+                ui.painter().text(pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, "+", mono(font - 1.5), pal.add_fg);
+            }
+            Some(LineKind::Del) => {
+                ui.painter().text(pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, "-", mono(font - 1.5), pal.del_fg);
+            }
+            _ => {}
+        }
         if changed && self.can_patch()
             && let Some(k) = key {
                 let gr = Rect::from_min_size(rect.min, vec2(gutter, rect.height()));

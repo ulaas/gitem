@@ -67,6 +67,24 @@ impl TextView {
         format!("text:{}", self.title)
     }
 
+    /// A new job with the same title runs here. What's on show can still be undone, though,
+    /// and that would be lost, so then the new one gets a tab of its own.
+    pub fn retarget(&mut self, mut new: Self) -> Option<Self> {
+        let undoable = self.undo.as_ref().is_some_and(|slot| slot.lock().ok().is_some_and(|g| g.is_some()));
+        if undoable {
+            new.title.push_str(" (again)");
+            return Some(new);
+        }
+        if let Some(s) = &self.stop {
+            s.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.job = new.job.take();
+        self.text = Task::default();
+        self.undo = new.undo.take();
+        self.stop = new.stop.take();
+        None
+    }
+
     pub fn title(&self) -> String {
         self.title.clone()
     }

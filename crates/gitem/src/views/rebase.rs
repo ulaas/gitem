@@ -29,6 +29,8 @@ pub struct RebaseView {
     /// and a rebase would silently drop them.
     planned_head: Task<String>,
     stale: bool,
+    /// HEAD as it is now, being read so the plan can be checked against it.
+    head_now: Task<String>,
     pending: Option<(String, RebaseAction)>,
     drag: Option<usize>,
     selected: usize,
@@ -49,6 +51,7 @@ impl RebaseView {
             root: false,
             planned_head: Task::default(),
             stale: false,
+            head_now: Task::default(),
             pending: None,
             drag: None,
             selected: 0,
@@ -194,6 +197,7 @@ impl RebaseView {
         });
         ui.separator();
 
+        self.start_if_head_unchanged(cx);
         let errs = rebase::validate(&self.items);
         egui::Panel::bottom("rebase-actions").show(ui, |ui| {
             ui.add_space(4.0);
@@ -201,10 +205,10 @@ impl RebaseView {
                 ui.colored_label(p.danger, e);
             }
             ui.horizontal(|ui| {
-                let ok = errs.is_empty() && !self.items.is_empty() && !self.stale;
+                let ok = errs.is_empty() && !self.items.is_empty() && !self.stale && !self.head_now.busy();
                 let b = egui::Button::new(RichText::new(if self.todo_file.is_some() { "Start rebase".to_string() } else { format!("Rebase {} commit(s)", self.items.len()) }).color(if ok { p.on_accent } else { p.faint })).fill(if ok { p.accent } else { p.panel2 });
                 if ui.add_enabled(ok, b).clicked() {
-                    self.start(cx);
+                    self.start(ui.ctx(), cx);
                 }
                 if let Some(path) = &self.todo_file
                     && ui.button("Abort rebase").clicked() {
@@ -341,7 +345,7 @@ impl RebaseView {
         }
     }
 
-    fn start(&mut self, cx: &mut Cx) {
+    fn start(&mut self, ctx: &egui::Context, cx: &mut Cx) {
         if let Some(path) = &self.todo_file {
             match std::fs::write(path, rebase::render_todo(&self.items)) {
                 Ok(()) => self.finished = Some(true),
@@ -349,7 +353,19 @@ impl RebaseView {
             }
             return;
         }
-        let now = cx.repo.resolve("HEAD").unwrap_or_default();
+        if !self.head_now.busy() {
+            let r = cx.repo.clone();
+            self.head_now.spawn(ctx, move || r.resolve("HEAD"));
+        }
+    }
+
+    /// The plan is good only for the HEAD it was made from.
+    fn start_if_head_unchanged(&mut self, cx: &mut Cx) {
+        if !self.head_now.poll() {
+            return;
+        }
+        self.head_now.error = None;
+        let now = self.head_now.value.take().unwrap_or_default();
         if self.planned_head.get().is_none_or(|h| *h != now) {
             self.stale = true;
             return;

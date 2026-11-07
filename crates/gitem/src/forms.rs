@@ -18,7 +18,16 @@ pub enum Field {
     /// Text input with a filterable list of suggestions below it.
     Pick { key: &'static str, label: String, options: Vec<String>, value: String },
     Info(String),
-    Path { key: &'static str, label: String, value: String, folder: bool },
+    Path { key: &'static str, label: String, value: String, kind: PathKind },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum PathKind {
+    Folder,
+    /// A file that's there already.
+    File,
+    /// A file to be made, so the dialog mustn't insist that it exists.
+    NewFile,
 }
 
 pub struct Values {
@@ -61,11 +70,20 @@ pub struct FormDialog {
     /// A file picker that's open, and which field it's for.
     picking: crate::task::Task<Option<std::path::PathBuf>>,
     picking_field: usize,
+    derived: Option<Derived>,
+}
+
+/// A field that follows others, such as a location named after the chosen branch.
+struct Derived {
+    key: &'static str,
+    /// What it last worked out. Anything else in the field was typed there.
+    last: String,
+    compute: Box<dyn Fn(&Values) -> String>,
 }
 
 impl FormDialog {
     pub fn new(title: impl Into<String>, submit: impl Into<String>) -> Self {
-        Self { title: title.into(), fields: Vec::new(), submit: submit.into(), danger: false, on_submit: Box::new(|_| Ok(Vec::new())), error: None, first_shown: None, picking: Default::default(), picking_field: 0 }
+        Self { title: title.into(), fields: Vec::new(), submit: submit.into(), danger: false, on_submit: Box::new(|_| Ok(Vec::new())), error: None, first_shown: None, picking: Default::default(), picking_field: 0, derived: None }
     }
 
     fn fingerprint(&self) -> String {
@@ -119,8 +137,35 @@ impl FormDialog {
         self
     }
     pub fn path(mut self, key: &'static str, label: &str, value: &str, folder: bool) -> Self {
-        self.fields.push(Field::Path { key, label: label.into(), value: value.into(), folder });
+        self.fields.push(Field::Path { key, label: label.into(), value: value.into(), kind: if folder { PathKind::Folder } else { PathKind::File } });
         self
+    }
+    pub fn new_file(mut self, key: &'static str, label: &str, value: &str) -> Self {
+        self.fields.push(Field::Path { key, label: label.into(), value: value.into(), kind: PathKind::NewFile });
+        self
+    }
+    /// Keeps one field's value worked out from the others, until someone types in it.
+    pub fn derived(mut self, key: &'static str, f: impl Fn(&Values) -> String + 'static) -> Self {
+        let last = self.values().text.get(key).cloned().unwrap_or_default();
+        self.derived = Some(Derived { key, last, compute: Box::new(f) });
+        self
+    }
+    fn update_derived(&mut self) {
+        let values = self.values();
+        let Some(d) = &mut self.derived else { return };
+        let want = (d.compute)(&values);
+        if want == d.last {
+            return;
+        }
+        for f in &mut self.fields {
+            if let Field::Path { key, value, .. } | Field::Text { key, value, .. } = f
+                && *key == d.key
+                && *value == d.last
+            {
+                *value = want.clone();
+            }
+        }
+        d.last = want;
     }
     pub fn danger(mut self) -> Self {
         self.danger = true;
@@ -158,6 +203,7 @@ impl FormDialog {
         if self.first_shown.is_none() {
             self.first_shown = Some(self.fingerprint());
         }
+        self.update_derived();
         let mut first_text = true;
         ui.set_min_width(440.0);
         for (i, f) in self.fields.iter_mut().enumerate() {
@@ -203,14 +249,18 @@ impl FormDialog {
                 Field::Info(t) => {
                     ui.label(RichText::new(t.as_str()).color(p.dim));
                 }
-                Field::Path { label, value, folder, .. } => {
+                Field::Path { label, value, kind, .. } => {
                     ui.label(RichText::new(label.as_str()).color(p.dim));
                     ui.horizontal(|ui| {
                         let browse = ui.add_enabled(!self.picking.busy(), egui::Button::new("Browse…")).clicked();
                         ui.add(crate::widgets::input(value).desired_width(f32::INFINITY));
                         if browse {
                             self.picking_field = i;
-                            crate::widgets::pick(&mut self.picking, ui.ctx(), rfd::FileDialog::new(), *folder);
+                            match kind {
+                                PathKind::Folder => crate::widgets::pick(&mut self.picking, ui.ctx(), rfd::FileDialog::new(), true),
+                                PathKind::File => crate::widgets::pick(&mut self.picking, ui.ctx(), rfd::FileDialog::new(), false),
+                                PathKind::NewFile => crate::widgets::pick_new_file(&mut self.picking, ui.ctx(), rfd::FileDialog::new()),
+                            }
                         }
                         if self.picking_field == i
                             && self.picking.poll()
@@ -231,7 +281,7 @@ impl FormDialog {
         let mut submit = false;
         ui.horizontal(|ui| {
             let fill = if self.danger { p.danger } else { p.accent };
-            let text = if self.danger { egui::Color32::WHITE } else { p.on_accent };
+            let text = if self.danger { crate::theme::ink_on(p.danger) } else { p.on_accent };
             let b = egui::Button::new(RichText::new(self.submit.as_str()).color(text)).fill(fill);
             submit = ui.add(b).clicked();
             if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -390,15 +440,27 @@ fn default_worktree_path(repo: &Repo, leaf: &str) -> String {
 pub fn add_worktree(repo: &Repo, refs: Vec<String>, initial: Option<String>) -> FormDialog {
     let init = initial.unwrap_or_default();
     let path = default_worktree_path(repo, if init.is_empty() { "new" } else { &init });
+    let (name, parent) = (repo.name(), repo.root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| repo.root.clone()));
     FormDialog::new("Add worktree", "Add")
         .pick("start", "Branch or commit", refs, &init)
         .text("new_branch", "Create new branch (optional)", "")
         .path("path", "Location", &path, true)
         .check("detach", "Detached HEAD", false)
+        .derived("path", move |v| {
+            let leaf = v.opt("new_branch").or_else(|| v.opt("start")).unwrap_or_else(|| "new".to_string());
+            parent.join(format!("{name}.worktrees/{}", leaf.replace('/', "-"))).to_string_lossy().replace('\\', "/")
+        })
         .on_submit(move |v| {
             let path = required(v, "path", "A location")?;
             let start = v.opt("start");
             let nb = v.opt("new_branch");
+            // Git would quietly make a branch named after the folder.
+            if start.is_none() && nb.is_none() {
+                return Err("Choose a branch or commit, or name a new branch.".to_string());
+            }
+            if nb.is_some() && v.on("detach") {
+                return Err("A detached worktree has no branch, so choose one or the other.".to_string());
+            }
             let op = if nb.is_some() {
                 ops::worktree_add(&path, None, nb.as_deref(), start.as_deref(), false)
             } else {
@@ -586,7 +648,7 @@ pub fn format_patch_form(range: String) -> FormDialog {
 }
 
 pub fn archive_form(rev: String) -> FormDialog {
-    FormDialog::new(format!("Archive {}", gitem_core::util::prefix(&rev, 12)), "Create").choice("format", "Format", &["zip", "tar", "tar.gz"], 0).path("path", "Output file", "", false).on_submit(move |v| run(ops::archive(&rev, &required(v, "path", "A path")?, &v.text("format"))))
+    FormDialog::new(format!("Archive {}", gitem_core::util::prefix(&rev, 12)), "Create").choice("format", "Format", &["zip", "tar", "tar.gz"], 0).new_file("path", "Output file", "").on_submit(move |v| run(ops::archive(&rev, &required(v, "path", "A path")?, &v.text("format"))))
 }
 
 pub fn note_form(sha: String, current: String) -> FormDialog {
@@ -696,6 +758,10 @@ mod tests {
     fn submit(form: &mut FormDialog) -> Result<Vec<Action>, String> {
         let values = form.values();
         (form.on_submit)(&values)
+    }
+
+    fn submit_values(form: &FormDialog, key: &str) -> String {
+        form.values().text(key)
     }
 
     fn check(what: &str, mut form: FormDialog, inputs: &[(&str, &str)], expected: &str) {
@@ -812,7 +878,24 @@ mod tests {
         let repo = Repo::open(git, d.path()).unwrap();
         check("existing branch", add_worktree(&repo, vec![], Some(s("x"))), &[("path", "/w")], "worktree add /w x");
         check("new branch", add_worktree(&repo, vec![], Some(s("main"))), &[("path", "/w"), ("new_branch", "n")], "worktree add -b n /w main");
-        check("new branch wins over detach", add_worktree(&repo, vec![], None), &[("path", "/w"), ("new_branch", "n"), ("detach", "1")], "worktree add -b n /w");
+        check("a new branch from HEAD", add_worktree(&repo, vec![], None), &[("path", "/w"), ("new_branch", "n")], "worktree add -b n /w");
+        // Each of these would do something other than what the form says.
+        let mut both = add_worktree(&repo, vec![], None);
+        set(&mut both, "new_branch", "n");
+        set(&mut both, "detach", "1");
+        assert!(submit(&mut both).is_err(), "detached and on a new branch");
+        let mut neither = add_worktree(&repo, vec![], None);
+        set(&mut neither, "path", "/w");
+        assert!(submit(&mut neither).is_err(), "git would make a branch named after the folder");
+        // The location follows the choice, until someone types one.
+        let mut follows = add_worktree(&repo, vec![], Some(s("a")));
+        set(&mut follows, "start", "topic/b");
+        follows.update_derived();
+        assert!(submit_values(&follows, "path").ends_with(".worktrees/topic-b"));
+        set(&mut follows, "path", "/mine");
+        set(&mut follows, "start", "c");
+        follows.update_derived();
+        assert_eq!(submit_values(&follows, "path"), "/mine", "what was typed stays");
         check("detached", add_worktree(&repo, vec![], Some(s("abc"))), &[("path", "/w"), ("detach", "1")], "worktree add --detach /w abc");
         let leaf = add_worktree(&repo, vec![], Some(s("feature/x")));
         let Field::Path { value, .. } = &leaf.fields[2] else { panic!("the third field is the location") };

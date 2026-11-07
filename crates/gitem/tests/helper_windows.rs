@@ -82,13 +82,13 @@ fn temp_file(d: &tempfile::TempDir, name: &str, text: &[u8]) -> PathBuf {
 fn message_editor_saves_or_leaves_the_file_alone() {
     let d = tempfile::tempdir().unwrap();
     let p = temp_file(&d, "COMMIT_EDITMSG", b"original\n");
-    let mut h = harness(Mode::Editor { path: p.clone(), text: "edited message\n".to_string() });
+    let mut h = harness(Mode::Editor { path: p.clone(), text: "edited message\n".to_string(), not_utf8: false });
     click(&mut h, "Save and continue");
     assert_eq!(h.state().result, Some((0, None)));
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "edited message\n");
 
     let p2 = temp_file(&d, "other", b"keep me\n");
-    let mut h = harness(Mode::Editor { path: p2.clone(), text: "changed\n".to_string() });
+    let mut h = harness(Mode::Editor { path: p2.clone(), text: "changed\n".to_string(), not_utf8: false });
     click(&mut h, "Cancel");
     assert_eq!(h.state().result, Some((1, None)), "git aborts on a non-zero exit");
     assert_eq!(std::fs::read_to_string(&p2).unwrap(), "keep me\n");
@@ -195,12 +195,27 @@ fn standalone_merge_tool_keeps_non_utf8_bytes() {
     assert_eq!(std::fs::read(&merged).unwrap(), b"caf\xe9 l\n");
 }
 
+/// Saving would change a message it can't show exactly, so that's not offered.
+#[test]
+fn a_message_that_isnt_utf8_can_only_be_kept() {
+    let d = tempfile::tempdir().unwrap();
+    let bytes = b"caf\xe9 au lait\n";
+    let p = temp_file(&d, "COMMIT_EDITMSG", bytes);
+    let (text, not_utf8) = gitem::standalone::read_message(&p);
+    assert!(not_utf8);
+    let mut h = harness(Mode::Editor { path: p.clone(), text, not_utf8 });
+    assert!(h.query_by_label("Save and continue").is_none());
+    click(&mut h, "Keep it as it is and continue");
+    assert_eq!(h.state().result, Some((0, None)), "git goes on, with the file as it stands");
+    assert_eq!(std::fs::read(&p).unwrap(), bytes);
+}
+
 #[test]
 fn helper_windows_have_their_own_titlebar() {
     let d = tempfile::tempdir().unwrap();
     let file = d.path().join("msg");
     std::fs::write(&file, "text\n").unwrap();
-    let app = HelperApp::new(Mode::Editor { path: file, text: "text\n".into() });
+    let app = HelperApp::new(Mode::Editor { path: file, text: "text\n".into(), not_utf8: false });
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(680.0, 474.0)).with_max_steps(5).build_ui_state(|ui, a: &mut HelperApp| a.frame(ui), app);
     h.step();
     h.step();

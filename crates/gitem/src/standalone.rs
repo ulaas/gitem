@@ -22,7 +22,7 @@ pub static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 pub enum Mode {
     Askpass { prompt: String, value: String, secret: bool, confirm: bool },
-    Editor { path: PathBuf, text: String },
+    Editor { path: PathBuf, text: String, not_utf8: bool },
     Rebase(Box<RebaseView>),
     Merge(Box<MergeView>),
     Diff(Box<DiffView>),
@@ -33,6 +33,7 @@ pub struct HelperApp {
     repo: Option<Repo>,
     data: RepoData,
     settings: Settings,
+    read_status: bool,
     pal: Palette,
     themed: bool,
     error: Option<String>,
@@ -95,7 +96,7 @@ impl HelperApp {
         let settings = Settings::load();
         let pal = Palette::for_settings(settings.theme, &settings.accent);
         let shot = test_switch("GITEM_SHOT").map(|p| (PathBuf::from(p), std::time::Instant::now(), false));
-        Self { mode, repo: repo_here(), data: RepoData::default(), settings, pal, themed: false, error: None, result: None, shot, accept: test_switch("GITEM_TEST_ACCEPT").map(|v| (v.to_string_lossy().into_owned(), 0)), #[cfg(windows)] styled_window: false }
+        Self { mode, repo: repo_here(), data: RepoData::default(), settings, read_status: false, pal, themed: false, error: None, result: None, shot, accept: test_switch("GITEM_TEST_ACCEPT").map(|v| (v.to_string_lossy().into_owned(), 0)), #[cfg(windows)] styled_window: false }
     }
 
     fn auto_accept(&mut self, ctx: &egui::Context) {
@@ -113,7 +114,7 @@ impl HelperApp {
         let waited = *frames;
         match &mut self.mode {
             Mode::Askpass { .. } => self.result = Some((0, Some(value))),
-            Mode::Editor { path, text } => {
+            Mode::Editor { path, text, .. } => {
                 let saved = format!("{value}\n{text}");
                 self.result = Some(std::fs::write(&*path, saved).map_or((1, None), |()| (0, None)));
             }
@@ -225,11 +226,18 @@ impl HelperApp {
         egui::CentralPanel::default().show(ui, |ui| {
             match &mut self.mode {
                 Mode::Askpass { prompt, value, secret, confirm } => Self::askpass(ui, prompt, value, *secret, *confirm, &p, &mut self.result),
-                Mode::Editor { path, text } => {
+                Mode::Editor { path, text, not_utf8 } => {
                     egui::Panel::bottom("editor-actions").show(ui, |ui| {
                         ui.add_space(4.0);
+                        if *not_utf8 {
+                            // Git uses the file as it stands if it isn't written to.
+                            ui.colored_label(p.warn, "This file isn't UTF-8, so what's shown here isn't exact, and saving would change it. It can only be kept as it is.");
+                        }
                         ui.horizontal(|ui| {
-                            let save = ui.add(egui::Button::new(RichText::new("Save and continue").color(p.on_accent)).fill(p.accent)).clicked() || ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
+                            if *not_utf8 && ui.button("Keep it as it is and continue").clicked() {
+                                self.result = Some((0, None));
+                            }
+                            let save = !*not_utf8 && (ui.add(egui::Button::new(RichText::new("Save and continue").color(p.on_accent)).fill(p.accent)).clicked() || ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter)));
                             if save {
                                 match std::fs::write(&*path, text.as_bytes()) {
                                     Ok(()) => self.result = Some((0, None)),
@@ -255,6 +263,10 @@ impl HelperApp {
                         error_box(ui, "Git could not be found.", &p);
                         return;
                     };
+                    // The merge tool's labels depend on whether this is a rebase, which status says.
+                    if matches!(mode, Mode::Merge(_)) && !std::mem::replace(&mut self.read_status, true) {
+                        self.data.refresh(&ctx, repo);
+                    }
                     self.data.poll(&ctx, repo);
                     let mut out: Vec<Action> = Vec::new();
                     let mut cx = Cx { repo, data: &self.data, settings: &self.settings, pal: &p, out: &mut out, dialog_open: false };
@@ -321,10 +333,19 @@ pub fn askpass(prompt: String) -> i32 {
     run(Mode::Askpass { prompt, value: String::new(), secret, confirm }, "gitem: git needs your input", [460.0, 204.0])
 }
 
+/// A message file for editing, and whether it can't be saved back without changing it.
+pub fn read_message(path: &std::path::Path) -> (String, bool) {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    match String::from_utf8(bytes) {
+        Ok(text) => (text, false),
+        Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), true),
+    }
+}
+
 pub fn edit_file(path: PathBuf) -> i32 {
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let (text, not_utf8) = read_message(&path);
     EXIT_CODE.store(1, Ordering::SeqCst);
-    run(Mode::Editor { path, text }, "gitem: edit message", [680.0, 474.0])
+    run(Mode::Editor { path, text, not_utf8 }, "gitem: edit message", [680.0, 474.0])
 }
 
 pub fn rebase_editor(path: PathBuf) -> i32 {
@@ -344,6 +365,18 @@ pub fn difftool(a: String, b: String) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_that_isnt_utf8_is_shown_but_not_taken_for_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("msg");
+        std::fs::write(&f, b"caf\xe9 au lait\n").unwrap();
+        let (text, not_utf8) = read_message(&f);
+        assert!(not_utf8);
+        assert!(text.contains("au lait"), "{text}");
+        std::fs::write(&f, "café\n").unwrap();
+        assert_eq!(read_message(&f), ("café\n".to_string(), false));
+    }
 
     #[test]
     fn only_a_username_prompt_is_shown_as_typed() {

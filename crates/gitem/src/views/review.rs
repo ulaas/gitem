@@ -1,8 +1,9 @@
 //! Review sessions: a checklist of changed files with comment threads, AI findings
 //! you can reply to or dismiss, and a hand-off of open notes to a coding agent.
 //! Saved inside the repository's git folder, so nothing is committed by accident.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use egui::{RichText, Ui};
 use gitem_core::ai;
@@ -30,14 +31,21 @@ struct Saved {
     base: String,
     reviewed: HashSet<String>,
     threads: Vec<Thread>,
+    /// The version of each file that was marked, so a later change takes its mark away.
+    #[serde(default)]
+    reviewed_blobs: HashMap<String, String>,
 }
 
 #[derive(Default)]
 pub struct ReviewView {
     saved: Saved,
     loaded: bool,
-    files: Task<Vec<FileChange>>,
+    files: Task<(Vec<FileChange>, HashMap<String, String>)>,
     files_gen: Option<(u64, String)>,
+    /// The base the list is for. It catches up with the box once typing pauses.
+    settled_base: Option<String>,
+    base_typed: Option<Instant>,
+    show_dismissed: bool,
     selected: Option<String>,
     new_comment: String,
     replies: Vec<String>,
@@ -45,6 +53,8 @@ pub struct ReviewView {
     /// New review was clicked with notes to lose, and awaits a yes.
     confirm_new: bool,
 }
+
+const BASE_SETTLES: Duration = Duration::from_millis(400);
 
 fn store_path(cx: &Cx) -> PathBuf {
     cx.repo.git_dir.join("gitem-review.json")
@@ -100,7 +110,18 @@ impl ReviewView {
                 self.saved.base = cx.data.base_branch();
             }
         }
-        self.files.poll();
+        if self.files.poll()
+            && let Some((_, blobs)) = self.files.get()
+        {
+            let saved = &mut self.saved;
+            let before = saved.reviewed.len();
+            saved.reviewed.retain(|f| saved.reviewed_blobs.get(f).is_none_or(|b| blobs.get(f) == Some(b)));
+            saved.reviewed_blobs.retain(|f, _| saved.reviewed.contains(f));
+            if saved.reviewed.len() != before {
+                cx.toast("A file changed since you marked it reviewed, so it's unmarked.");
+                self.save(cx);
+            }
+        }
         if self.findings.poll() {
             if let Some(t) = self.findings.value.take() {
                 for (path, text) in ai::parse_review_findings(&t) {
@@ -112,15 +133,25 @@ impl ReviewView {
                 cx.error(e);
             }
         }
-        let want = (cx.data.status_gen, self.saved.base.clone());
+        // Not per key: each half-typed name would be a git command and an error on screen.
+        if self.settled_base.is_none() || self.base_typed.is_some_and(|t| t.elapsed() >= BASE_SETTLES) {
+            self.settled_base = Some(self.saved.base.clone());
+            self.base_typed = None;
+        } else if let Some(t) = self.base_typed {
+            ui.ctx().request_repaint_after(BASE_SETTLES.saturating_sub(t.elapsed()));
+        }
+        let base = self.settled_base.clone().unwrap_or_default();
+        let want = (cx.data.status_gen, base.clone());
         if self.files_gen.as_ref() != Some(&want) {
             self.files_gen = Some(want);
-            let (r, b) = (cx.repo.clone(), self.saved.base.clone());
-            self.files.spawn(ui.ctx(), move || r.compare_files(&b, "HEAD", true));
+            let (r, b) = (cx.repo.clone(), base.clone());
+            self.files.spawn(ui.ctx(), move || -> gitem_core::Result<_> { Ok((r.compare_files(&b, "HEAD", true)?, r.compare_blobs(&b, "HEAD").unwrap_or_default())) });
         }
         ui.horizontal(|ui| {
             ui.label("Changes since");
-            ui.add(crate::widgets::input(&mut self.saved.base).desired_width(160.0));
+            if ui.add(crate::widgets::input(&mut self.saved.base).desired_width(160.0)).changed() {
+                self.base_typed = Some(Instant::now());
+            }
             let busy = self.findings.busy();
             if ui.add_enabled(!busy, egui::Button::new("Review with AI")).on_hover_text("Adds findings as threads").clicked() {
                 let (r, src, cfg) = (cx.repo.clone(), self.source(), cx.settings.ai.clone());
@@ -169,12 +200,20 @@ impl ReviewView {
         }
         ui.separator();
         if let Some(e) = &self.files.error {
-            error_box(ui, e, &p);
+            // Most often nothing's wrong but the name: a repository's main branch can be called anything.
+            if ["ambiguous argument", "unknown revision", "bad revision", "Not a valid object name", "no merge base"].iter().any(|m| e.contains(m)) {
+                ui.colored_label(p.warn, format!("Can't compare with \"{base}\". Type the name of a branch or commit it should be compared with."));
+            } else {
+                error_box(ui, e, &p);
+            }
         }
-        let files = self.files.get().cloned().unwrap_or_default();
+        let (files, blobs) = self.files.get().cloned().unwrap_or_default();
         egui::Panel::left("review-files").resizable(true).default_size(300.0).show(ui, |ui| {
             let done = files.iter().filter(|f| self.saved.reviewed.contains(&f.path)).count();
             ui.label(RichText::new(format!("{done} of {} files reviewed", files.len())).small().color(p.dim));
+            if ui.selectable_label(self.selected.is_none(), "All files").on_hover_text("General notes, and notes on every file").clicked() {
+                self.selected = None;
+            }
             egui::ScrollArea::vertical().id_salt("review-list").auto_shrink([false, false]).show(ui, |ui| {
                 for f in &files {
                     ui.horizontal(|ui| {
@@ -182,8 +221,12 @@ impl ReviewView {
                         if ui.checkbox(&mut on, "").changed() {
                             if on {
                                 self.saved.reviewed.insert(f.path.clone());
+                                if let Some(b) = blobs.get(&f.path) {
+                                    self.saved.reviewed_blobs.insert(f.path.clone(), b.clone());
+                                }
                             } else {
                                 self.saved.reviewed.remove(&f.path);
+                                self.saved.reviewed_blobs.remove(&f.path);
                             }
                             self.save(cx);
                         }
@@ -207,11 +250,15 @@ impl ReviewView {
                     self.save(cx);
                 }
             });
+            let dismissed = self.saved.threads.iter().filter(|t| t.dismissed).count();
+            if dismissed > 0 || self.show_dismissed {
+                ui.checkbox(&mut self.show_dismissed, format!("Show dismissed ({dismissed})"));
+            }
             self.replies.resize(self.saved.threads.len(), String::new());
             let mut changed = false;
             for i in 0..self.saved.threads.len() {
                 let t = self.saved.threads[i].clone();
-                if t.dismissed || (!target.is_empty() && !t.path.is_empty() && t.path != target) {
+                if (t.dismissed && !self.show_dismissed) || (!target.is_empty() && !t.path.is_empty() && t.path != target) {
                     continue;
                 }
                 egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
@@ -228,7 +275,12 @@ impl ReviewView {
                             self.saved.threads[i].replies.push(r.trim().to_string());
                             changed = true;
                         }
-                        if ui.small_button("Dismiss").clicked() {
+                        if t.dismissed {
+                            if ui.small_button("Restore").clicked() {
+                                self.saved.threads[i].dismissed = false;
+                                changed = true;
+                            }
+                        } else if ui.small_button("Dismiss").clicked() {
                             self.saved.threads[i].dismissed = true;
                             changed = true;
                         }

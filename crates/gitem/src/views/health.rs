@@ -66,8 +66,22 @@ impl HealthView {
                         if item.enabled {
                             chip(ui, "On", p.good);
                         }
+                        if let Some(scope) = &item.set_elsewhere {
+                            chip(ui, &format!("from {scope} config"), p.dim);
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if item.enabled {
+                            if item.maintenance {
+                                if item.enabled {
+                                    if ui.small_button("Undo").on_hover_text("Takes this repository off git's list. The scheduled task stays, for any others on it.").clicked() {
+                                        cx.run(ops::maintenance_unregister());
+                                    }
+                                } else if ui.small_button("Enable").clicked() {
+                                    cx.confirm("Turn on scheduled maintenance", "Git will add this repository to its list and add a task to your system's scheduler, if it isn't there yet. That task keeps running after gitem closes.", "Turn on", ops::maintenance_start());
+                                }
+                            } else if item.set_elsewhere.is_some() {
+                                let why = "It's turned on outside this repository, so turning it off here wouldn't change anything. Change it where it's set.";
+                                ui.add_enabled(false, egui::Button::new("Undo").small()).on_disabled_hover_text(why);
+                            } else if item.enabled {
                                 if ui.small_button("Undo").clicked() {
                                     let mut op = ops::GitOp::new(format!("Turn off {}", item.label));
                                     for (k, _) in &item.config {

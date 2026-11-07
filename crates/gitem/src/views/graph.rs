@@ -270,7 +270,7 @@ impl GraphView {
             lq.limit = 5000;
             lq.all_match = opts.0;
             lq.regex_ignore_case = !opts.1;
-            lq.fixed_strings = !opts.2;
+            lq.fixed_strings = lq.fixed_strings && !opts.2;
             Ok(repo.log(&lq).map_err(|e| e.to_string())?.into_iter().map(|c| c.sha).collect())
         });
     }

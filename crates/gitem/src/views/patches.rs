@@ -44,6 +44,19 @@ impl PatchesView {
         v
     }
 
+    /// "Save as patch" with this tab open still means a new patch, from that source.
+    pub fn retarget(&mut self, new: Self) {
+        if new.create_src.is_some() {
+            self.create_src = new.create_src;
+            self.title = new.title;
+            self.description.clear();
+        }
+        if let Some(id) = new.selected {
+            self.select(&id);
+            self.loaded = false;
+        }
+    }
+
     fn select(&mut self, id: &str) {
         self.selected = Some(id.to_string());
         let bytes = patches::content(id).unwrap_or_default();
@@ -162,7 +175,7 @@ impl PatchesView {
                 for m in &self.list {
                     let (rect, resp) = row(ui, 38.0, self.selected.as_deref() == Some(&m.id), &p);
                     paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 3.0), egui::vec2(rect.width() - 12.0, 17.0)), &m.title, prop(13.0), p.text);
-                    paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 20.0), egui::vec2(rect.width() - 12.0, 15.0)), &format!("{} · {}", m.repo, util::relative_time(m.created, util::now_ts())), prop(11.0), p.dim);
+                    paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 20.0), egui::vec2(rect.width() - 12.0, 15.0)), &format!("{} · {}", m.repo, time_label(m.created, cx.settings.date_relative)), prop(11.0), p.dim);
                     if resp.clicked() {
                         clicked = Some(m.id.clone());
                     }

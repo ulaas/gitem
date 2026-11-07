@@ -87,6 +87,8 @@ impl ConsoleView {
             }
             if entries.is_empty() {
                 empty_state(ui, "No commands yet", "Everything gitem runs is recorded here.", &p);
+            } else if matching.is_empty() {
+                empty_state(ui, "Nothing to show", "Nothing matches the filter, or only background reads have run. Tick Show background reads to see those.", &p);
             }
         });
     }

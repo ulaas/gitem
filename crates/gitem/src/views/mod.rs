@@ -79,6 +79,21 @@ tabs! {
 }
 
 impl Tab {
+    /// Someone asked for a tab that's already open. Dropping the request would show the old
+    /// content as if it were the answer, so what was asked for goes to the open tab. Comes
+    /// back as `Some` if it has to be a tab of its own after all.
+    pub fn retarget(&mut self, new: Tab) -> Option<Tab> {
+        match (self, new) {
+            (Tab::Search(a), Tab::Search(b)) => a.retarget(*b),
+            (Tab::Patches(a), Tab::Patches(b)) => a.retarget(*b),
+            (Tab::Launchpad(a), Tab::Launchpad(b)) => a.retarget(*b),
+            (Tab::File(a), Tab::File(b)) => a.retarget(*b),
+            (Tab::Text(a), Tab::Text(b)) => return a.retarget(*b).map(|t| Tab::Text(Box::new(t))),
+            _ => {}
+        }
+        None
+    }
+
     /// What closing this tab would lose, in a line for the user. `None` if nothing.
     pub fn unsaved(&self) -> Option<String> {
         match self {

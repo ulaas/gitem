@@ -122,7 +122,12 @@ pub struct RepoData {
     pub ops_busy: bool,
     /// Long jobs running outside the op queue, such as an auto-rebase. They count as busy.
     pub jobs: Arc<AtomicUsize>,
-    pub branch_pr: Option<(u64, String)>,
+    /// Which branch, its pull request's number, and its link.
+    pub branch_pr: Option<(String, u64, String)>,
+    /// Bumped when the hosting provider's lists may have changed.
+    pub forge_gen: u64,
+    /// Bumped each time a write from gitem finishes.
+    pub writes: u64,
     /// Whether drafts may be written to disk. Off for tests and screenshots.
     pub persist: bool,
     /// How long the last status took, to notice when the index needs refreshing.
@@ -245,6 +250,7 @@ impl RepoData {
     pub fn mark_rewritten(&mut self) {
         self.status_gen += 1;
         self.listing_gen += 1;
+        self.writes += 1;
     }
 
     pub fn recompute_forge(&mut self) {
@@ -301,9 +307,13 @@ impl RepoData {
 
     /// All ref names for pickers: local, remote, then tags.
     pub fn ref_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.local_branches().map(|b| b.name.clone()).collect();
+        // A branch and a tag of one name need telling apart, in the list and for git.
+        let tags = self.tags();
+        let mut v: Vec<String> = self.local_branches().map(|b| b.rev_among(tags)).collect();
         v.extend(self.remote_branches().map(|b| b.name.clone()));
-        v.extend(self.tags().iter().map(|t| t.name.clone()));
+        v.extend(tags.iter().map(|t| if self.local_branches().any(|b| b.name == t.name) { format!("refs/tags/{}", t.name) } else { t.name.clone() }));
+        let mut seen = std::collections::HashSet::new();
+        v.retain(|n| seen.insert(n.clone()));
         v
     }
 }

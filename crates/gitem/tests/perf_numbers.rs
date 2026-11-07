@@ -656,6 +656,39 @@ fn pf24_touched_files() {
     println!("PF-24 status, after refreshing the index: {:.0} ms", best_ms(|| drop(repo.status().unwrap())));
 }
 
+/// What the graph's No merges adds to each reload: one more walk of the whole history, here
+/// with a merge every 50 commits.
+#[test]
+#[ignore = "measurement"]
+fn vc9_no_merges() {
+    let f = Fx::new();
+    let n = 60_000;
+    let mut s = String::new();
+    for i in 0..n {
+        let from = if i > 0 { format!("from :{i}\n") } else { String::new() };
+        // Every so often a side commit, merged in. Marks past `n` keep the main line's in step.
+        let side = if i > 1 && i % 50 == 0 { Some(n + i) } else { None };
+        if let Some(mark) = side {
+            s.push_str(&format!("commit refs/heads/side\nmark :{mark}\ncommitter T <t@x> {} +0000\ndata 4\nside\nfrom :{i}\n\n", 1_600_000_000 + i));
+        }
+        let merge = side.map(|m| format!("merge :{m}\n")).unwrap_or_default();
+        s.push_str(&format!("commit refs/heads/main\nmark :{}\ncommitter T <t@x> {} +0000\ndata 1\nm{from}{merge}M 100644 inline f{}.txt\ndata {}\n{i}\n\n", i + 1, 1_600_000_000 + i, i % 50, i.to_string().len() + 1));
+    }
+    let op = ops::GitOp::new("import").step(&["fast-import", "--quiet"]).stdin(s.into_bytes());
+    op.run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap();
+    f.git(&["reset", "-q", "--hard", "refs/heads/main"]);
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    let q = gitem_core::LogQuery { limit: 2000, no_merges: true, exclude_stash: true, all: true, date_order: true, ..Default::default() };
+    for round in 0..3 {
+        let t = Instant::now();
+        let shown = repo.log(&q).unwrap().len();
+        let log = t.elapsed();
+        let t = Instant::now();
+        let merges = repo.merge_first_parents(&q).unwrap().len();
+        println!("VC-9 round {round}, {n} commits: log of {shown} {:.0} ms, whole-history rev-list of {merges} merges {:.0} ms", log.as_secs_f64() * 1000.0, t.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
 #[test]
 #[ignore = "measurement"]
 fn pf30_pf31_views() {

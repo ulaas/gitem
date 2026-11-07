@@ -72,6 +72,11 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Merge a Branch…" => (icon::GIT_MERGE, "", None),
         "Rebase onto a Branch…" => (icon::LIST_NUMBERS, "", None),
         "Reset to a Ref…" | "Undo Last Commit" => (icon::ARROW_COUNTER_CLOCKWISE, "", None),
+        "Commit Changes" => (icon::GIT_COMMIT, "Stage and commit", None),
+        "Amend Last Commit's Message…" => (icon::GIT_COMMIT, "", None),
+        "Blame a File…" => (icon::USER_FOCUS, "Who changed each line", None),
+        "Delete a Branch…" => (icon::TRASH, "", None),
+        "Change Theme…" => (icon::PALETTE, "", None),
         "Cherry-pick a Commit…" => (icon::GIT_COMMIT, "", None),
         "Clone Repository…" => (icon::DOWNLOAD_SIMPLE, "", None),
         "Initialize Repository…" => (icon::FOLDER_PLUS, "", None),
@@ -168,7 +173,50 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Show", "Staged Diff", |cx| cx.diff(DiffSource::Staged, None)));
     v.push(item("Show", "Unstaged Diff", |cx| cx.diff(DiffSource::Unstaged, None)));
     v.push(item("Show", "All Changes vs HEAD", |cx| cx.diff(DiffSource::WorkingVsHead, None)));
-    v.push(item("Git", "Undo Last Commit", |cx| cx.run(ops::undo_commit())));
+    v.push(item("Git", "Undo Last Commit", crate::menus::undo_commit));
+    v.push(item("Git", "Commit Changes", |cx| cx.open(Tab::changes())));
+    v.push(item("Git", "Amend Last Commit's Message…", |cx| {
+        let repo = cx.repo.clone();
+        cx.out.push(Action::Later(Box::new(move || {
+            let message = repo.commit("HEAD").map_err(|e| e.to_string())?.message();
+            Ok(crate::action::Later::Form(Box::new(move || {
+                forms::FormDialog::new("Amend the last commit's message", "Save").multiline("message", "Message", &message).on_submit(|v| {
+                    let m = v.opt("message").ok_or("A message is required.")?;
+                    Ok(vec![Action::Run(ops::reword_head(&m))])
+                })
+            })))
+        })));
+    }));
+    v.push(item("Git", "Blame a File…", |cx| {
+        let repo = cx.repo.clone();
+        cx.out.push(Action::Later(Box::new(move || {
+            let files = repo.tracked_files(None).map_err(|e| e.to_string())?;
+            Ok(crate::action::Later::Form(Box::new(move || {
+                forms::FormDialog::new("Blame a file", "Open").pick("file", "File", files, "").on_submit(|v| {
+                    let f = v.opt("file").ok_or("Choose a file.")?;
+                    Ok(vec![Action::OpenTab(Tab::file(&f, None, None))])
+                })
+            })))
+        })));
+    }));
+    v.push(item("Git", "Delete a Branch…", |cx| {
+        let current = cx.current_branch();
+        let names: Vec<String> = cx.data.local_branches().filter(|b| Some(&b.name) != current.as_ref()).map(|b| b.name.clone()).collect();
+        cx.form(forms::FormDialog::new("Delete a branch", "Next").pick("name", "Branch", names, "").on_submit(|v| {
+            let n = v.opt("name").ok_or("Choose a branch.")?;
+            Ok(vec![Action::Confirm { title: "Delete branch".to_string(), body: format!("Delete {n}? This fails if it has unmerged commits."), label: "Delete".to_string(), op: ops::branch_delete(&n, false) }])
+        }));
+    }));
+    v.push(item("App", "Change Theme…", |cx| {
+        use gitem_core::settings::ThemeChoice;
+        let names: Vec<&str> = ThemeChoice::ALL.iter().map(|t| t.name()).collect();
+        let at = ThemeChoice::ALL.iter().position(|t| *t == cx.settings.theme).unwrap_or(0);
+        cx.form(forms::FormDialog::new("Change theme", "Use").choice("theme", "Theme", &names, at).on_submit(|v| {
+            let chosen = v.text("theme");
+            let theme = ThemeChoice::ALL.into_iter().find(|t| t.name() == chosen).ok_or("Choose a theme.")?;
+            Ok(vec![Action::Settings(Box::new(move |s| s.theme = theme))])
+        }));
+    }));
     v.push(item("Git", "Apply Copied Patch…", |cx| cx.form(apply_copied_patch_form())));
     v.push(item("Git", "Copy Working Changes as Patch", |cx| {
         let repo = cx.repo.clone();
@@ -202,7 +250,10 @@ pub fn commands() -> Vec<Item> {
         None => cx.toast("No hosting provider among the remotes."),
     }));
     v.push(item("Remote", "Open Current Branch on Remote", |cx| {
-        let b = cx.current_branch().unwrap_or_default();
+        let Some(b) = cx.current_branch() else {
+            cx.toast("HEAD is detached, so there's no current branch to open.");
+            return;
+        };
         match cx.forge().map(|f| f.branch_url(&b)) {
             Some(u) => cx.url(u),
             None => cx.toast("No hosting provider among the remotes."),
@@ -485,7 +536,13 @@ impl PaletteState {
                 let n = b.name.clone();
                 let mut it = item("Check out", b.name.clone(), move |cx| {
                     let remotes = cx.data.remote_names();
-                    cx.run(ops::checkout_remote(&n, &remotes));
+                    // With a local branch of that name, that's the one meant. Git would refuse.
+                    let local = gitem_core::parse::split_remote_ref(&n, &remotes).1.to_string();
+                    if cx.data.local_branches().any(|l| l.name == local) {
+                        cx.run(ops::checkout(&local));
+                    } else {
+                        cx.run(ops::checkout_remote(&n, &remotes));
+                    }
                 });
                 (it.glyph, it.detail, it.record) = (icon::CLOUD, b.subject.clone(), false);
                 items.push(it);

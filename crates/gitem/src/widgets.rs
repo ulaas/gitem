@@ -63,11 +63,12 @@ pub fn badge_width(ui: &Ui, r: &RefLabel) -> f32 {
 }
 
 pub fn chip(ui: &mut Ui, text: &str, color: Color32) {
-    let g = ui.painter().layout_no_wrap(text.to_string(), prop(11.0), color);
+    let ink = crate::theme::chip_ink(color, ui.visuals().panel_fill, ui.visuals().text_color());
+    let g = ui.painter().layout_no_wrap(text.to_string(), prop(11.0), ink);
     let (rect, resp) = ui.allocate_exact_size(g.size() + vec2(10.0, 4.0), Sense::hover());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
     ui.painter().rect(rect, 3.0, color.gamma_multiply(0.14), Stroke::new(1.0, color.gamma_multiply(0.5)), egui::StrokeKind::Inside);
-    ui.painter().galley(rect.min + vec2(5.0, 2.0), g, color);
+    ui.painter().galley(rect.min + vec2(5.0, 2.0), g, ink);
 }
 
 fn initials(name: &str) -> String {
@@ -484,6 +485,19 @@ pub fn pick(task: &mut crate::task::Task<Option<std::path::PathBuf>>, ctx: &egui
         None => dialog,
     };
     task.spawn(ctx, move || -> Result<Option<std::path::PathBuf>, String> { Ok(if folder { dialog.pick_folder() } else { dialog.pick_file() }) });
+}
+
+/// As [`pick`], for a file that's yet to be made.
+pub fn pick_new_file(task: &mut crate::task::Task<Option<std::path::PathBuf>>, ctx: &egui::Context, dialog: rfd::FileDialog) {
+    if task.busy() {
+        return;
+    }
+    #[cfg(windows)]
+    let dialog = match DIALOG_PARENT.get().and_then(|h| std::num::NonZeroIsize::new(*h)) {
+        Some(h) => dialog.set_parent(&DialogParent(h)),
+        None => dialog,
+    };
+    task.spawn(ctx, move || -> Result<Option<std::path::PathBuf>, String> { Ok(dialog.save_file()) });
 }
 
 pub fn time_label(ts: i64, relative: bool) -> String {

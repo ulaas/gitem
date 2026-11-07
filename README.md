@@ -43,7 +43,7 @@ gitem looks for git in this order:
 | File History, Line History | Commit lists for a file or a line range |
 | Visual History | Time and author bubble chart with churn bars, zoom, and pan, for a file, a folder, a branch, or the whole repository |
 | Treemaps, Repository Health | Files by size or recent commits; a verdict plus optimizations you can turn on and undo; maintenance on demand or at open |
-| Search & Compare | The same search syntax (`message:`, `-message:`, `author:`, `committer:`, `@me`, `commit:`, `file:`, `change:`, `after:`, `before:`, `is:merge`, `type:merge`), and compare of any two refs |
+| Search & Compare | The same search syntax (`message:`, `-message:`, `re:`, `author:`, `committer:`, `@me`, `commit:`, `file:`, `change:`, `after:`, `before:`, `is:merge`, `type:merge`), and compare of any two refs. Words are plain text and all must match, as with `fix(auth):` or `C++`. `re:` takes a regular expression, such as `re:fix\|feat` |
 | Interactive Rebase Editor | Drag to reorder; pick, reword, edit, squash, fixup, drop, exec, break. Also works as git's own `sequence.editor` |
 | Git Command Palette | `Ctrl+P`: every command, branch, and file, with guided forms |
 | Launchpad | Pull requests grouped by what they need from you, with checks, review, and conflict state; pin, snooze, stacked-PR labels and rebase; current branch's PR in the status bar |
@@ -166,6 +166,15 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 - In a partial clone, line counts in the graph, Visual History and Contributors no longer download files. Commits whose files aren't here show no counts. Opening a commit's diff still fetches what it needs.
 - A squash merge fills in its prepared message and says it's waiting for its commit. A prepared message keeps lines that start with `#`, and drops only git's own list of conflicts.
 - In the graph, No merges and First parent draw real connections rather than lanes that never end, and the arrow keys only scroll when the row is off screen. Hiding the current branch now hides it. A search git rejects says why.
+- A tab asked for again gets what was asked for: a second search, compare, patch, pull request form, AI answer or line in a file takes over the open tab. An answer that can still be undone keeps its tab and the new one opens beside it.
+- Undo commit asks first. Once the commit is on the remote it says so, and on a first commit it says there's nothing to go back to.
+- Start work makes a branch with no upstream, whatever it starts from, so the toolbar offers Publish.
+- Scheduled maintenance in Repository Health runs `git maintenance start`, which adds a task to your system's scheduler. Undo takes this repository off git's list and leaves the task, as other repositories may use it. An option set in your global config says so, and Undo stays off: it couldn't change it.
+- Contributors, the graph's Changes column and Visual History follow `.mailmap`. A person's heatmap and Search their commits find exactly that address, in any case.
+- Clean names any repository inside this one that `git clean` leaves alone. Removing the worktree a tab has open isn't offered, as git would empty it and then fail. A locked worktree is removed with its Force remove.
+- A reviewed mark goes away when the file changes after it was marked.
+- Secondary text and status colours now reach WCAG AA on panels and cards in every theme, and button text picks black or white by fill. Side-by-side diffs show + and - signs for readers who can't tell red from green.
+- Settings can put every preference back to how gitem came, keeping open and recent repositories, workspaces, favorites and secrets.
 - The file view shows PNG and JPEG pictures, reads UTF-16 by its byte order mark, and shows other files that aren't UTF-8 as Latin-1, a guess that it labels as one. The diff view compares only PNG and JPEG.
 
 ## Project layout

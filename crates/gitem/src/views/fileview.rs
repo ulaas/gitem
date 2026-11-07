@@ -181,6 +181,18 @@ impl FileView {
         format!("file:{}:{:?}", self.path, self.rev)
     }
 
+    /// The line picked out, counting from 0.
+    pub fn current_line(&self) -> Option<usize> {
+        self.current
+    }
+
+    /// A link to a line of a file that's already open goes to that line.
+    pub fn retarget(&mut self, new: Self) {
+        if new.target_line.is_some() {
+            self.target_line = new.target_line;
+        }
+    }
+
     pub fn title(&self) -> String {
         let leaf = self.path.rsplit('/').next().unwrap_or(&self.path);
         match &self.rev {
@@ -267,11 +279,14 @@ impl FileView {
         let pal = cx.pal.clone();
         let code_lens = *self.code_lens.get_or_insert(cx.settings.code_lens);
         if self.data.poll() {
-            if let Some(l) = self.target_line.take() {
-                self.current = Some((l as usize).saturating_sub(1));
-                self.scroll_to = self.current;
-            }
             self.update_find();
+        }
+        // Once the file's here, which may be long ago for a link to a tab already open.
+        if self.data.get().is_some()
+            && let Some(l) = self.target_line.take()
+        {
+            self.current = Some((l as usize).saturating_sub(1));
+            self.scroll_to = self.current;
         }
         if self.nav.poll() {
             match self.nav.value.take() {

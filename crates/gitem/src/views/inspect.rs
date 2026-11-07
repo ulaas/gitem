@@ -36,6 +36,8 @@ const SELECTION_SETTLES: Duration = Duration::from_millis(150);
 pub struct InspectPanel {
     pub sha: Option<String>,
     loaded: Option<String>,
+    /// What had been written when it was loaded. A note, branch or tag can change what it shows.
+    loaded_at: (u64, u64),
     details: Task<Details>,
     explanation: Task<String>,
     explained_for: Option<String>,
@@ -47,6 +49,15 @@ pub struct InspectPanel {
     /// When the selection last changed, and to what.
     last_change: Option<(String, Instant)>,
     moving: bool,
+}
+
+fn load_details(repo: &gitem_core::Repo, sha: &str) -> Result<Details, String> {
+    let e = |x: gitem_core::Error| x.to_string();
+    let commit = repo.commit(sha).map_err(e)?;
+    let files = repo.commit_files(sha).map_err(e)?;
+    let signature = repo.signature(sha).unwrap_or_default();
+    let note = repo.commit_note(sha);
+    Ok(Details { commit, files, signature, note })
 }
 
 impl InspectPanel {
@@ -68,6 +79,15 @@ impl InspectPanel {
             empty_state(ui, "No commit selected", "Pick a commit to inspect it here.", &p);
             return;
         };
+        let written = (cx.data.refs_gen, cx.data.writes);
+        if self.loaded.as_deref() == Some(&sha) && self.loaded_at != written && !self.details.busy() {
+            // Same commit, so what's on screen stays until the new details are here.
+            self.loaded_at = written;
+            self.refs_info = Task::default();
+            self.refs_info_for = None;
+            let s = sha.clone();
+            self.details.spawn_git(ui.ctx(), cx.repo, move |repo| load_details(&repo, &s));
+        }
         if self.loaded.as_deref() != Some(&sha) {
             // Holding an arrow key mustn't start a load per commit. Nothing about the last
             // commit stays on screen meanwhile, so it can't be taken for this one's.
@@ -86,20 +106,14 @@ impl InspectPanel {
                 return;
             }
             self.loaded = Some(sha.clone());
+            self.loaded_at = written;
             self.selected_file = None;
             let s = sha.clone();
             self.details.value = None;
             self.details.error = None;
             self.refs_info = Task::default();
             self.refs_info_for = None;
-            self.details.spawn_git(ui.ctx(), cx.repo, move |repo| -> Result<Details, String> {
-                let e = |x: gitem_core::Error| x.to_string();
-                let commit = repo.commit(&s).map_err(e)?;
-                let files = repo.commit_files(&s).map_err(e)?;
-                let signature = repo.signature(&s).unwrap_or_default();
-                let note = repo.commit_note(&s);
-                Ok(Details { commit, files, signature, note })
-            });
+            self.details.spawn_git(ui.ctx(), cx.repo, move |repo| load_details(&repo, &s));
         }
         if let Some(e) = &self.details.error {
             error_box(ui, e, &p);

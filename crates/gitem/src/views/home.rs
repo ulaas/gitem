@@ -3,7 +3,7 @@
 use egui::{RichText, Ui};
 use gitem_core::model::*;
 use gitem_core::settings::Workspace;
-use gitem_core::{Repo, ops, util};
+use gitem_core::{Repo, ops};
 
 use crate::action::{Action, Cx};
 use crate::forms::{self, FormDialog};
@@ -114,9 +114,9 @@ impl HomeView {
                             let b = v.opt("base");
                             Ok(if v.on("worktree") {
                                 let path = parent.join(format!("{repo_name}.worktrees/{}", n.replace('/', "-"))).to_string_lossy().replace('\\', "/");
-                                vec![Action::RunThenOpen(ops::worktree_add(&path, None, Some(&n), b.as_deref(), false), path.into())]
+                                vec![Action::RunThenOpen(ops::worktree_start_work(&path, &n, b.as_deref()), path.into())]
                             } else {
-                                vec![Action::Run(ops::branch_create(&n, b.as_deref(), true))]
+                                vec![Action::Run(ops::branch_start_work(&n, b.as_deref()))]
                             })
                         }),
                 );
@@ -154,7 +154,7 @@ impl HomeView {
             let (rect, resp) = row(ui, 34.0, b.is_current, &p);
             let name = if b.is_current { format!("● {}", b.name) } else { b.name.clone() };
             paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 2.0), egui::vec2(rect.width() - 110.0, 17.0)), &name, prop(13.0), p.text);
-            paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 18.0), egui::vec2(rect.width() - 16.0, 14.0)), &format!("{} · {}", util::relative_time(b.date, util::now_ts()), b.subject), prop(11.0), p.dim);
+            paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 18.0), egui::vec2(rect.width() - 16.0, 14.0)), &format!("{} · {}", time_label(b.date, cx.settings.date_relative), b.subject), prop(11.0), p.dim);
             let track = match (b.ahead, b.behind) {
                 (0, 0) => String::new(),
                 (a, 0) => format!("↑{a}"),
@@ -182,7 +182,7 @@ impl HomeView {
                 }
             }
             if ui.small_button("New workspace…").clicked() {
-                cx.form(new_workspace_form());
+                cx.form(new_workspace_form(ws.iter().map(|w| w.name.clone()).collect()));
             }
         });
         if ws.is_empty() {
@@ -263,34 +263,60 @@ impl HomeView {
                 }
             if ui.small_button("Delete workspace").clicked() {
                 let name = w.name.clone();
-                cx.out.push(Action::Settings(Box::new(move |s| s.workspaces.retain(|x| x.name != name))));
+                cx.out.push(Action::Settings(Box::new(move |s| {
+                    // One only: older settings can hold two of the same name.
+                    if let Some(at) = s.workspaces.iter().position(|x| x.name == name) {
+                        s.workspaces.remove(at);
+                    }
+                })));
             }
             if self.summaries.busy() {
                 ui.add(spinner(13.0));
             }
         });
-        if let Some(list) = self.summaries.get() {
+        if let Some(list) = self.summaries.value.take() {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for s in list {
+            for s in &list {
                 let (rect, resp) = row(ui, 26.0, false, &p);
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, s.name.as_str()));
                 paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 0.0), egui::vec2(200.0, 26.0)), &s.name, prop(13.0), p.text);
                 let detail = match &s.error {
                     Some(e) => e.clone(),
                     None => format!("{} · {} changed · ↑{} ↓{}", s.branch, s.changes, s.ahead, s.behind),
                 };
                 paint_text(ui, egui::Rect::from_min_size(rect.min + egui::vec2(212.0, 0.0), egui::vec2(rect.width() - 216.0, 26.0)), &detail, prop(12.0), if s.error.is_some() { p.danger } else { p.dim });
-                if resp.on_hover_text("Click to open").clicked() {
+                let resp = resp.on_hover_text("Click to open. Right-click to remove it from this workspace.");
+                if resp.clicked() {
                     cx.out.push(Action::OpenRepo(s.path.clone().into()));
                 }
+                resp.context_menu(|ui| {
+                    if ui.button("Remove from this workspace").clicked() {
+                        let (name, path) = (w.name.clone(), s.path.clone());
+                        cx.out.push(Action::Settings(Box::new(move |st| {
+                            if let Some(x) = st.workspaces.iter_mut().find(|x| x.name == name) {
+                                x.repos.retain(|r| *r != path);
+                            }
+                        })));
+                        self.summaries_for = None;
+                        ui.close();
+                    }
+                });
             }
             ui.spacing_mut().item_spacing.y = 4.0;
+            if self.summaries.value.is_none() {
+                self.summaries.value = Some(list);
+            }
         }
     }
 }
 
-fn new_workspace_form() -> FormDialog {
-    FormDialog::new("New workspace", "Create").text("name", "Name", "").on_submit(|v| {
+fn new_workspace_form(taken: Vec<String>) -> FormDialog {
+    FormDialog::new("New workspace", "Create").text("name", "Name", "").on_submit(move |v| {
         let name = v.opt("name").ok_or("A name is required.")?;
+        // Workspaces are found by name, so a second of the same name could never be reached.
+        if taken.contains(&name) {
+            return Err(format!("There's already a workspace called {name}."));
+        }
         Ok(vec![Action::Settings(Box::new(move |s| s.workspaces.push(Workspace { name, repos: Vec::new() })))])
     })
 }

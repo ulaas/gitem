@@ -3,7 +3,7 @@
 //! files, so status is an estimate and permission prompts are answered in the agent.
 use std::time::{Duration, Instant};
 
-use egui::{Align2, Color32, Rect, RichText, Sense, Ui, pos2, vec2};
+use egui::{Align2, Rect, RichText, Sense, Ui, pos2, vec2};
 use gitem_core::agents::{self, AgentSession, AgentState};
 use gitem_core::{treemap, util};
 
@@ -19,6 +19,7 @@ pub struct AgentsView {
     sessions: Task<Vec<AgentSession>>,
     last: Option<Instant>,
     selected: Option<String>,
+    show_archived: bool,
 }
 
 
@@ -51,13 +52,24 @@ impl AgentsView {
             spinner_row(ui, "Looking for agent sessions...", &p);
             return;
         };
-        let shown: Vec<&AgentSession> = list.iter().filter(|s| !cx.settings.archived_sessions.contains(&s.id)).collect();
+        let archived = list.iter().filter(|s| cx.settings.archived_sessions.contains(&s.id)).count();
+        if archived > 0 || self.show_archived {
+            ui.checkbox(&mut self.show_archived, format!("Show archived ({archived})"));
+        }
+        let shown: Vec<&AgentSession> = list.iter().filter(|s| self.show_archived || !cx.settings.archived_sessions.contains(&s.id)).collect();
         if shown.is_empty() {
             empty_state(ui, "No agent sessions here", "Claude Code, Codex, Copilot CLI, and OpenCode sessions in this repository's worktrees appear here.", &p);
         } else {
             let selected = self.selected.as_ref().and_then(|id| shown.iter().find(|s| s.id == *id).copied());
             if let Some(s) = selected {
-                egui::Panel::bottom("agent-activity").resizable(true).default_size(240.0).show(ui, |ui| activity(ui, cx, s));
+                let mut close = false;
+                egui::Panel::bottom("agent-activity").resizable(true).default_size(240.0).show(ui, |ui| {
+                    close = ui.small_button("Close activity").clicked();
+                    activity(ui, cx, s);
+                });
+                if close {
+                    self.selected = None;
+                }
             }
             ui.columns(AgentState::ALL.len(), |cols| {
                 for (c, state) in cols.iter_mut().zip(AgentState::ALL) {
@@ -79,7 +91,7 @@ impl AgentsView {
         egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("{} · {}", s.agent, if s.branch.is_empty() { "(no branch)" } else { &s.branch })).strong());
-            ui.label(RichText::new(util::relative_time(s.modified, util::now_ts())).small().color(p.dim));
+            ui.label(RichText::new(time_label(s.modified, cx.settings.date_relative)).small().color(p.dim));
             if !s.last_text.is_empty() {
                 ui.add(egui::Label::new(RichText::new(&s.last_text).small().color(p.dim)).truncate());
             }
@@ -95,7 +107,12 @@ impl AgentsView {
                 if !s.branch.is_empty() && ui.small_button("Graph").clicked() {
                     cx.out.push(Action::GraphFocus(s.branch.clone()));
                 }
-                if ui.small_button("Archive").on_hover_text("Hide it here. The transcript isn't touched.").clicked() {
+                if cx.settings.archived_sessions.contains(&s.id) {
+                    if ui.small_button("Unarchive").clicked() {
+                        let id = s.id.clone();
+                        cx.out.push(Action::Settings(Box::new(move |st| st.archived_sessions.retain(|x| *x != id))));
+                    }
+                } else if ui.small_button("Archive").on_hover_text("Hide it here. The transcript isn't touched.").clicked() {
                     let id = s.id.clone();
                     cx.out.push(Action::Settings(Box::new(move |st| st.archived_sessions.push(id))));
                 }
@@ -122,9 +139,10 @@ fn activity(ui: &mut Ui, cx: &mut Cx, s: &AgentSession) {
     for c in treemap::layout(&values, outer.left(), outer.top(), outer.width(), outer.height()) {
         let (path, n) = &s.files[c.index];
         let r = Rect::from_min_size(pos2(c.x, c.y), vec2(c.w, c.h)).shrink(1.0);
-        painter.rect_filled(r, 2.0, p.heat((*n as f32 / max).sqrt()));
+        let fill = p.heat((*n as f32 / max).sqrt());
+        painter.rect_filled(r, 2.0, fill);
         if c.w > 70.0 && c.h > 18.0 {
-            painter.with_clip_rect(r.shrink(3.0)).text(r.min + vec2(4.0, 3.0), Align2::LEFT_TOP, path.rsplit('/').next().unwrap_or(path), prop(11.0), Color32::WHITE);
+            painter.with_clip_rect(r.shrink(3.0)).text(r.min + vec2(4.0, 3.0), Align2::LEFT_TOP, path.rsplit('/').next().unwrap_or(path), prop(11.0), crate::theme::ink_on(fill));
         }
         if hover.is_some_and(|h| r.contains(h)) {
             hit = Some(c.index);

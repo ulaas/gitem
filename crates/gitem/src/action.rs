@@ -57,8 +57,6 @@ pub enum Action {
     /// Set the text in the status-bar blame slot.
     StatusBlame(String),
     Settings(Box<dyn FnOnce(&mut Settings) + Send>),
-    /// Put text in the commit message box (used by the composer and AI actions).
-    SetCommitMessage(String),
     OpenPalette,
     /// Open a `gitem://` link.
     DeepLink(gitem_core::forge::DeepLink),
@@ -70,8 +68,10 @@ pub enum Action {
     GraphHide(String),
     /// Open a terminal in a folder, optionally running a command there.
     OpenTerminal(PathBuf, Option<String>),
-    /// The open pull request for the current branch, for the status bar.
-    BranchPr(Option<(u64, String)>),
+    /// The open pull request for a branch, for the status bar.
+    BranchPr(Option<(String, u64, String)>),
+    /// Something changed on the hosting provider, so its lists are out of date.
+    ForgeChanged(String),
     /// Apply an action to a specific repository, whichever one is showing now.
     ForRepo(PathBuf, Box<Action>),
 }
@@ -83,6 +83,12 @@ pub enum Later {
     Run(GitOp),
     RunGlobal(GitOp),
     Diff(DiffSource, Option<String>),
+    /// Built back on the UI thread, from what the work found.
+    Form(Box<dyn FnOnce() -> FormDialog + Send>),
+    Tab(Box<dyn FnOnce() -> Tab + Send>),
+    Confirm { title: String, body: String, label: String, op: GitOp },
+    /// A toast, and the hosting provider's lists are out of date.
+    ForgeChanged(String),
 }
 
 impl Later {
@@ -93,6 +99,10 @@ impl Later {
             Later::Run(op) => Action::Run(op),
             Later::RunGlobal(op) => Action::RunGlobal { op, open_after: None },
             Later::Diff(src, path) => Action::OpenTab(Tab::diff(src, path)),
+            Later::Form(build) => Action::Form(build()),
+            Later::Tab(build) => Action::OpenTab(build()),
+            Later::Confirm { title, body, label, op } => Action::Confirm { title, body, label, op },
+            Later::ForgeChanged(s) => Action::ForgeChanged(s),
         }
     }
 }

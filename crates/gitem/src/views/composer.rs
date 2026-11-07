@@ -24,6 +24,9 @@ pub struct ComposerView {
     groups: Vec<ComposedCommit>,
     suggest: Task<Vec<ComposedCommit>>,
     running: Option<Running>,
+    /// Finished, and the log is being read to see which of its commits landed.
+    settling: Option<Running>,
+    landed: Task<Vec<String>>,
     /// Asked to go ahead although these files have only some of their changes staged.
     confirm_partial: Vec<String>,
 }
@@ -58,12 +61,21 @@ impl ComposerView {
 
     /// Once the queue is done: the commits that landed leave the plan and the rest stay,
     /// with their messages, because a hook or a failed step earlier may have stopped them.
-    fn settle_run(&mut self, cx: &mut Cx) {
-        if cx.data.ops_busy {
+    fn settle_run(&mut self, ctx: &egui::Context, cx: &mut Cx) {
+        if !cx.data.ops_busy
+            && let Some(run) = self.running.take()
+        {
+            let start = run.start.clone();
+            self.settling = Some(run);
+            self.landed.spawn_git(ctx, cx.repo, move |r| r.messages_since(&start));
+        }
+        if !self.landed.poll() {
             return;
         }
-        let Some(run) = self.running.take() else { return };
-        let landed = cx.repo.messages_since(&run.start).unwrap_or_default();
+        let Some(run) = self.settling.take() else { return };
+        // If git can't say, the plan stays whole: a commit made twice is the lesser harm.
+        self.landed.error = None;
+        let landed = self.landed.value.take().unwrap_or_default();
         let mut landed = landed.iter().map(|m| cleaned(m));
         let mut next = landed.next();
         for message in &run.messages {
@@ -103,7 +115,7 @@ impl ComposerView {
                 cx.error(e);
             }
         }
-        self.settle_run(cx);
+        self.settle_run(ui.ctx(), cx);
         let Some(st) = cx.status().cloned() else {
             match &cx.data.status.error {
                 Some(e) => error_box(ui, e, &cx.pal.clone()),
@@ -150,7 +162,7 @@ impl ComposerView {
             // A commit now would end a merge or cherry-pick early. A rebase stopped for you,
             // as at an edit step, is the exception: making commits there is how to split one.
             let mid_op = st.op != RepoOp::None && !(st.op_allows_commits && st.conflicts().next().is_none());
-            let working = self.running.is_some() || cx.data.ops_busy;
+            let working = self.running.is_some() || self.settling.is_some() || cx.data.ops_busy;
             let ready = !mid_op && !working && !self.groups.is_empty() && self.groups.iter().all(|g| !g.message.trim().is_empty() && g.files.iter().any(|f| changed.contains(f)));
             let b = egui::Button::new(RichText::new(format!("Create {} commit(s)", self.groups.len())).color(if ready { p.on_accent } else { p.faint })).fill(if ready { p.accent } else { p.panel2 });
             if ui.add_enabled(ready, b).on_disabled_hover_text(if mid_op { "Finish or abort the operation in progress first" } else { "Every commit needs a message and at least one changed file" }).clicked() {

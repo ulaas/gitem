@@ -69,7 +69,7 @@ impl ReflogView {
             self.load(&ui.ctx().clone(), cx);
         }
         let q = self.filter.to_lowercase();
-        let shown: Vec<&ReflogEntry> = list.iter().filter(|e| q.is_empty() || e.action.to_lowercase().contains(&q) || e.message.to_lowercase().contains(&q)).collect();
+        let shown: Vec<&ReflogEntry> = list.iter().filter(|e| q.is_empty() || e.action.to_lowercase().contains(&q) || e.message.to_lowercase().contains(&q) || e.sha.starts_with(&q)).collect();
         if shown.is_empty() {
             empty_state(ui, "Nothing here", "The reflog is empty or nothing matches.", &p);
         }
@@ -123,6 +123,7 @@ pub struct BisectView {
     loaded_gen: u64,
     current: Task<Commit>,
     remaining: Task<String>,
+    culprit: Task<Commit>,
     run_cmd: String,
 }
 
@@ -138,9 +139,15 @@ impl BisectView {
         let p = cx.pal.clone();
         self.current.poll();
         self.remaining.poll();
+        self.culprit.poll();
         if self.state.is_none() || self.loaded_gen != cx.data.status_gen {
             self.loaded_gen = cx.data.status_gen;
-            self.state = Some(cx.repo.bisect_state());
+            let state = cx.repo.bisect_state();
+            if let Some(sha) = state.culprit.clone() {
+                let r = cx.repo.clone();
+                self.culprit.spawn(ui.ctx(), move || r.commit(&sha));
+            }
+            self.state = Some(state);
             let r = cx.repo.clone();
             self.current.spawn(ui.ctx(), move || r.commit("HEAD"));
             let r = cx.repo.clone();
@@ -160,9 +167,48 @@ impl BisectView {
             }
             return;
         }
+        if let Some(sha) = &st.culprit {
+            ui.add_space(4.0);
+            ui.heading("Bisect found the commit");
+            ui.label(RichText::new("This is the first bad one. Ending the bisect goes back to where you started.").color(p.dim));
+            ui.add_space(6.0);
+            egui::Frame::new().fill(p.panel2).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
+                ui.label(RichText::new("First bad commit").small().color(p.faint));
+                match self.culprit.get() {
+                    Some(c) => {
+                        ui.label(RichText::new(&c.subject).strong());
+                        ui.label(RichText::new(format!("{} · {} · {}", c.short(), c.author_name, time_label(c.commit_time, cx.settings.date_relative))).small().color(p.dim));
+                    }
+                    None => {
+                        ui.label(RichText::new(gitem_core::util::prefix(sha, 10)).monospace());
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Inspect").clicked() {
+                    cx.inspect(sha);
+                }
+                if ui.button("Open changes").clicked() {
+                    cx.diff(DiffSource::Commit(sha.clone()), None);
+                }
+                if ui.button("End bisect").clicked() {
+                    cx.run(ops::bisect_reset());
+                }
+            });
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("Bisect log").show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    ui.label(RichText::new(&st.log).monospace().small());
+                });
+            });
+            return;
+        }
         ui.add_space(4.0);
         ui.heading("Bisect in progress");
-        if let Some(n) = self.remaining.get() {
+        if st.only_skipped {
+            ui.label(RichText::new("Only skipped commits are left, so git can't narrow it down any further. Its log below names the candidates.").color(p.warn));
+        } else if let Some(n) = self.remaining.get() {
             ui.label(RichText::new(format!("About {n} commit(s) left to check")).color(p.dim));
         }
         if let Some(c) = self.current.get() {
@@ -170,7 +216,7 @@ impl BisectView {
             egui::Frame::new().fill(p.panel2).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
                 ui.label(RichText::new("Now testing").small().color(p.faint));
                 ui.label(RichText::new(&c.subject).strong());
-                ui.label(RichText::new(format!("{} · {} · {}", c.short(), c.author_name, time_label(c.commit_time, true))).small().color(p.dim));
+                ui.label(RichText::new(format!("{} · {} · {}", c.short(), c.author_name, time_label(c.commit_time, cx.settings.date_relative))).small().color(p.dim));
                 if ui.small_button("Inspect").clicked() {
                     cx.inspect(&c.sha);
                 }
@@ -189,8 +235,8 @@ impl BisectView {
                     cx.run(ops::bisect_mark_commit(verdict, sha));
                 }
             };
-            mark(ui, egui::Button::new(RichText::new("✔ Good").color(egui::Color32::WHITE)).fill(p.good), "good");
-            mark(ui, egui::Button::new(RichText::new("✖ Bad").color(egui::Color32::WHITE)).fill(p.danger), "bad");
+            mark(ui, egui::Button::new(RichText::new("✔ Good").color(crate::theme::ink_on(p.good))).fill(p.good), "good");
+            mark(ui, egui::Button::new(RichText::new("✖ Bad").color(crate::theme::ink_on(p.danger))).fill(p.danger), "bad");
             mark(ui, egui::Button::new("Skip"), "skip");
             if ui.button("End bisect").clicked() {
                 cx.run(ops::bisect_reset());

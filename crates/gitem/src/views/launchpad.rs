@@ -4,7 +4,7 @@ use egui::{RichText, Ui};
 use gitem_core::forge::{self, ForgeClient, Issue, LaunchpadGroup, PullRequest, RemoteRepo, launchpad_group};
 use gitem_core::{GitExe, ai, cred, ops, util};
 
-use crate::action::{Action, Cx};
+use crate::action::{Action, Cx, Later};
 use crate::forms::{self, FormDialog};
 use crate::task::Task;
 use crate::views::Tab;
@@ -19,9 +19,17 @@ enum Page {
 
 pub struct LaunchpadView {
     page: Page,
-    prs: Task<(String, Vec<PullRequest>)>,
-    issues: Task<Vec<Issue>>,
+    /// Who you are, the list, and why git's host couldn't say who you are.
+    prs: Task<(String, Vec<PullRequest>, Option<String>)>,
+    /// What loaded, then what each source that failed said.
+    issues: Task<(Vec<Issue>, Vec<String>)>,
     started: bool,
+    /// What the lists were last loaded for: changes here make them out of date.
+    loaded_for: Option<(u64, Option<String>)>,
+    /// The branch the status bar's pull request was last looked up for.
+    pr_branch: Option<String>,
+    /// The source branch as filled in. It follows the current branch until someone types.
+    auto_head: Option<String>,
     action: Task<String>,
     filter: String,
     // Create-PR form
@@ -41,6 +49,9 @@ impl Default for LaunchpadView {
             prs: Task::default(),
             issues: Task::default(),
             started: false,
+            loaded_for: None,
+            pr_branch: None,
+            auto_head: None,
             action: Task::default(),
             filter: String::new(),
             head: String::new(),
@@ -89,24 +100,41 @@ impl LaunchpadView {
         "launchpad".into()
     }
 
+    /// "Create pull request" with this tab open goes to the form, for that branch.
+    pub fn retarget(&mut self, new: Self) {
+        if new.page == Page::Create {
+            self.page = Page::Create;
+            self.head = new.head;
+            self.base = new.base;
+            self.auto_head = None;
+            if self.body.trim().is_empty() {
+                self.title = new.title;
+            }
+        }
+    }
+
     pub fn title(&self) -> String {
         "Launchpad".into()
     }
 
     fn refresh(&mut self, ctx: &egui::Context, cx: &Cx) {
         self.started = true;
+        self.loaded_for = Some((cx.data.forge_gen, cx.forge().map(|f| format!("{}/{}", f.host, f.path))));
         let trackers = cx.settings.issue_trackers.clone();
         let git = cx.repo.git.clone();
         let repo = cx.forge().cloned();
         if let Some(r) = repo.clone() {
             let g = git.clone();
-            self.prs.spawn(ctx, move || -> Result<(String, Vec<PullRequest>), String> {
+            self.prs.spawn(ctx, move || -> Result<(String, Vec<PullRequest>, Option<String>), String> {
                 let c = resolve_client(&g, &r)?;
-                let me = c.whoami().unwrap_or_default();
-                Ok((me, c.list_prs().map_err(|e| e.to_string())?))
+                let (me, why) = match c.whoami() {
+                    Ok(me) => (me, None),
+                    Err(e) => (String::new(), Some(e.to_string())),
+                };
+                Ok((me, c.list_prs().map_err(|e| e.to_string())?, why))
             });
         }
-        self.issues.spawn(ctx, move || -> Result<Vec<Issue>, String> {
+        self.issues.spawn(ctx, move || -> Result<(Vec<Issue>, Vec<String>), String> {
             let mut all = Vec::new();
             let mut errs = Vec::new();
             if let Some(r) = &repo {
@@ -142,19 +170,21 @@ impl LaunchpadView {
                     None => errs.push("Trello is enabled but has no credential.".to_string()),
                 }
             }
+            // One bad token shouldn't hide what the other sources found, or go unmentioned.
             if all.is_empty() && !errs.is_empty() {
                 return Err(errs.join("\n"));
             }
-            Ok(all)
+            Ok((all, errs))
         });
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         let ctx = ui.ctx().clone();
-        if self.prs.poll() {
-            let cur = cx.current_branch();
-            let found = self.prs.get().and_then(|(_, l)| l.iter().find(|p| Some(&p.head) == cur.as_ref())).map(|p| (p.number, p.url.clone()));
+        let cur_branch = cx.current_branch();
+        if self.prs.poll() || self.pr_branch != cur_branch {
+            self.pr_branch = cur_branch.clone();
+            let found = self.prs.get().and_then(|(_, l, _)| l.iter().find(|p| Some(&p.head) == cur_branch.as_ref())).map(|p| (p.head.clone(), p.number, p.url.clone()));
             cx.out.push(Action::BranchPr(found));
         }
         self.issues.poll();
@@ -167,7 +197,8 @@ impl LaunchpadView {
                 cx.error(e);
             }
         }
-        if !self.started {
+        // A saved token, a merge, F5 or another remote: what's listed is out of date.
+        if !self.started || self.loaded_for != Some((cx.data.forge_gen, cx.forge().map(|f| format!("{}/{}", f.host, f.path)))) {
             self.refresh(&ctx, cx);
         }
         ui.horizontal(|ui| {
@@ -211,7 +242,7 @@ impl LaunchpadView {
                 }
         }
         ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
-        let Some((me, prs)) = self.prs.value.take() else {
+        let Some((me, prs, whoami_failed)) = self.prs.value.take() else {
             if self.prs.busy() {
                 spinner_row(ui, "Loading pull requests…", &p);
             } else if cx.forge().is_none() {
@@ -221,6 +252,12 @@ impl LaunchpadView {
         };
         let cur = cx.current_branch();
         let q = self.filter.to_lowercase();
+        if let Some(why) = &whoami_failed {
+            ui.colored_label(p.warn, "Couldn't find out who you are on this host, so your pull requests are listed under Other.").on_hover_text(why);
+        }
+        if prs.len() >= forge::LIST_LIMIT {
+            ui.label(RichText::new(format!("Showing the first {} only.", forge::LIST_LIMIT)).small().color(p.dim));
+        }
         egui::ScrollArea::vertical().id_salt("lp-prs").auto_shrink([false, false]).show(ui, |ui| {
             if prs.is_empty() {
                 empty_state(ui, "No open pull requests", "Open ones appear here, grouped by what they need.", &p);
@@ -258,7 +295,7 @@ impl LaunchpadView {
                 });
             }
         });
-        self.prs.value = Some((me, prs));
+        self.prs.value = Some((me, prs, whoami_failed));
     }
 
     fn pr_card(&mut self, ui: &mut Ui, cx: &mut Cx, pr: &PullRequest, cur: Option<&str>, all: &[PullRequest]) {
@@ -270,7 +307,7 @@ impl LaunchpadView {
                 ui.add(egui::Label::new(RichText::new(&pr.title).strong()).truncate());
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("{} · {} → {} · {}", pr.author, pr.head, pr.base, util::relative_time(pr.updated, util::now_ts()))).small().color(p.dim));
+                ui.label(RichText::new(format!("{} · {} → {} · {}", pr.author, pr.head, pr.base, time_label(pr.updated, cx.settings.date_relative))).small().color(p.dim));
                 if pr.additions + pr.deletions > 0 {
                     ui.label(RichText::new(format!("+{}", pr.additions)).small().color(p.add_fg));
                     ui.label(RichText::new(format!("-{}", pr.deletions)).small().color(p.del_fg));
@@ -379,9 +416,9 @@ impl LaunchpadView {
                         cx.form(FormDialog::new(format!("Comment on #{n}"), "Post").multiline("body", "Comment", "").on_submit(move |v| {
                             let body = v.opt("body").ok_or("A comment is required.")?;
                             let (g, r2) = (g.clone(), r2.clone());
-                            Ok(vec![Action::Background(Box::new(move || {
+                            Ok(vec![Action::Later(Box::new(move || {
                                 resolve_client(&g, &r2)?.comment_pr(n, &body).map_err(|e| e.to_string())?;
-                                Ok(format!("Commented on #{n}"))
+                                Ok(Later::ForgeChanged(format!("Commented on #{n}")))
                             }))])
                         }));
                     }
@@ -390,9 +427,9 @@ impl LaunchpadView {
                         let r2 = r.clone();
                         cx.form(FormDialog::new(format!("Merge #{n} on {}", r.kind.label()), "Merge").danger().info(format!("Merge \"{}\" into {} with the host's default strategy?", pr.title, pr.base)).on_submit(move |_| {
                             let (g, r2) = (g.clone(), r2.clone());
-                            Ok(vec![Action::Background(Box::new(move || {
+                            Ok(vec![Action::Later(Box::new(move || {
                                 resolve_client(&g, &r2)?.merge_pr(n).map_err(|e| e.to_string())?;
-                                Ok(format!("Merged #{n}"))
+                                Ok(Later::ForgeChanged(format!("Merged #{n}")))
                             }))])
                         }));
                     }
@@ -408,12 +445,18 @@ impl LaunchpadView {
             error_box(ui, e, &p);
         }
         ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY));
-        let Some(issues) = self.issues.value.take() else {
+        let Some((issues, failed)) = self.issues.value.take() else {
             if self.issues.busy() {
                 spinner_row(ui, "Loading issues…", &p);
             }
             return;
         };
+        for e in &failed {
+            error_box(ui, e, &p);
+        }
+        if issues.len() >= forge::LIST_LIMIT {
+            ui.label(RichText::new(format!("Showing the first {} from each source only.", forge::LIST_LIMIT)).small().color(p.dim));
+        }
         let q = self.filter.to_lowercase();
         egui::ScrollArea::vertical().id_salt("lp-issues").auto_shrink([false, false]).show(ui, |ui| {
             if issues.is_empty() {
@@ -427,7 +470,7 @@ impl LaunchpadView {
                         ui.add(egui::Label::new(RichText::new(&i.title).strong()).truncate());
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(format!("{} · {} · {}", i.source, i.state, util::relative_time(i.updated, util::now_ts()))).small().color(p.dim));
+                        ui.label(RichText::new(format!("{} · {} · {}", i.source, i.state, time_label(i.updated, cx.settings.date_relative))).small().color(p.dim));
                         if !i.assignees.is_empty() {
                             ui.label(RichText::new(i.assignees.join(", ")).small().color(p.dim));
                         }
@@ -437,7 +480,8 @@ impl LaunchpadView {
                     });
                     ui.horizontal(|ui| {
                         if ui.small_button("Start work…").on_hover_text("Create a branch or worktree for this issue").clicked() {
-                            cx.form(start_work_form(cx.repo, i, &cx.settings.start_work_format));
+                            let base = cx.data.refs.get().and_then(|r| r.default_branch.clone());
+                            cx.form(start_work_form(cx.repo, i, &cx.settings.start_work_format, base));
                         }
                         if ui.small_button("Open").clicked() {
                             cx.url(i.url.clone());
@@ -450,7 +494,7 @@ impl LaunchpadView {
                 ui.add_space(3.0);
             }
         });
-        self.issues.value = Some(issues);
+        self.issues.value = Some((issues, failed));
     }
 
     fn create_ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
@@ -483,8 +527,9 @@ impl LaunchpadView {
             empty_state(ui, "No hosting provider", "Add a remote on a supported host to create pull requests.", &p);
             return;
         };
-        if self.head.is_empty() {
+        if self.head.is_empty() || self.auto_head.as_ref() == Some(&self.head) {
             self.head = cx.current_branch().unwrap_or_default();
+            self.auto_head = Some(self.head.clone());
         }
         if self.base.is_empty() {
             self.base = cx.data.base_branch();
@@ -533,9 +578,9 @@ impl LaunchpadView {
     }
 }
 
-pub fn start_work_form(repo: &gitem_core::Repo, i: &Issue, format: &str) -> FormDialog {
+pub fn start_work_form(repo: &gitem_core::Repo, i: &Issue, format: &str, base: Option<String>) -> FormDialog {
     let name = i.branch_name_as(format);
-    let base = repo.default_branch().unwrap_or_else(|| "HEAD".to_string());
+    let base = base.unwrap_or_else(|| "HEAD".to_string());
     let wt = repo.root.parent().map(|x| x.join(format!("{}.worktrees/{name}", repo.name()))).unwrap_or_default().to_string_lossy().replace('\\', "/");
     FormDialog::new(format!("Start work on {}", i.id), "Start")
         .info(i.title.clone())
@@ -548,9 +593,9 @@ pub fn start_work_form(repo: &gitem_core::Repo, i: &Issue, format: &str) -> Form
             let b = v.opt("base");
             Ok(if v.on("worktree") {
                 let p = v.opt("path").ok_or("A worktree location is required.")?;
-                vec![Action::RunThenOpen(ops::worktree_add(&p, None, Some(&n), b.as_deref(), false), p.into())]
+                vec![Action::RunThenOpen(ops::worktree_start_work(&p, &n, b.as_deref()), p.into())]
             } else {
-                vec![Action::Run(ops::branch_create(&n, b.as_deref(), true))]
+                vec![Action::Run(ops::branch_start_work(&n, b.as_deref()))]
             })
         })
 }

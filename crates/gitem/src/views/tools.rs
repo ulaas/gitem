@@ -35,7 +35,8 @@ fn create_hook(path: &str) -> std::io::Result<()> {
 #[derive(Default)]
 pub struct ToolsView {
     page: Page,
-    hooks: Option<Vec<HookInfo>>,
+    hooks: Task<Vec<HookInfo>>,
+    hooks_read: bool,
     /// The hook whose Delete was clicked and awaits a yes.
     confirm_delete_hook: Option<String>,
     ignore_text: Option<String>,
@@ -44,13 +45,17 @@ pub struct ToolsView {
     ignore_check: Task<Option<String>>,
     clean_dirs: bool,
     clean_ignored: bool,
-    clean_list: Task<Vec<String>>,
+    /// What would go, then the repositories inside this one that git leaves alone.
+    clean_list: Task<(Vec<String>, Vec<String>)>,
     clean_gen: u64,
     lfs: Task<Vec<LfsFile>>,
     lfs_started: bool,
     sparse_text: Option<String>,
     sparse_cone: bool,
+    sparse_read: Task<Vec<String>>,
     objects: Task<String>,
+    /// A write was going on last frame, so what's counted may have just changed.
+    objects_stale: bool,
 }
 
 impl ToolsView {
@@ -142,7 +147,12 @@ impl ToolsView {
 
     fn hooks_ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        let hooks = self.hooks.get_or_insert_with(|| cx.repo.hooks()).clone();
+        self.hooks.poll();
+        if !std::mem::replace(&mut self.hooks_read, true) {
+            let r = cx.repo.clone();
+            self.hooks.spawn(ui.ctx(), move || -> Result<Vec<HookInfo>, String> { Ok(r.hooks()) });
+        }
+        let hooks = self.hooks.get().cloned().unwrap_or_default();
         ui.label(RichText::new("Disabled hooks are renamed with a .disabled suffix so they're easy to turn back on.").small().color(p.faint));
         let mut reload = false;
         for h in &hooks {
@@ -184,7 +194,7 @@ impl ToolsView {
             });
         }
         if reload {
-            self.hooks = None;
+            self.hooks_read = false;
         }
     }
 
@@ -245,13 +255,17 @@ impl ToolsView {
         if reload {
             self.clean_gen = cx.data.status_gen + 1;
             let (r, d, i) = (cx.repo.clone(), self.clean_dirs, self.clean_ignored);
-            self.clean_list.spawn(ui.ctx(), move || r.clean_preview(d, i));
+            self.clean_list.spawn(ui.ctx(), move || -> gitem_core::Result<_> { Ok((r.clean_preview(d, i)?, r.clean_left_alone()?)) });
         }
-        let list = self.clean_list.get().cloned().unwrap_or_default();
+        let (list, left_alone) = self.clean_list.get().cloned().unwrap_or_default();
         ui.label(RichText::new(format!("{} item(s) would be deleted", list.len())).color(p.dim));
-        let b = egui::Button::new(RichText::new("Delete these…").color(egui::Color32::WHITE)).fill(p.danger);
+        let b = egui::Button::new(RichText::new("Delete these…").color(crate::theme::ink_on(p.danger))).fill(p.danger);
         if ui.add_enabled(!list.is_empty(), b).clicked() {
             cx.confirm("Clean working tree", &format!("Permanently delete {} untracked item(s)? This cannot be undone.", list.len()), "Delete", ops::clean(self.clean_dirs, self.clean_ignored));
+        }
+        if !left_alone.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("Left alone, as each is a repository of its own, so its commits could go with it. Delete by hand if you mean to: {}", left_alone.join(", "))).small().color(p.warn));
         }
         ui.add_space(4.0);
         for l in list.iter().take(500) {
@@ -306,10 +320,20 @@ impl ToolsView {
 
     fn sparse(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
-        let text = self.sparse_text.get_or_insert_with(|| {
+        if self.sparse_read.poll()
+            && let Some(patterns) = self.sparse_read.value.take()
+        {
             self.sparse_cone = true;
-            cx.repo.sparse_patterns().join("\n")
-        });
+            self.sparse_text = Some(patterns.join("\n"));
+        }
+        if self.sparse_text.is_none() && !self.sparse_read.busy() {
+            let r = cx.repo.clone();
+            self.sparse_read.spawn(ui.ctx(), move || -> Result<Vec<String>, String> { Ok(r.sparse_patterns()) });
+        }
+        let Some(text) = self.sparse_text.as_mut() else {
+            spinner_row(ui, "Reading patterns…", &p);
+            return;
+        };
         ui.label(RichText::new("Check out only these folders, one per line. Everything else stays out of the working tree.").color(p.dim));
         ui.add(crate::widgets::text_area(text).code_editor().desired_rows(10).desired_width(f32::INFINITY));
         ui.checkbox(&mut self.sparse_cone, "Cone mode (folders; faster)");
@@ -332,7 +356,10 @@ impl ToolsView {
     fn maintenance(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         self.objects.poll();
-        if self.objects.value.is_none() && !self.objects.busy() && self.objects.error.is_none() {
+        // Garbage collection changes these without changing anything status can see.
+        let finished = self.objects_stale && !cx.data.ops_busy;
+        self.objects_stale = cx.data.ops_busy;
+        if finished || (self.objects.value.is_none() && !self.objects.busy() && self.objects.error.is_none()) {
             let r = cx.repo.clone();
             self.objects.spawn(ui.ctx(), move || r.count_objects());
         }

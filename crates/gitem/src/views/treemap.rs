@@ -72,7 +72,8 @@ impl TreemapView {
         let hidden = items.len().saturating_sub(MAX_FILES);
         items.truncate(MAX_FILES);
         if items.is_empty() {
-            empty_state(ui, "Nothing to show", "No files match.", &p);
+            let why = if all.is_empty() { "This repository has no files in its latest commit." } else { "No files match." };
+            empty_state(ui, "Nothing to show", why, &p);
             return;
         }
         // Types in order of total weight; identity stays with the type name.
@@ -99,7 +100,7 @@ impl TreemapView {
                     ui.label(RichText::new("other").small().color(p.dim));
                 }
             } else {
-                ui.label(RichText::new("Darker to brighter: more commits touched the file").small().color(p.dim));
+                ui.label(RichText::new(if p.dark { "Darker to brighter: more commits touched the file" } else { "Paler to darker: more commits touched the file" }).small().color(p.dim));
             }
             if hidden > 0 {
                 ui.label(RichText::new(format!("{hidden} smallest not shown")).small().color(p.faint));
@@ -125,7 +126,7 @@ impl TreemapView {
             }
             if c.w > 60.0 && c.h > 18.0 {
                 let name = path.rsplit('/').next().unwrap_or(path);
-                painter.with_clip_rect(inner.shrink(3.0)).text(inner.min + vec2(4.0, 3.0), Align2::LEFT_TOP, name, prop(11.0), Color32::WHITE);
+                painter.with_clip_rect(inner.shrink(3.0)).text(inner.min + vec2(4.0, 3.0), Align2::LEFT_TOP, name, prop(11.0), crate::theme::ink_on(fill));
             }
         }
         if let Some(i) = hit {

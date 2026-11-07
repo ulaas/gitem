@@ -54,15 +54,28 @@ impl Default for SearchView {
     }
 }
 
-const HELP: &str = "Words search commit messages. Filters:\n  message: or =:   commit message\n  author: or @:    author name or email\n  commit: or #:    SHA or revision\n  file: or ?:      touched path\n  change: or ~:    added or removed text (regex)\n  changes: or s:   occurrence count changed\n  after:  before:  dates such as 2024-01-01 or \"2 weeks ago\"\n  ref:             search only this branch\n  -is:merge        hide merges";
+const HELP: &str = "Words search commit messages, as plain text, and all must be there. Filters:\n  message: or =:   commit message\n  re:              commit message, as a regular expression\n  author: or @:    author name or email\n  commit: or #:    just that commit, by SHA or revision\n  file: or ?:      touched path\n  change: or ~:    added or removed text (regex)\n  changes: or s:   occurrence count changed\n  after:  before:  dates such as 2024-01-01 or \"2 weeks ago\"\n  ref:             search only this branch\n  -is:merge        hide merges";
 
 impl SearchView {
     pub fn search(q: &str) -> Self {
         Self { query: q.to_string(), auto_run: true, ..Default::default() }
     }
 
+    /// With a ref still to pick, there's nothing to run yet.
     pub fn compare(a: &str, b: &str) -> Self {
-        Self { mode: Mode::Compare, a: a.to_string(), b: b.to_string(), auto_run: true, ..Default::default() }
+        Self { mode: Mode::Compare, a: a.to_string(), b: b.to_string(), auto_run: !a.is_empty() && !b.is_empty(), ..Default::default() }
+    }
+
+    /// A new search or comparison takes over. Just opening the tab leaves it as it is.
+    pub fn retarget(&mut self, new: Self) {
+        if new.auto_run {
+            self.mode = new.mode;
+            self.query = new.query;
+            self.a = new.a;
+            self.b = new.b;
+            self.selected = None;
+            self.auto_run = true;
+        }
     }
 
     pub fn key(&self) -> String {
@@ -90,7 +103,10 @@ impl SearchView {
         let mut q = parse_search(&self.query);
         q.limit = self.limit;
         // A new search replaces the last one, whose git stops: `change:` can run for minutes.
-        self.results.spawn_git(ctx, cx.repo, move |repo| repo.log(&q));
+        self.results.spawn_git(ctx, cx.repo, move |repo| {
+            repo.check_search_dates(&q)?;
+            repo.log(&q)
+        });
     }
 
     fn run_compare(&mut self, ctx: &egui::Context, cx: &Cx) {

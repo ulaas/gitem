@@ -122,13 +122,14 @@ impl ContributorsView {
                     paint_text(ui, Rect::from_min_size(pos2(rx, rect.top()), vec2(60.0, 34.0)), &format!("+{}", c.additions), mono(11.0), p.add_fg);
                     paint_text(ui, Rect::from_min_size(pos2(rx + 62.0, rect.top()), vec2(60.0, 34.0)), &format!("-{}", c.deletions), mono(11.0), p.del_fg);
                 }
-                paint_text(ui, Rect::from_min_size(pos2(rect.right() - 106.0, rect.top()), vec2(100.0, 34.0)), &util::relative_time(c.last, util::now_ts()), prop(12.0), p.dim);
+                paint_text(ui, Rect::from_min_size(pos2(rect.right() - 106.0, rect.top()), vec2(100.0, 34.0)), &time_label(c.last, cx.settings.date_relative), prop(12.0), p.dim);
                 if resp.clicked() {
                     clicked = Some(c.email.clone());
                 }
                 resp.context_menu(|ui| {
                     if ui.button("Search their commits").clicked() {
-                        cx.open(Tab::search(&format!("@:{}", c.email)));
+                        // In brackets: `ann@x` alone would find `joann@x` as well.
+                        cx.open(Tab::search(&format!("@:<{}>", c.email)));
                         ui.close();
                     }
                     if ui.button("Copy name and email").clicked() {

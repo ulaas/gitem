@@ -5,7 +5,7 @@ use gitem_core::model::*;
 use gitem_core::ops;
 use gitem_core::repo::DiffSource;
 
-use crate::action::{Action, Cx};
+use crate::action::{Action, Cx, Later};
 use crate::forms;
 use crate::views::Tab;
 
@@ -52,7 +52,7 @@ pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
     ui.separator();
     let is_head = cx.status().is_some_and(|s| s.head_sha == sha);
     if is_head && item(ui, "Undo commit") {
-        cx.run(ops::undo_commit());
+        undo_commit(cx);
     }
     if item(ui, "Reword…") {
         if is_head {
@@ -109,8 +109,11 @@ pub fn commit_menu(ui: &mut Ui, cx: &mut Cx, c: &Commit) {
     }
     ui.separator();
     if item(ui, "Edit note…") {
-        let current = cx.repo.commit_note(&sha).unwrap_or_default();
-        cx.form(forms::note_form(sha.clone(), current));
+        let (repo, sha) = (cx.repo.clone(), sha.clone());
+        cx.out.push(Action::Later(Box::new(move || {
+            let current = repo.commit_note(&sha).unwrap_or_default();
+            Ok(Later::Form(Box::new(move || forms::note_form(sha, current))))
+        })));
     }
     if item(ui, "Save as patch…") {
         cx.open(Tab::Patches(Box::new(crate::views::patches::PatchesView::create_from(DiffSource::Commit(sha.clone()), &c.subject))));
@@ -164,24 +167,51 @@ fn open_plan(cx: &mut Cx, c: &Commit, action: gitem_core::rebase::RebaseAction, 
         cx.error(format!("{} is a merge commit, and a rebase can't change one on its own. It replays merges as plain history.", c.short()));
         return;
     }
-    if !cx.repo.is_ancestor(&c.sha, "HEAD") {
-        cx.error(format!("{} isn't on the current branch, so rebasing can't change it. Switch to a branch that has it first.", c.short()));
-        return;
-    }
-    // A squash also rewrites the commit it folds into, so the plan starts one earlier.
-    let base = if needs_previous { c.parents.first().map(|p| format!("{p}~1")).filter(|b| cx.repo.resolve(b).is_ok()) } else { c.parents.first().cloned() };
-    let mut view = match base {
-        Some(b) => RebaseView::new(Some(b)),
-        None => RebaseView::from_root(),
-    };
-    view.preset(&c.sha, action);
-    cx.open(Tab::Rebase(Box::new(view)));
+    let (repo, sha, short, parent) = (cx.repo.clone(), c.sha.clone(), c.short().to_string(), c.parents.first().cloned());
+    cx.out.push(Action::Later(Box::new(move || {
+        if !repo.is_ancestor(&sha, "HEAD") {
+            return Err(format!("{short} isn't on the current branch, so rebasing can't change it. Switch to a branch that has it first."));
+        }
+        // A squash also rewrites the commit it folds into, so the plan starts one earlier.
+        let base = if needs_previous { parent.map(|p| format!("{p}~1")).filter(|b| repo.resolve(b).is_ok()) } else { parent };
+        Ok(Later::Tab(Box::new(move || {
+            let mut view = match base {
+                Some(b) => RebaseView::new(Some(b)),
+                None => RebaseView::from_root(),
+            };
+            view.preset(&sha, action);
+            Tab::Rebase(Box::new(view))
+        })))
+    })));
+}
+
+/// Its tab comes with the go-ahead: saying no leaves everything as it was.
+fn recompose_form(base: String) -> forms::FormDialog {
+    forms::FormDialog::new("Recompose", "Recompose").info(format!("Undo the commits after {}, keeping all their changes in the working tree, then arrange them into new commits? Commit messages are not kept. The reflog can restore them.", gitem_core::util::prefix(&base, 10))).on_submit(move |_| Ok(vec![Action::Run(ops::recompose_reset(&base)), Action::OpenTab(Tab::Composer(Box::default()))]))
 }
 
 fn recompose(cx: &mut Cx, base: &str) {
-    let base = base.to_string();
-    // Its tab comes with the go-ahead: saying no leaves everything as it was.
-    cx.form(forms::FormDialog::new("Recompose", "Recompose").info(format!("Undo the commits after {}, keeping all their changes in the working tree, then arrange them into new commits? Commit messages are not kept. The reflog can restore them.", gitem_core::util::prefix(&base, 10))).on_submit(move |_| Ok(vec![Action::Run(ops::recompose_reset(&base)), Action::OpenTab(Tab::Composer(Box::default()))])));
+    cx.form(recompose_form(base.to_string()));
+}
+
+/// Keeps the changes, but asks first once the commit is on a remote, since it would then
+/// have to be pushed over. A first commit has nothing before it to go back to.
+pub fn undo_commit(cx: &mut Cx) {
+    let repo = cx.repo.clone();
+    let pushed = cx.status().is_some_and(|s| s.upstream.is_some() && s.ahead == 0);
+    let confirming = cx.settings.confirm_destructive;
+    cx.out.push(Action::Later(Box::new(move || {
+        if repo.resolve("HEAD~1").is_err() {
+            return Ok(Later::Toast("This is the first commit on this branch, so there's nothing to go back to.".to_string()));
+        }
+        Ok(if pushed {
+            Later::Confirm { title: "Undo a pushed commit".to_string(), body: "This commit is already on the remote. Undoing it here means the next push has to overwrite it. Your changes stay in the working tree.".to_string(), label: "Undo commit".to_string(), op: ops::undo_commit() }
+        } else if confirming {
+            Later::Confirm { title: "Undo last commit".to_string(), body: "Take the last commit back? Its changes stay staged.".to_string(), label: "Undo commit".to_string(), op: ops::undo_commit() }
+        } else {
+            Later::Run(ops::undo_commit())
+        })
+    })));
 }
 
 pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
@@ -283,10 +313,11 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
     if b.is_current {
         let base = cx.data.base_branch();
         if name != base && item(ui, "Recompose branch…") {
-            match cx.repo.merge_base(&base, "HEAD") {
-                Ok(mb) => recompose(cx, &mb),
-                Err(e) => cx.error(e.to_string()),
-            }
+            let repo = cx.repo.clone();
+            cx.out.push(Action::Later(Box::new(move || {
+                let mb = repo.merge_base(&base, "HEAD").map_err(|e| e.to_string())?;
+                Ok(Later::Form(Box::new(move || recompose_form(mb))))
+            })));
         }
     }
     if item(ui, "Search commits on this branch") {
@@ -481,7 +512,13 @@ pub fn worktree_menu(ui: &mut Ui, cx: &mut Cx, w: &Worktree) {
             Err(e) => Err(e.to_string()),
         })));
     }
-    if !w.is_main {
+    // Not the one this tab has open: its files are in use, so git would empty the folder and
+    // then fail to delete it, leaving the tab on nothing.
+    if !w.is_main && w.is_current {
+        ui.separator();
+        ui.add_enabled(false, egui::Button::new("Move or remove from another worktree")).on_disabled_hover_text("It's the one open in this tab. Open the main worktree to do this.");
+    }
+    if !w.is_main && !w.is_current {
         ui.separator();
         if item(ui, "Move…") {
             cx.form(forms::move_worktree(path.clone()));
@@ -493,11 +530,18 @@ pub fn worktree_menu(ui: &mut Ui, cx: &mut Cx, w: &Worktree) {
         } else if item(ui, "Lock…") {
             cx.form(forms::lock_worktree(path.clone()));
         }
-        if item(ui, "Remove…") {
-            cx.confirm("Remove worktree", &format!("Remove the worktree at {path}?"), "Remove", ops::worktree_remove(&path, false));
-        }
-        if item(ui, "Force remove…") {
-            cx.confirm("Force remove worktree", &format!("Remove {path} and discard any uncommitted changes in it?"), "Force remove", ops::worktree_remove(&path, true));
+        if w.locked.is_some() {
+            // Git refuses anything less for a locked one.
+            if item(ui, "Force remove…") {
+                cx.confirm("Force remove locked worktree", &format!("{path} is locked. Remove it anyway, and discard any uncommitted changes in it?"), "Force remove", ops::worktree_remove_locked(&path));
+            }
+        } else {
+            if item(ui, "Remove…") {
+                cx.confirm("Remove worktree", &format!("Remove the worktree at {path}?"), "Remove", ops::worktree_remove(&path, false));
+            }
+            if item(ui, "Force remove…") {
+                cx.confirm("Force remove worktree", &format!("Remove {path} and discard any uncommitted changes in it?"), "Force remove", ops::worktree_remove(&path, true));
+            }
         }
     }
 }

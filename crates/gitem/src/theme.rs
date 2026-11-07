@@ -1,5 +1,6 @@
-//! Colour palettes and egui style. Chart/lane colours use a CVD-validated
-//! categorical order; heatmaps use a single-hue sequential ramp.
+//! Colour palettes and egui style. Chart and lane colours aren't enough on their own for
+//! colour-blind readers, red against green least of all, so nothing should depend on them
+//! alone: a diff also has its + and - signs. Heatmaps use a single-hue sequential ramp.
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use gitem_core::settings::ThemeChoice;
 
@@ -97,17 +98,45 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
 }
 
+/// The closest colour to `c`, moving towards `towards`, that reads on `bg` at `ratio`.
+pub fn readable(c: Color32, towards: Color32, bg: Color32, ratio: f32) -> Color32 {
+    (0..=20).map(|i| mix(c, towards, i as f32 / 20.0)).find(|m| contrast(*m, bg) >= ratio).unwrap_or(towards)
+}
+
+/// Black or white, whichever reads better on a fill that could be any colour.
+pub fn ink_on(fill: Color32) -> Color32 {
+    if contrast(Color32::WHITE, fill) >= contrast(Color32::BLACK, fill) { Color32::WHITE } else { Color32::BLACK }
+}
+
+/// The text of a chip, whose background is a tint of `color` over `panel`.
+pub fn chip_ink(color: Color32, panel: Color32, text: Color32) -> Color32 {
+    readable(color, text, over(color.gamma_multiply(0.14), panel), 4.5)
+}
+
 impl Palette {
     /// Behind the merge and rebase banner. Opaque, as the window behind it is near black.
     pub fn banner_fill(&self) -> Color32 {
         over(self.warn.gamma_multiply(0.15), self.panel)
     }
 
+    /// Secondary text and status colours, brought up to what's needed to read them on any
+    /// surface they appear on. Their hue stays, as far as it can.
+    fn tuned(self) -> Self {
+        let t = self.text;
+        let surfaces = |c: Color32, ratio: f32, tight: f32| {
+            let c = readable(c, t, self.panel, ratio);
+            let c = readable(c, t, self.panel2, ratio);
+            let c = readable(c, t, self.hover, tight);
+            readable(c, t, self.selection, tight)
+        };
+        Self { faint: surfaces(self.faint, 4.5, 3.0), danger: surfaces(self.danger, 4.5, 3.0), warn: surfaces(self.warn, 4.5, 3.0), good: surfaces(self.good, 4.5, 3.0), ..self }
+    }
+
     pub fn get(t: ThemeChoice) -> Self {
         match t {
-            ThemeChoice::Dark => Self::dark(),
-            ThemeChoice::Light => Self::light(),
-            ThemeChoice::Midnight => Self::midnight(),
+            ThemeChoice::Dark => Self::dark().tuned(),
+            ThemeChoice::Light => Self::light().tuned(),
+            ThemeChoice::Midnight => Self::midnight().tuned(),
             ThemeChoice::Black => Self::dark_family([0x000000, 0x0b0b0c, 0x161618, 0x202023, 0x2b2b2f], [0x28282c, 0x38383d, 0x47474d], [0xd0d0d0, 0xa6a6a6, 0x848484], 0x4c95ec),
             ThemeChoice::Slate => Self::dark_family([0x1a2029, 0x202733, 0x2a3341, 0x323c4c, 0x3a4555], [0x3a465b, 0x485671, 0x576583], [0xcbd0d8, 0xa5aebc, 0x8c96a8], 0x5aa2f0),
             ThemeChoice::Forest => Self::dark_family([0x141c18, 0x1a241f, 0x24302a, 0x2c3a33, 0x33443b], [0x35473e, 0x43584d, 0x50675a], [0xcad3cd, 0xa2b0a7, 0x84958b], 0x3fbf8a),
@@ -134,7 +163,7 @@ impl Palette {
     pub fn with_accent(self, accent: Color32) -> Self {
         let on_accent = [Color32::WHITE, hex(0x111318)].into_iter().find(|c| contrast(*c, accent) >= 4.5).unwrap_or(if contrast(Color32::WHITE, accent) > contrast(hex(0x111318), accent) { Color32::WHITE } else { hex(0x111318) });
         let (selection, status) = if self.dark { (0.3, 0.24) } else { (0.24, 0.2) };
-        Self { accent, on_accent, selection: mix(self.bg, accent, selection), status_bg: mix(self.bg, accent, status), ..self }
+        Self { accent, on_accent, selection: mix(self.bg, accent, selection), status_bg: mix(self.bg, accent, status), ..self }.tuned()
     }
 
     /// Surfaces darkest first: `bg, panel, panel2, hover, border`. Then buttons:
@@ -337,7 +366,7 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32) {
     v.extreme_bg_color = p.bg;
     v.faint_bg_color = p.panel2;
     v.code_bg_color = p.panel2;
-    v.hyperlink_color = p.accent;
+    v.hyperlink_color = readable(p.accent, p.text, p.panel2, 4.5);
     v.warn_fg_color = p.warn;
     v.error_fg_color = p.danger;
     v.selection.bg_fill = p.selection;
@@ -436,7 +465,22 @@ mod tests {
         need("text on selection", p.text, p.selection, 4.5);
         need("text on status bar", p.text, p.status_bg, 4.5);
         need("dim on panel", p.dim, p.panel, 4.5);
-        need("faint on panel", p.faint, p.panel, 3.0);
+        need("faint on panel", p.faint, p.panel, 4.5);
+        need("faint on a card", p.faint, p.panel2, 4.5);
+        need("faint on a hovered row", p.faint, p.hover, 3.0);
+        need("faint on a selected row", p.faint, p.selection, 3.0);
+        need("danger on panel", p.danger, p.panel, 4.5);
+        need("danger on a card", p.danger, p.panel2, 4.5);
+        need("warning on panel", p.warn, p.panel, 4.5);
+        need("good on panel", p.good, p.panel, 4.5);
+        need("words on a Good button", ink_on(p.good), p.good, 4.5);
+        need("words on a danger button", ink_on(p.danger), p.danger, 4.5);
+        for (i, s) in p.series.iter().enumerate() {
+            need(&format!("chip in series {i}"), chip_ink(*s, p.panel, p.text), over(s.gamma_multiply(0.14), p.panel), 4.5);
+        }
+        for t in p.seq {
+            need("a label on a heat colour", ink_on(t), t, 4.5);
+        }
         need("accent text on its button", p.on_accent, p.accent, 4.5);
         need("accent on panel", p.accent, p.panel, 3.0);
         need("accent on selection", p.accent, p.selection, 1.7);

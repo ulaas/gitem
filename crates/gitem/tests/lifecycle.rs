@@ -443,8 +443,11 @@ fn a_commit_message_being_written_survives_a_crash() {
     settled(&mut ui);
     ui.state_mut().repos[0].open_tab(gitem::views::Tab::changes());
     steps(&mut ui, 3);
-    let ctx = ui.ctx.clone();
-    ui.state_mut().apply_action(&ctx, gitem::action::Action::SetCommitMessage("half written".into()));
+    for (_, t) in ui.state_mut().repos[0].dock.iter_all_tabs_mut() {
+        if let gitem::views::Tab::Changes(c) = t {
+            c.message = "half written".into();
+        }
+    }
     let t = Instant::now();
     let drafts = Settings::path().parent().unwrap().join("drafts");
     while std::fs::read_dir(&drafts).map_or(true, |mut e| e.next().is_none()) {
