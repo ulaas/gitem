@@ -885,6 +885,8 @@ pub struct GitemApp {
     global_queue: VecDeque<(GitOp, Option<PathBuf>)>,
     global_running: Option<Running>,
     applied: Option<(gitem_core::settings::ThemeChoice, u32, String)>,
+    /// egui's zoom as last seen, to tell its own Ctrl+Plus from ours still waiting to apply.
+    seen_zoom: Option<f32>,
     open_path: String,
     settings_dirty: bool,
     /// Looking for repositories in a folder, and what was found.
@@ -1037,6 +1039,7 @@ impl GitemApp {
             global_queue: VecDeque::new(),
             global_running: None,
             applied: None,
+            seen_zoom: None,
             open_path: String::new(),
             settings_dirty: false,
             repo_scan: None,
@@ -3123,9 +3126,16 @@ impl GitemApp {
         }
         self.check_window_close(&ctx);
         let mut out: Vec<Action> = Vec::new();
-        // egui's own Ctrl+Plus and Ctrl+Minus change this without telling anyone.
-        if (ctx.zoom_factor() - self.settings.ui_scale.clamp(0.6, 3.0)).abs() > 0.001 && self.applied.is_some() {
-            self.settings.ui_scale = ctx.zoom_factor();
+        // egui's own Ctrl+Plus and Ctrl+Minus change this without telling anyone. A zoom we set
+        // only takes effect next frame, so until then egui's differs from the setting; reading
+        // it back then would undo the change, and the two would swap every frame after. Only a
+        // change on egui's side counts.
+        let zoom = ctx.zoom_factor();
+        if let Some(seen) = self.seen_zoom.replace(zoom)
+            && (zoom - seen).abs() > 0.001
+            && (zoom - self.settings.ui_scale.clamp(0.6, 3.0)).abs() > 0.001
+        {
+            self.settings.ui_scale = zoom;
             self.settings_dirty = true;
         }
 
