@@ -379,19 +379,19 @@ pub fn stash_menu(ui: &mut Ui, cx: &mut Cx, s: &Stash) {
         cx.diff(DiffSource::Commit(s.sha.clone()), None);
     }
     if item(ui, "Apply") {
-        cx.run(ops::stash_apply(&sel, false, false));
+        cx.run(ops::only_if_stash_is(ops::stash_apply(&sel, false, false), &sel, &s.sha));
     }
     if item(ui, "Apply and restore staging") {
-        cx.run(ops::stash_apply(&sel, false, true));
+        cx.run(ops::only_if_stash_is(ops::stash_apply(&sel, false, true), &sel, &s.sha));
     }
     if item(ui, "Pop") {
-        cx.run(ops::stash_apply(&sel, true, false));
+        cx.run(ops::only_if_stash_is(ops::stash_apply(&sel, true, false), &sel, &s.sha));
     }
     if item(ui, "Rename…") {
         cx.form(forms::stash_rename(sel.clone(), s.sha.clone(), s.message.clone()));
     }
     if item(ui, "Create branch…") {
-        cx.form(forms::stash_to_branch(sel.clone()));
+        cx.form(forms::stash_to_branch(sel.clone(), s.sha.clone()));
     }
     if item(ui, "Explain with AI") {
         let (sha, msg) = (s.sha.clone(), s.message.clone());
@@ -402,14 +402,14 @@ pub fn stash_menu(ui: &mut Ui, cx: &mut Cx, s: &Stash) {
         ui.menu_button("Apply in worktree", |ui| {
             for w in &others {
                 if item(ui, w) {
-                    cx.run(ops::stash_apply_in(w, &sel));
+                    cx.run(ops::only_if_stash_is(ops::stash_apply_in(w, &sel), &sel, &s.sha));
                 }
             }
         });
     }
     ui.separator();
     if item(ui, "Drop…") {
-        cx.confirm("Drop stash", &format!("Permanently drop {sel} ({})?", s.message), "Drop", ops::stash_drop(&sel));
+        cx.confirm("Drop stash", &format!("Permanently drop {sel} ({})?", s.message), "Drop", ops::only_if_stash_is(ops::stash_drop(&sel), &sel, &s.sha));
     }
 }
 

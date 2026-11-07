@@ -111,6 +111,23 @@ impl GitOp {
         crate::util::mask_url_credentials(&self.steps.iter().map(|s| format!("git {}", s.args.join(" "))).collect::<Vec<_>>().join("\n"))
     }
 
+    /// One step, waiting out another program's lock: editors and agents run git beside
+    /// this all the time, and their lock is usually gone in a moment. A command that fails
+    /// on a lock hasn't started changing anything, so it's safe to run again.
+    fn run_step(&self, git: &GitExe, cwd: Option<&Path>, s: &Step, cancel: &Option<Arc<AtomicBool>>, on_line: &mut dyn FnMut(&str)) -> Result<GitOutput> {
+        let opts = RunOpts { stdin: s.stdin.clone(), env: s.env.clone(), is_write: true, cancel: cancel.clone() };
+        let started = std::time::Instant::now();
+        loop {
+            let o = git.run_opts(cwd, &s.args, &opts, on_line)?;
+            let stopped = cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+            if o.ok() || stopped || !crate::runner::is_lock_failure(&o.stderr) || started.elapsed() >= LOCK_PATIENCE {
+                return Ok(o);
+            }
+            on_line("Waiting for another git process to finish…");
+            std::thread::sleep(LOCK_RETRY_EVERY);
+        }
+    }
+
     /// Run all steps in order, stopping on the first hard failure.
     pub fn run(&self, git: &GitExe, cwd: Option<&Path>, cancel: Option<Arc<AtomicBool>>, on_line: &mut dyn FnMut(&str)) -> Result<Vec<GitOutput>> {
         for g in &self.guards {
@@ -129,8 +146,7 @@ impl GitOp {
             {
                 continue;
             }
-            let opts = RunOpts { stdin: s.stdin.clone(), env: s.env.clone(), is_write: true, cancel: cancel.clone() };
-            let o = git.run_opts(cwd, &s.args, &opts, on_line)?;
+            let o = self.run_step(git, cwd, s, &cancel, on_line)?;
             last_ok = o.ok();
             if !o.ok() && !s.allow_fail {
                 o.into_result()?;
@@ -146,6 +162,10 @@ impl GitOp {
         self.fallback_note.clone().filter(|_| outputs.len() == self.steps.len())
     }
 }
+
+/// How long a write waits for another process's lock before giving up.
+const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(4);
+const LOCK_RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn rev_is_at(git: &GitExe, cwd: Option<&Path>, rev: &str, sha: &str) -> bool {
     git.run_raw(cwd, &["rev-parse", "--verify", "--quiet", rev]).is_ok_and(|o| o.ok() && o.text().trim() == sha)
@@ -598,6 +618,12 @@ pub fn stash_drop(sel: &str) -> GitOp {
     GitOp::new(format!("Drop {sel}")).step(&["stash", "drop", sel])
 }
 
+/// `stash@{N}` means whatever is Nth by the time it runs, and anything pushing a stash,
+/// such as a terminal, moves them all along. This makes an op refuse if `sel` isn't `sha`.
+pub fn only_if_stash_is(op: GitOp, sel: &str, sha: &str) -> GitOp {
+    op.expect_rev(sel, sha, "The stash list changed since this was offered, so nothing was done. Look again and retry.")
+}
+
 pub fn stash_clear() -> GitOp {
     GitOp::new("Clear all stashes").step(&["stash", "clear"])
 }
@@ -606,11 +632,16 @@ pub fn stash_branch(name: &str, sel: &str) -> GitOp {
     GitOp::new(format!("Branch {name} from {sel}")).step(&["stash", "branch", name, sel])
 }
 
-/// Rename by re-storing the same stash commit under a new message.
+/// Rename by re-storing the same stash commit under a new message. Stored first, so a
+/// failure leaves two entries at worst, never none. That puts the new one on top, moving
+/// the old one down by one.
 pub fn stash_rename(sel: &str, sha: &str, message: &str) -> GitOp {
-    GitOp::new(format!("Rename {sel}"))
-        .step(&["stash", "drop", sel])
-        .step(&["stash", "store", "-m", message, sha])
+    let moved = stash_index(sel).map_or_else(|| sel.to_string(), |n| format!("stash@{{{}}}", n + 1));
+    only_if_stash_is(GitOp::new(format!("Rename {sel}")), sel, sha).step(&["stash", "store", "-m", message, sha]).step(&["stash", "drop", &moved])
+}
+
+fn stash_index(sel: &str) -> Option<usize> {
+    sel.strip_prefix("stash@{")?.strip_suffix('}')?.parse().ok()
 }
 
 // ---- worktrees ---------------------------------------------------------------
@@ -741,7 +772,11 @@ pub fn push(o: &PushOpts) -> GitOp {
         a.push("--set-upstream".into());
     }
     if o.force_with_lease {
+        // A bare lease only compares with the remote-tracking ref, which any fetch moves,
+        // so after one it would overwrite work nobody here has seen. This also needs the
+        // remote's tip to have been part of this branch at some point.
         a.push("--force-with-lease".into());
+        a.push("--force-if-includes".into());
     }
     if o.force {
         a.push("--force".into());
@@ -1072,7 +1107,7 @@ mod tests {
     #[test]
     fn network_ops_build_expected_args_and_are_flagged() {
         let p = push(&PushOpts { remote: Some("origin".into()), refspec: Some("main".into()), set_upstream: true, force_with_lease: true, ..Default::default() });
-        assert_eq!(args(&p), "push --progress --set-upstream --force-with-lease -- origin main");
+        assert_eq!(args(&p), "push --progress --set-upstream --force-with-lease --force-if-includes -- origin main");
         assert!(p.network);
         let f = fetch(&FetchOpts { all: true, prune: true, ..Default::default() });
         assert_eq!(args(&f), "fetch --progress --all --prune");

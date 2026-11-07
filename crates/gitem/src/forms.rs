@@ -371,8 +371,8 @@ pub fn stash_rename(sel: String, sha: String, current: String) -> FormDialog {
     FormDialog::new(format!("Rename {sel}"), "Rename").text("message", "Message", &current).on_submit(move |v| run(ops::stash_rename(&sel, &sha, &required(v, "message", "A message")?)))
 }
 
-pub fn stash_to_branch(sel: String) -> FormDialog {
-    FormDialog::new(format!("Create branch from {sel}"), "Create").text("name", "Branch name", "").on_submit(move |v| run(ops::stash_branch(&required(v, "name", "A name")?, &sel)))
+pub fn stash_to_branch(sel: String, sha: String) -> FormDialog {
+    FormDialog::new(format!("Create branch from {sel}"), "Create").text("name", "Branch name", "").on_submit(move |v| run(ops::only_if_stash_is(ops::stash_branch(&required(v, "name", "A name")?, &sel), &sel, &sha)))
 }
 
 fn default_worktree_path(repo: &Repo, leaf: &str) -> String {
@@ -752,8 +752,8 @@ mod tests {
         check("keep index", stash_form(vec![]), &[("keep_index", "1")], "stash push --include-untracked --keep-index");
         check("staged only leaves untracked out", stash_form(vec![]), &[("staged", "1")], "stash push --staged");
         check("named files", stash_form(sv(&["a b", "c"])), &[("untracked", "0")], "stash push -- 'a b' c");
-        check("rename", stash_rename(s("stash@{1}"), s("abc"), s("old")), &[("message", "new")], "stash drop stash@{1} && stash store -m new abc");
-        check("to a branch", stash_to_branch(s("stash@{0}")), &[("name", "x")], "stash branch x stash@{0}");
+        check("rename", stash_rename(s("stash@{1}"), s("abc"), s("old")), &[("message", "new")], "stash store -m new abc && stash drop stash@{2}");
+        check("to a branch", stash_to_branch(s("stash@{0}"), s("abc")), &[("name", "x")], "stash branch x stash@{0}");
     }
 
     #[test]
@@ -803,7 +803,7 @@ mod tests {
         let main = || Some(s("main"));
         check("prefers origin", push_form(main(), remotes(), true, true), &[], "push --progress -- origin main");
         check("publishes a new branch", push_form(main(), remotes(), false, true), &[("remote", "fork")], "push --progress --set-upstream -- fork main");
-        check("lease goes straight through", push_form(main(), remotes(), true, true), &[("lease", "1")], "push --progress --force-with-lease -- origin main");
+        check("lease goes straight through", push_form(main(), remotes(), true, true), &[("lease", "1")], "push --progress --force-with-lease --force-if-includes -- origin main");
         check("force asks", push_form(main(), remotes(), true, true), &[("force", "1")], "ask first: push --progress --force -- origin main");
         check("force, confirmations off", push_form(main(), remotes(), true, false), &[("force", "1")], "push --progress --force -- origin main");
         check("tags and no hook", push_form(main(), remotes(), true, true), &[("tags", "1"), ("no_verify", "1")], "push --progress --follow-tags --no-verify -- origin main");
@@ -877,7 +877,7 @@ mod tests {
             ("move", move_branch(s("x"), vec![]), "to"),
             ("tag", new_tag(None), "name"),
             ("stash rename", stash_rename(s("a"), s("b"), s("c")), "message"),
-            ("stash branch", stash_to_branch(s("a")), "name"),
+            ("stash branch", stash_to_branch(s("a"), s("b")), "name"),
             ("move worktree", move_worktree(s("a")), "to"),
             ("remote", add_remote(), "url"),
             ("clone", clone_form(), "url"),

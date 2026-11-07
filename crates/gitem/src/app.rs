@@ -193,7 +193,13 @@ impl RepoTab {
                     Err(e) => {
                         // Later steps assumed this one worked, so they're dropped.
                         self.queue.clear();
-                        out.push(Action::Error(format!("{title} failed:\n{e}")));
+                        // Being cancelled kills git without its cleanup. Either way, if the
+                        // lock is why it stopped or what it left, there's a way out to offer.
+                        if self.repo.index_lock().is_some() && (e == "cancelled" || gitem_core::runner::is_lock_failure(&e)) {
+                            out.push(Action::OfferLockRemoval(self.repo.root.clone(), format!("{title} failed:\n{e}")));
+                        } else {
+                            out.push(Action::Error(format!("{title} failed:\n{e}")));
+                        }
                     }
                 }
             }
@@ -305,6 +311,14 @@ struct CloseGuard {
     items: Vec<String>,
 }
 
+/// A write failed on a lock, or a cancelled one left it behind.
+struct LockPrompt {
+    root: PathBuf,
+    why: String,
+    /// Removal was refused, because a git process is running.
+    busy: bool,
+}
+
 /// An op from a repository tab that's been closed. Its result still gets reported.
 struct Orphan {
     repo: String,
@@ -367,6 +381,10 @@ pub struct GitemApp {
     session_kept: Vec<String>,
     /// Which of those couldn't be reopened and haven't been asked about yet.
     reopen_failed: Vec<String>,
+    lock_prompt: Option<LockPrompt>,
+    /// Whether git is running anywhere, before removing a lock. Tests replace it, because
+    /// tests running side by side always have git running somewhere.
+    pub git_running: fn() -> bool,
     close_guard: Option<CloseGuard>,
     /// The user has said yes to losing work, so the next close request goes through.
     closing: bool,
@@ -456,9 +474,65 @@ impl GitemApp {
             settings_baseline: None,
             session_kept: Vec::new(),
             reopen_failed: Vec::new(),
+            lock_prompt: None,
+            git_running: gitem_core::runner::git_processes_running,
             close_guard: None,
             closing: false,
             orphans: Vec::new(),
+        }
+    }
+
+    /// The way out of a lock that's in the way. Removing one that a live process holds can
+    /// damage the index, so it's only ever done on request, with no git process running.
+    fn lock_dialog(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &self.lock_prompt else { return };
+        let repo = self.repos.iter().find(|r| r.repo.root == prompt.root);
+        let lock = repo.and_then(|r| r.repo.index_lock());
+        let Some(lock) = lock else {
+            // Gone by itself, or the repository was closed. Nothing left to decide.
+            self.lock_prompt = None;
+            return;
+        };
+        let age = std::fs::metadata(&lock).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(|d| d.as_secs());
+        let (mut remove, mut leave) = (false, false);
+        let warn = self.pal.warn;
+        egui::Window::new("The repository is locked").collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
+            ui.set_max_width(540.0);
+            ui.add(egui::Label::new(RichText::new(prompt.why.as_str()).monospace().small()).selectable(true));
+            ui.add_space(6.0);
+            ui.label("git refuses to change anything while this file exists:");
+            ui.add(egui::Label::new(RichText::new(lock.display().to_string()).monospace().small()).selectable(true));
+            if let Some(s) = age {
+                ui.label(format!("It was last changed {s} second(s) ago."));
+            }
+            ui.add_space(4.0);
+            ui.label("It may belong to another git program working here, such as an editor or a terminal. Or git may have stopped without cleaning up, which is what cancelling does: tracked files can then be left half updated, so look through Changes afterwards.");
+            if prompt.busy {
+                ui.add_space(4.0);
+                ui.colored_label(warn, "A git process is running on this computer, so the lock may be in use. Try again when it has finished.");
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                remove = ui.button("Remove the lock").clicked();
+                leave = ui.button("Leave it").clicked();
+            });
+        });
+        if leave {
+            self.lock_prompt = None;
+        } else if remove {
+            // Asked at the click, and the repository's own queue counts too.
+            let own_busy = repo.is_some_and(|r| r.running.is_some());
+            if own_busy || (self.git_running)() {
+                if let Some(p) = &mut self.lock_prompt {
+                    p.busy = true;
+                }
+                return;
+            }
+            self.lock_prompt = None;
+            match std::fs::remove_file(&lock) {
+                Ok(()) => self.toasts.push(("Lock removed. Try that again.".to_string(), Instant::now())),
+                Err(e) => self.errors.push(format!("Could not remove {}: {e}", lock.display())),
+            }
         }
     }
 
@@ -744,6 +818,7 @@ impl GitemApp {
                 self.form_repo = self.repos.get(self.active).map(|r| r.repo.root.clone());
                 self.form = Some(f);
             }
+            Action::OfferLockRemoval(root, why) => self.lock_prompt = Some(LockPrompt { root, why, busy: false }),
             Action::AskCloseTab { key, lost } => {
                 if let Some(r) = self.repos.get(self.active) {
                     self.close_guard = Some(CloseGuard { target: CloseTarget::Tab { root: r.repo.root.clone(), key }, items: vec![lost] });
@@ -1241,7 +1316,7 @@ impl GitemApp {
     }
 
     fn dialog_open(&self) -> bool {
-        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some()
+        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some() || self.lock_prompt.is_some()
     }
 
     /// Old git still does most things, so this warns and lets the user carry on.
@@ -1598,6 +1673,7 @@ impl GitemApp {
         self.git_warning_dialog(&ctx);
         self.reopen_dialog(&ctx);
         self.close_dialog(&ctx);
+        self.lock_dialog(&ctx);
         self.about(&ctx, &mut out);
         chrome::window_edges(&ctx, &pal);
         for a in out {

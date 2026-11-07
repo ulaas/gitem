@@ -83,6 +83,24 @@ fn is_progress(line: &str) -> bool {
     ["Enumerating objects", "Counting objects", "Compressing objects", "Writing objects", "Receiving objects", "Resolving deltas", "Unpacking objects", "Delta compression", "Total "].iter().any(|p| l.starts_with(p))
 }
 
+/// Whether git failed because something holds a lock file, by its C-locale message.
+pub fn is_lock_failure(stderr: &str) -> bool {
+    stderr.contains(".lock': File exists") || stderr.contains("Another git process seems to be running")
+}
+
+/// Whether any git process is running on this computer. Used before offering to remove a
+/// lock, where a wrong "no" could damage a repository, so not knowing counts as yes.
+pub fn git_processes_running() -> bool {
+    #[cfg(windows)]
+    let found = {
+        use std::os::windows::process::CommandExt;
+        Command::new("tasklist").args(["/FI", "IMAGENAME eq git.exe", "/NH", "/FO", "CSV"]).stdin(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).output().map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("git.exe"))
+    };
+    #[cfg(not(windows))]
+    let found = Command::new("pgrep").args(["-x", "git"]).stdin(Stdio::null()).stderr(Stdio::null()).output().map(|o| o.status.success());
+    found.unwrap_or(true)
+}
+
 /// Ends a process and whatever it started, such as ssh or a hook.
 fn kill_tree(child: &mut std::process::Child) {
     #[cfg(windows)]
@@ -418,6 +436,13 @@ mod tests {
         assert_eq!(parse_git_version("git version 2.38.0"), Some((2, 38)));
         assert_eq!(parse_git_version("something else"), None);
         assert_eq!(parse_git_version(""), None);
+    }
+
+    #[test]
+    fn a_lock_failure_is_told_from_other_failures() {
+        assert!(is_lock_failure("fatal: Unable to create 'C:/r/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository"));
+        assert!(!is_lock_failure("fatal: not a git repository"));
+        assert!(!is_lock_failure("error: Your local changes would be overwritten by merge"));
     }
 
     #[test]

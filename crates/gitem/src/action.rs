@@ -25,6 +25,8 @@ pub enum Action {
     /// Ask first, then run.
     Confirm { title: String, body: String, label: String, op: GitOp },
     Form(FormDialog),
+    /// A write in this repository stopped at its index lock: offer a way out, with why.
+    OfferLockRemoval(PathBuf, String),
     /// A tab asked to close with work in it. `key` names the tab, `lost` what would go.
     AskCloseTab { key: String, lost: String },
     OpenTab(Tab),

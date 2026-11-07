@@ -1793,6 +1793,131 @@ fn a_pasted_patch_ending_in_a_blank_context_line_applies() {
     no_errors(&h);
 }
 
+const LOCK_TITLE: &str = "The repository is locked";
+
+/// What a killed git leaves behind, and a write that runs into it.
+fn stuck_on_a_lock(f: &Fx, h: &mut Harness<GitemApp>) -> PathBuf {
+    let lock = f.root.join(".git/index.lock");
+    std::fs::write(&lock, "").unwrap();
+    f.write("new.txt", "x\n");
+    settle(h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::stage_paths(&["new.txt".to_string()])));
+    pump_for_label(h, LOCK_TITLE);
+    for _ in 0..3 {
+        h.step();
+    }
+    lock
+}
+
+#[test]
+fn a_lock_in_the_way_is_never_removed_without_being_asked() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    h.state_mut().git_running = || false;
+    let lock = stuck_on_a_lock(&f, &mut h);
+    assert!(lock.exists());
+    assert!(h.query_by_label("Something went wrong").is_none(), "this dialog replaces the raw error");
+    click(&mut h, "Leave it");
+    assert!(lock.exists());
+    assert!(h.query_by_label(LOCK_TITLE).is_none());
+}
+
+#[test]
+fn a_stale_lock_can_be_removed_on_request() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    h.state_mut().git_running = || false;
+    let lock = stuck_on_a_lock(&f, &mut h);
+    click(&mut h, "Remove the lock");
+    assert!(!lock.exists());
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::stage_paths(&["new.txt".to_string()])));
+    wait_for(&mut h, "the file to be staged", || f.git(&["diff", "--cached", "--name-only"]).trim() == "new.txt");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+}
+
+#[test]
+fn a_lock_stays_while_any_git_process_is_running() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    h.state_mut().git_running = || true;
+    let lock = stuck_on_a_lock(&f, &mut h);
+    click(&mut h, "Remove the lock");
+    pump_for_label(&mut h, "A git process is running on this computer, so the lock may be in use. Try again when it has finished.");
+    assert!(lock.exists());
+    // Once it's finished, the same button works.
+    h.state_mut().git_running = || false;
+    click(&mut h, "Remove the lock");
+    assert!(!lock.exists());
+}
+
+/// Cancelling kills git with no cleanup, so its lock can stay.
+#[test]
+fn cancelling_with_a_lock_left_behind_offers_the_way_out() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    h.state_mut().git_running = || false;
+    settle(&mut h);
+    let slow = ops::GitOp::new("Slow pull").step(&["-c", "alias.slowly=!sleep 60", "slowly"]).net();
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(slow));
+    pump_for_label(&mut h, "Cancel");
+    std::fs::write(f.root.join(".git/index.lock"), "").unwrap();
+    click(&mut h, "Cancel");
+    pump_for_label(&mut h, LOCK_TITLE);
+    assert!(h.query_by_label_contains("cancelled").is_some());
+    assert!(f.root.join(".git/index.lock").exists());
+}
+
+/// A lock that clears by itself needs no decision.
+#[test]
+fn the_lock_dialog_goes_away_when_the_lock_does() {
+    let f = Fx::new();
+    sample_history(&f);
+    let mut h = harness(&f);
+    h.state_mut().git_running = || false;
+    let lock = stuck_on_a_lock(&f, &mut h);
+    std::fs::remove_file(&lock).unwrap();
+    h.step();
+    h.step();
+    assert!(h.query_by_label(LOCK_TITLE).is_none());
+}
+
+#[test]
+fn a_multi_commit_pick_finished_by_hand_offers_to_carry_on_from_the_banner() {
+    let f = Fx::new();
+    f.write("c.txt", "base\n");
+    f.commit("base");
+    f.git(&["switch", "-qc", "side"]);
+    f.write("c.txt", "side\n");
+    f.commit("pick-A");
+    let a = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    f.write("b.txt", "b\n");
+    f.commit("pick-B");
+    let b = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    f.git(&["switch", "-q", "main"]);
+    f.write("c.txt", "main\n");
+    f.commit("main change");
+    assert!(!f.git.run_raw(Some(&f.root), &["cherry-pick", &a, &b]).unwrap().ok());
+    f.write("c.txt", "resolved\n");
+    f.git(&["add", "c.txt"]);
+    f.git.run_opts(Some(&f.root), &["commit".to_string(), "-m".to_string(), "pick-A".to_string()], &gitem_core::runner::RunOpts { env: vec![("GIT_EDITOR".into(), "true".into())], ..Default::default() }, &mut |_| {}).unwrap();
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "Cherry-picking 1 commit(s) left");
+    click(&mut h, "Continue");
+    wait_for(&mut h, "the second pick", || f.subjects()[0] == "pick-B");
+    wait_until_quiet(&mut h);
+    no_errors(&h);
+    assert!(h.query_by_label("Cherry-picking 1 commit(s) left").is_none());
+}
+
 const CLOSE_TITLE: &str = "Close with work not saved?";
 
 fn close_commands(h: &Harness<GitemApp>) -> Vec<egui::ViewportCommand> {

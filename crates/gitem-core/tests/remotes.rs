@@ -285,8 +285,21 @@ fn rejected_push_leaves_the_remote_alone_and_says_why() {
 #[test]
 fn force_with_lease_checks_what_we_last_saw() {
     let n = diverged();
-    // We've seen the remote's tip, so the lease holds.
+    // A fetch moves what a bare lease compares with, without anyone having looked at the
+    // commits it brought. Pushing now would overwrite them, so it's refused.
     n.b.fetch();
+    let theirs = n.remote_sha("refs/heads/main").unwrap();
+    let e = n.b.fails(ops::push(&PushOpts { force_with_lease: true, ..Default::default() }));
+    assert!(e.contains("rejected") || e.contains("stale"), "{e}");
+    assert_eq!(n.remote_sha("refs/heads/main").unwrap(), theirs, "their commits are still there");
+
+    // Having taken them in, the lease holds.
+    n.b.run(ops::rebase(&ops::RebaseOpts { onto: "origin/main".into(), ..Default::default() }));
+    n.b.run(ops::push(&PushOpts { force_with_lease: true, ..Default::default() }));
+    assert_eq!(n.remote_sha("refs/heads/main").unwrap(), n.b.head());
+
+    // Rewriting your own pushed commit is what the option is for, and it still works.
+    n.b.run(ops::GitOp::new("amend").step(&["commit", "--amend", "-q", "-m", "reworded"]));
     n.b.run(ops::push(&PushOpts { force_with_lease: true, ..Default::default() }));
     assert_eq!(n.remote_sha("refs/heads/main").unwrap(), n.b.head());
 

@@ -169,9 +169,31 @@ impl Repo {
         } else if g.join("REVERT_HEAD").exists() {
             st.op = RepoOp::Revert;
             st.op_target = read("REVERT_HEAD").map(|s| crate::util::prefix(&s, 8).to_string());
+        } else if let Some((op, left)) = self.sequencer_left() {
+            st.op = op;
+            st.op_target = Some(format!("{left} commit(s) left"));
         } else if g.join("BISECT_LOG").exists() {
             st.op = RepoOp::Bisect;
         }
+    }
+
+    /// A multi-commit pick or revert that's stopped between commits. Committing a resolved
+    /// conflict by hand removes `CHERRY_PICK_HEAD` while later commits are still to come,
+    /// and without this nothing would say so. The first line is the commit just dealt with.
+    fn sequencer_left(&self) -> Option<(RepoOp, usize)> {
+        let todo = std::fs::read_to_string(self.git_dir.join("sequencer/todo")).ok()?;
+        let lines: Vec<&str> = todo.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).collect();
+        let op = match lines.first()?.split_whitespace().next()? {
+            "pick" | "p" => RepoOp::CherryPick,
+            "revert" | "r" => RepoOp::Revert,
+            _ => return None,
+        };
+        Some((op, lines.len().saturating_sub(1).max(1)))
+    }
+
+    /// The lock git leaves behind when it's killed or crashes, if there is one.
+    pub fn index_lock(&self) -> Option<PathBuf> {
+        Some(self.git_dir.join("index.lock")).filter(|p| p.exists())
     }
 
     /// Identifies the conflict's three versions. Empty once `path` is resolved.

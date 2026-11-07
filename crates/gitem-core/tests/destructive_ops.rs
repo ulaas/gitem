@@ -373,6 +373,161 @@ fn a_failed_commit_stops_the_rest_of_the_plan() {
     assert!(f.q(&["status", "--short"]).contains("?? b.txt"), "the later group wasn't touched");
 }
 
+/// A newer stash arrives after the menu was built, so `stash@{0}` is a different one.
+#[test]
+fn a_stash_op_refuses_when_the_selector_now_names_another_stash() {
+    let f = Fx::new();
+    f.commit("f.txt", "base\n", "base");
+    f.stash_of("f.txt", "older\n", "older");
+    let sha = f.q(&["rev-parse", "stash@{0}"]);
+    f.stash_of("f.txt", "newer\n", "newer-from-terminal");
+
+    let drop = ops::only_if_stash_is(ops::stash_drop("stash@{0}"), "stash@{0}", &sha);
+    assert!(f.fails(drop));
+    assert_eq!(f.stash_messages().len(), 2);
+
+    assert!(f.fails(ops::stash_rename("stash@{0}", &sha, "renamed")));
+    assert_eq!(f.stash_messages().len(), 2, "both still there");
+    assert!(f.stash_messages().iter().any(|m| m.contains("newer-from-terminal")));
+
+    let pop = ops::only_if_stash_is(ops::stash_apply("stash@{0}", true, false), "stash@{0}", &sha);
+    assert!(f.fails(pop));
+    assert_eq!(f.read("f.txt"), "base\n", "nothing was applied");
+
+    // With the right selector for that commit, it goes through.
+    f.run(ops::only_if_stash_is(ops::stash_drop("stash@{1}"), "stash@{1}", &sha));
+    assert_eq!(f.stash_messages().len(), 1);
+    assert!(f.stash_messages()[0].contains("newer-from-terminal"));
+}
+
+/// Dropping first left the stash reachable only through fsck if the store then failed.
+#[test]
+fn renaming_a_stash_keeps_it_and_the_others() {
+    let f = Fx::new();
+    f.commit("f.txt", "base\n", "base");
+    f.stash_of("f.txt", "one\n", "one");
+    f.stash_of("f.txt", "two\n", "two");
+    f.stash_of("f.txt", "three\n", "three");
+    let sha = f.q(&["rev-parse", "stash@{1}"]);
+    f.run(ops::stash_rename("stash@{1}", &sha, "renamed"));
+    let list = f.q(&["stash", "list", "--format=%gs"]);
+    let list: Vec<&str> = list.lines().collect();
+    assert_eq!(list.len(), 3, "{list:?}");
+    assert_eq!(list[0], "renamed");
+    assert!(list[1].contains("three") && list[2].contains("one"), "{list:?}");
+    assert_eq!(f.q(&["rev-parse", "stash@{0}"]), sha, "the same stash");
+}
+
+#[test]
+fn a_failed_store_leaves_the_stash_where_it_was() {
+    let f = Fx::new();
+    f.commit("f.txt", "base\n", "base");
+    f.stash_of("f.txt", "one\n", "one");
+    let sha = f.q(&["rev-parse", "stash@{0}"]);
+    // Git locks the reflog to store, so a lock in the way makes the first step fail.
+    let lock = f.root.join(".git/refs/stash.lock");
+    std::fs::write(&lock, "").unwrap();
+    assert!(f.fails(ops::stash_rename("stash@{0}", &sha, "renamed")));
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(f.q(&["rev-parse", "stash@{0}"]), sha);
+    assert_eq!(f.stash_messages().len(), 1);
+}
+
+/// An editor or agent running git beside this holds the lock for a moment.
+#[test]
+fn a_write_waits_out_another_programs_lock() {
+    let f = Fx::new();
+    f.commit("f.txt", "base\n", "base");
+    f.write("g.txt", "new\n");
+    let lock = f.root.join(".git/index.lock");
+    std::fs::write(&lock, "").unwrap();
+    let gone = lock.clone();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        std::fs::remove_file(gone).unwrap();
+    });
+    f.run(ops::stage_paths(&["g.txt".to_string()]));
+    holder.join().unwrap();
+    assert_eq!(f.q(&["diff", "--cached", "--name-only"]), "g.txt");
+}
+
+/// It's never removed automatically: past the wait, it fails, with the lock untouched.
+#[test]
+fn a_lock_that_stays_fails_the_write_and_stays_put() {
+    let f = Fx::new();
+    f.commit("f.txt", "base\n", "base");
+    f.write("g.txt", "new\n");
+    let lock = f.root.join(".git/index.lock");
+    std::fs::write(&lock, "held").unwrap();
+    let e = ops::stage_paths(&["g.txt".to_string()]).run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap_err().to_string();
+    assert!(gitem_core::runner::is_lock_failure(&e), "{e}");
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), "held");
+    assert_eq!(f.repo.index_lock(), Some(lock));
+}
+
+/// The commit box used to end the visible operation with commits still to apply.
+#[test]
+fn a_multi_commit_pick_committed_by_hand_still_shows_as_in_progress_and_resumes() {
+    use gitem_core::model::RepoOp;
+    let f = Fx::new();
+    f.commit("c.txt", "base\n", "base");
+    f.q(&["switch", "-qc", "side"]);
+    let a = f.commit("c.txt", "side\n", "pick-A");
+    let b = f.commit("b.txt", "b\n", "pick-B");
+    f.q(&["switch", "-q", "main"]);
+    f.commit("c.txt", "main\n", "main change");
+    assert!(f.fails(ops::cherry_pick(&[a, b], false, false)), "the first pick conflicts");
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::CherryPick);
+
+    // Resolve it and use the ordinary commit, as the commit box does.
+    f.write("c.txt", "resolved\n");
+    f.q(&["add", "c.txt"]);
+    f.run(ops::commit(&ops::CommitOpts { message: "pick-A".into(), ..Default::default() }));
+    assert!(!f.has_ref("CHERRY_PICK_HEAD"), "git itself has moved past the first pick");
+    let st = f.repo.status().unwrap();
+    assert_eq!(st.op, RepoOp::CherryPick, "and this still says it's going");
+    assert_eq!(st.op_target.as_deref(), Some("1 commit(s) left"));
+    assert!(!f.exists("b.txt"));
+
+    f.run(ops::op_continue("cherry-pick"));
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
+    assert_eq!(f.read("b.txt"), "b\n");
+    assert_eq!(f.q(&["log", "-2", "--format=%s"]), "pick-B\npick-A");
+}
+
+#[test]
+fn a_multi_commit_pick_stopped_between_commits_can_be_aborted() {
+    use gitem_core::model::RepoOp;
+    let f = Fx::new();
+    f.commit("c.txt", "base\n", "base");
+    f.q(&["switch", "-qc", "side"]);
+    let a = f.commit("c.txt", "side\n", "pick-A");
+    let b = f.commit("b.txt", "b\n", "pick-B");
+    f.q(&["switch", "-q", "main"]);
+    f.commit("c.txt", "main\n", "main change");
+    assert!(f.fails(ops::cherry_pick(&[a, b], false, false)));
+    f.write("c.txt", "resolved\n");
+    f.q(&["add", "c.txt"]);
+    f.run(ops::commit(&ops::CommitOpts { message: "pick-A".into(), ..Default::default() }));
+    let _ = ops::op_abort("cherry-pick").run(&f.git, Some(&f.root), None, &mut |_| {});
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::None, "whatever git makes of the moved HEAD, it's no longer stuck");
+    assert_eq!(f.read("c.txt").is_empty(), false);
+}
+
+/// A finished multi-commit pick leaves nothing that looks like it's still going.
+#[test]
+fn a_finished_multi_commit_pick_shows_no_operation() {
+    use gitem_core::model::RepoOp;
+    let f = Fx::new();
+    f.commit("c.txt", "base\n", "base");
+    f.q(&["switch", "-qc", "side"]);
+    let a = f.commit("a.txt", "a\n", "A");
+    let b = f.commit("b.txt", "b\n", "B");
+    f.q(&["switch", "-q", "main"]);
+    f.run(ops::cherry_pick(&[a, b], false, false));
+    assert_eq!(f.repo.status().unwrap().op, RepoOp::None);
+}
+
 #[test]
 fn stash_drop_removes_only_the_one_named() {
     let f = Fx::new();
