@@ -41,6 +41,7 @@ pub struct ToolsView {
     ignore_text: Option<String>,
     ignore_test: String,
     ignore_result: Option<Option<String>>,
+    ignore_check: Task<Option<String>>,
     clean_dirs: bool,
     clean_ignored: bool,
     clean_list: Task<Vec<String>>,
@@ -209,8 +210,17 @@ impl ToolsView {
         ui.horizontal(|ui| {
             ui.label("Test a path");
             if ui.add(crate::widgets::input(&mut self.ignore_test).hint_text("build/output.log").desired_width(280.0)).changed() {
-                let t = self.ignore_test.trim();
-                self.ignore_result = (!t.is_empty()).then(|| cx.repo.check_ignore(t));
+                // Per keystroke, so not on this thread. The last one typed replaces the others.
+                let t = self.ignore_test.trim().to_string();
+                if t.is_empty() {
+                    self.ignore_check.stop();
+                    self.ignore_result = None;
+                } else {
+                    self.ignore_check.spawn_git(ui.ctx(), cx.repo, move |r| -> Result<Option<String>, String> { Ok(r.check_ignore(&t)) });
+                }
+            }
+            if self.ignore_check.poll() {
+                self.ignore_result = self.ignore_check.value.take();
             }
             match &self.ignore_result {
                 Some(Some(rule)) => {
@@ -371,7 +381,9 @@ impl ConfigView {
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal.clone();
         self.entries.poll();
-        if self.loaded_gen != Some(cx.data.status_gen) || self.entries.value.is_none() && !self.entries.busy() {
+        // Only for a new generation: after a failed read, nothing would ever stop this
+        // retrying once a frame, which is a new git process each time.
+        if self.loaded_gen != Some(cx.data.status_gen) && !self.entries.busy() {
             self.loaded_gen = Some(cx.data.status_gen);
             let r = cx.repo.clone();
             self.entries.spawn(ui.ctx(), move || r.config_list());
