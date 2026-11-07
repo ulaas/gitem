@@ -508,6 +508,48 @@ pub fn stash_form(paths: Vec<String>) -> FormDialog {
         })
 }
 
+/// Starting a feature, release or hotfix under the branch model.
+pub fn start_branch(model: &gitem_core::branchmodel::BranchModel, kind: gitem_core::branchmodel::Kind, data: &crate::data::RepoData) -> FormDialog {
+    let have = |b: &str| data.local_branches().any(|x| x.name == b);
+    let (m, base) = (model.clone(), model.base(kind).to_string());
+    let make_develop = !have(&base) && base == model.develop && have(&model.main);
+    let mut f = FormDialog::new(format!("Start {}", kind.word()), "Start").text("name", if kind == gitem_core::branchmodel::Kind::Feature { "Name" } else { "Version" }, "");
+    f = f.info(format!("Makes {} from {base}, and goes there.", model.branch(kind, "…")));
+    if make_develop {
+        f = f.info(format!("There's no {base} yet, so it's made from {} first.", model.main));
+    }
+    let missing = (!have(&base) && !make_develop).then(|| format!("There's no branch {base} here. The names are in Settings > Workflow."));
+    f.on_submit(move |v| {
+        if let Some(why) = &missing {
+            return Err(why.clone());
+        }
+        let name = required(v, "name", "A name")?;
+        run(m.start(kind, &name, make_develop))
+    })
+}
+
+/// Finishing one. Asks first, in words: it does several things and has no Undo.
+pub fn finish_branch(model: &gitem_core::branchmodel::BranchModel, kind: gitem_core::branchmodel::Kind, data: &crate::data::RepoData, status: Option<&gitem_core::RepoStatus>, chosen: Option<String>) -> FormDialog {
+    let names: Vec<String> = data.local_branches().filter_map(|b| model.kind_of(&b.name)).filter(|(k, _)| *k == kind).map(|(_, n)| n).collect();
+    let in_op = status.is_some_and(|s| s.op != gitem_core::RepoOp::None);
+    let dirty = status.is_some_and(|s| s.entries.iter().any(|e| e.worktree != gitem_core::FileStatus::Untracked));
+    let tags: Vec<String> = data.tags().iter().map(|t| t.name.clone()).collect();
+    let m = model.clone();
+    let first = chosen.or_else(|| names.first().cloned()).unwrap_or_default();
+    FormDialog::new(format!("Finish {}", kind.word()), "Next").pick("name", "Which", names, &first).on_submit(move |v| {
+        if in_op {
+            return Err("Finish or abort what's going on first: see the banner.".to_string());
+        }
+        // A merge partway through could stop on these, with some of this done and some not.
+        if dirty {
+            return Err("Commit or stash your changes first. This goes through other branches.".to_string());
+        }
+        let name = required(v, "name", "A name")?;
+        let tag_exists = kind != gitem_core::branchmodel::Kind::Feature && tags.contains(&m.tag(&name));
+        Ok(vec![Action::Confirm { title: format!("Finish {} {name}", kind.word()), body: m.finish_says(kind, &name, tag_exists), label: "Finish".to_string(), op: m.finish(kind, &name, tag_exists) }])
+    })
+}
+
 pub fn stash_rename(sel: String, sha: String, current: String) -> FormDialog {
     FormDialog::new(format!("Rename {sel}"), "Rename").text("message", "Message", &current).on_submit(move |v| run(ops::stash_rename(&sel, &sha, &required(v, "message", "A message")?)))
 }

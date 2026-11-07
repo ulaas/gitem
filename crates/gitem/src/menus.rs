@@ -262,6 +262,13 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         }
         ui.separator();
     }
+    if cx.settings.branch_model.enabled
+        && !b.is_remote
+        && let Some((kind, short)) = cx.settings.branch_model.kind_of(&name)
+        && item(ui, &format!("Finish {}…", kind.word()))
+    {
+        cx.form(forms::finish_branch(&cx.settings.branch_model, kind, cx.data, cx.status(), Some(short)));
+    }
     if item(ui, "Focus in graph") {
         cx.out.push(Action::GraphFocus(rev.clone()));
     }
@@ -496,13 +503,13 @@ pub fn stash_menu(ui: &mut Ui, cx: &mut Cx, s: &Stash) {
         })));
     }
     if item(ui, "Apply") {
-        cx.run(ops::only_if_stash_is(ops::stash_apply(&sel, false, false), &sel, &s.sha));
+        cx.run(ops::only_if_stash_is(if gitem_core::hunkstash::is_hunk_stash(&s.message) { gitem_core::hunkstash::apply(&sel, false) } else { ops::stash_apply(&sel, false, false) }, &sel, &s.sha));
     }
     if item(ui, "Apply and restore staging") {
         cx.run(ops::only_if_stash_is(ops::stash_apply(&sel, false, true), &sel, &s.sha));
     }
     if item(ui, "Pop") {
-        cx.run(ops::only_if_stash_is(ops::stash_apply(&sel, true, false), &sel, &s.sha));
+        cx.run(ops::only_if_stash_is(if gitem_core::hunkstash::is_hunk_stash(&s.message) { gitem_core::hunkstash::apply(&sel, true) } else { ops::stash_apply(&sel, true, false) }, &sel, &s.sha));
     }
     if item(ui, "Rename…") {
         cx.form(forms::stash_rename(sel.clone(), s.sha.clone(), s.message.clone()));

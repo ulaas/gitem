@@ -129,6 +129,13 @@ impl HomeView {
                         }),
                 );
             }
+            if cx.settings.branch_model.enabled {
+                for kind in gitem_core::branchmodel::Kind::ALL {
+                    if ui.button(format!("Start {}…", kind.word())).clicked() {
+                        cx.form(forms::start_branch(&cx.settings.branch_model, kind, cx.data));
+                    }
+                }
+            }
             // What leads nowhere isn't offered: no host means no pull requests.
             if cx.forge().is_some() && ui.button("Pull requests").clicked() {
                 cx.open(Tab::Launchpad(Box::default()));

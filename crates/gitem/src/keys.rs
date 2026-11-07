@@ -25,6 +25,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Tab", "Move between controls"),
     ("Shift+F10", "Open the menu of the current row, in Changes and the Graph"),
     ("↑ ↓", "Changes: move through the files. Graph: move through the commits"),
+    ("Ctrl+click", "Sidebar: pick several branches, to delete together"),
     ("J, K", "Graph: next and previous commit"),
     ("Space", "Changes: stage or unstage the current file"),
     ("Enter", "Changes: open the current file's diff in a tab"),

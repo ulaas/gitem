@@ -62,7 +62,7 @@ struct Running {
 
 /// A fetch only updates remote-tracking refs, and can simply be done again.
 fn is_harmless(op: &GitOp) -> bool {
-    op.steps.iter().all(|s| s.args.first().is_some_and(|a| a == "fetch"))
+    op.custom.is_none() && op.steps.iter().all(|s| s.args.first().is_some_and(|a| a == "fetch"))
 }
 
 fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, open_after: Option<PathBuf>) -> Running {

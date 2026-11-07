@@ -32,6 +32,7 @@ pub mod review;
 pub mod search;
 pub mod settings;
 pub mod sidebar;
+pub mod stashhunks;
 pub mod textview;
 pub mod tools;
 pub mod tree;
@@ -82,6 +83,7 @@ tabs! {
     Text(textview::TextView),
     Agents(agents::AgentsView),
     Review(review::ReviewView),
+    StashHunks(stashhunks::StashHunksView),
 }
 
 impl Tab {
@@ -105,7 +107,7 @@ impl Tab {
     /// Whether a commit picked elsewhere has anything to do with this view. The Details panel
     /// only takes room beside those that do.
     pub fn shows_commits(&self) -> bool {
-        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_) | Tab::Prune(_) | Tab::PullRequest(_) | Tab::Grep(_))
+        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_) | Tab::Prune(_) | Tab::PullRequest(_) | Tab::Grep(_) | Tab::StashHunks(_))
     }
 
     pub fn unsaved(&self) -> Option<String> {

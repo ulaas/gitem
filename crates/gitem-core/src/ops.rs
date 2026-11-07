@@ -21,6 +21,25 @@ pub struct Step {
     pub unless_at: Option<(String, String)>,
 }
 
+/// Work that has to look at what each step found, or put things back if one stops it. Used in place
+/// of steps, and still goes through the queue with the guards. Its git commands log as any do.
+#[derive(Clone)]
+pub struct Custom(Arc<CustomFn>);
+
+type CustomFn = dyn Fn(&GitExe, Option<&Path>, Option<Arc<AtomicBool>>, &mut dyn FnMut(&str)) -> Result<Vec<GitOutput>> + Send + Sync;
+
+impl Custom {
+    pub fn new(f: impl Fn(&GitExe, Option<&Path>, Option<Arc<AtomicBool>>, &mut dyn FnMut(&str)) -> Result<Vec<GitOutput>> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+}
+
+impl std::fmt::Debug for Custom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Custom")
+    }
+}
+
 /// Checked when the op runs, not when it was offered: a menu or dialog can stay open
 /// while a terminal, or another tool, moves things.
 #[derive(Debug, Clone, Default)]
@@ -54,6 +73,8 @@ pub struct GitOp {
     pub lossless: bool,
     /// What it's about to change, so that it can be taken back afterwards.
     pub undo: Option<crate::undo::UndoPlan>,
+    /// Runs in place of `steps`, once the guards have passed.
+    pub custom: Option<Custom>,
 }
 
 impl GitOp {
@@ -227,6 +248,9 @@ impl GitOp {
             if !rev_is_at(git, cwd, &g.rev, &g.sha) {
                 return Err(crate::Error::Git(g.why.clone()));
             }
+        }
+        if let Some(c) = &self.custom {
+            return (c.0)(git, cwd, cancel, on_line);
         }
         let mut out = Vec::new();
         let mut last_ok = true;

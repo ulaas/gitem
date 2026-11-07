@@ -1193,6 +1193,9 @@ fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, state: &mut RowState,
         }
         if ui.button("Stash this file…").clicked() {
             cx.form(forms::stash_form(vec![e.path.clone()]));
+        }
+        if !e.is_staged() && ui.button("Stash some of its hunks…").clicked() {
+            cx.open(Tab::StashHunks(Box::default()));
             ui.close();
         }
         if untracked {

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use egui::accesskit::Role;
 use egui::vec2;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use gitem::app::GitemApp;
 use gitem::views::Tab;
@@ -138,6 +138,235 @@ fn a_moment(h: &mut Harness<GitemApp>) {
 }
 
 /// The last of that name, which is the dialog's or menu's when something behind it has one too.
+// ---- FG-9: several branches, picked in the sidebar
+
+/// Two picked with Ctrl+click, one merged and one not: the question says which is which, and Undo
+/// brings both back, as it does from Clean up branches.
+#[test]
+fn branches_picked_in_the_sidebar_delete_together_and_come_back() {
+    use egui::Modifiers;
+    let f = Fx::new();
+    f.git(&["branch", "done"]);
+    f.git(&["switch", "-q", "-c", "unfinished"]);
+    f.write("u.txt", "u\n");
+    let unfinished = f.commit("only here");
+    f.git(&["switch", "-q", "main"]);
+    f.git(&["branch", "keep"]);
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    wait_for_label(&mut h, "done");
+    let inspected = |h: &Harness<GitemApp>| h.state().repos[0].inspect.sha.clone();
+    let before = inspected(&h);
+    h.get_by_label("done").click_modifiers(Modifiers::COMMAND);
+    h.step();
+    h.step();
+    assert_eq!(inspected(&h), before, "picking isn't looking");
+    wait_for_label(&mut h, "Delete 1 branch…");
+    h.get_by_label("unfinished").click_modifiers(Modifiers::COMMAND);
+    h.step();
+    h.step();
+    wait_for_label(&mut h, "Delete 2 branches…");
+    // The second click on one takes it off again, and the current one can't be picked.
+    h.get_by_label("keep").click_modifiers(Modifiers::COMMAND);
+    h.step();
+    h.step();
+    wait_for_label(&mut h, "Delete 3 branches…");
+    h.get_by_label("keep").click_modifiers(Modifiers::COMMAND);
+    h.step();
+    h.step();
+    wait_for_label(&mut h, "Delete 2 branches…");
+    click(&mut h, "Delete 2 branches…");
+    wait_for_text(&mut h, "aren't merged into main: unfinished");
+    assert_ne!(f.git(&["branch", "--list", "done"]), "", "nothing yet");
+    click(&mut h, "Delete");
+    wait_for(&mut h, "both to go", |_| f.git(&["branch", "--list", "done"]).is_empty() && f.git(&["branch", "--list", "unfinished"]).is_empty());
+    settle(&mut h);
+    no_errors(&h);
+    assert_ne!(f.git(&["branch", "--list", "keep"]), "", "only what was picked");
+    assert!(h.query_by_label("Delete 2 branches…").is_none(), "the pick is over");
+    h.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::ALT), egui::Key::Z);
+    h.step();
+    settle(&mut h);
+    // The question's button, which comes last: the toolbar's has the same name behind it.
+    wait_for_text(&mut h, "Undo delete of 2 branches");
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(300) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    h.query_all_by_label_contains("Undo delete of 2 branches").last().unwrap().click();
+    h.step();
+    wait_for(&mut h, "both back", |_| !f.git(&["branch", "--list", "unfinished"]).is_empty());
+    assert_eq!(f.git(&["rev-parse", "unfinished"]), unfinished);
+    assert_ne!(f.git(&["branch", "--list", "done"]), "");
+}
+
+#[test]
+fn the_current_branch_and_one_in_a_worktree_cant_be_picked() {
+    use egui::Modifiers;
+    let f = Fx::new();
+    f.git(&["branch", "held"]);
+    f.git(&["worktree", "add", "-q", "../wt", "held"]);
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    wait_for_label(&mut h, "held");
+    h.query_all_by_label("held").next().unwrap().click_modifiers(Modifiers::COMMAND);
+    h.step();
+    h.step();
+    h.query_all_by_label("main").next().unwrap().click_modifiers(Modifiers::COMMAND);
+    h.step();
+    h.step();
+    assert!(h.query_all_by_label_contains("Delete 1 branch").next().is_none());
+}
+
+// ---- SVG
+
+/// A hostile file is drawn at the largest size or refused, and its text is never far away.
+#[test]
+fn an_svg_shows_as_a_picture_and_its_source_is_a_click_away() {
+    let f = Fx::new();
+    f.write("drawing.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="red"/></svg>"#);
+    f.write("hostile.svg", &format!(r#"<svg xmlns="http://www.w3.org/2000/svg">{}{}</svg>"#, "<g>".repeat(5000), "</g>".repeat(5000)));
+    f.commit("two drawings");
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("drawing.svg", None, None));
+    wait_for_label(&mut h, "Picture");
+    settle(&mut h);
+    assert!(h.query_by_label_contains("xmlns").is_none(), "the picture, not its text");
+    click(&mut h, "Source");
+    settle(&mut h);
+    click(&mut h, "Picture");
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::file("hostile.svg", None, None));
+    wait_for_text(&mut h, "This SVG can't be drawn");
+    wait_for_text(&mut h, "It nests too deeply");
+    no_errors(&h);
+
+    // Its diff is text until asked, and asking draws both sides.
+    f.write("drawing.svg", r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="blue"/></svg>"#);
+    h.state_mut().repos[0].open_tab(Tab::diff(gitem_core::repo::DiffSource::Unstaged, Some("drawing.svg".to_string())));
+    settle(&mut h);
+    wait_for_label(&mut h, "Pictures");
+    click(&mut h, "Pictures");
+    wait_for_text(&mut h, "40 × 20 px");
+    assert!(h.query_by_label("Before").is_some() && h.query_by_label("After").is_some());
+    no_errors(&h);
+}
+
+// ---- FG-39 and FG-35
+
+fn hunk_file(f: &Fx) -> String {
+    let base: Vec<String> = (1..=40).map(|i| format!("line {i}")).collect();
+    f.write("h.txt", &(base.join("\n") + "\n"));
+    f.commit("the file");
+    let mut changed = base.clone();
+    changed[3] = "early change".to_string();
+    changed[30] = "late change".to_string();
+    let text = changed.join("\n") + "\n";
+    f.write("h.txt", &text);
+    text
+}
+
+/// Ticked by a click, stashed by a click, popped from the stash's menu, back to the same bytes.
+#[test]
+fn stash_hunks_is_clicked_through_and_comes_back() {
+    let f = Fx::new();
+    let text = hunk_file(&f);
+    let mut h = f.harness(|_| {});
+    h.state_mut().repos[0].open_tab(Tab::StashHunks(Box::default()));
+    settle(&mut h);
+    wait_for_text(&mut h, "h.txt: lines");
+    let first = h.query_all_by_label_contains("h.txt: lines").last().unwrap().accesskit_node().label().unwrap().to_string();
+    click(&mut h, &first);
+    h.step();
+    click(&mut h, "Stash 1 hunk");
+    wait_for(&mut h, "the stash", |_| !f.git(&["stash", "list"]).is_empty());
+    settle(&mut h);
+    assert!(f.read("h.txt").contains("early change"), "the first stays");
+    assert!(!f.read("h.txt").contains("late change"), "the second left");
+    assert!(f.git(&["stash", "list"]).ends_with("[hunks]"), "{}", f.git(&["stash", "list"]));
+    no_errors(&h);
+    // Popping is the palette's or a menu's. The palette's goes the same way for this one.
+    let sha = f.git(&["rev-parse", "stash@{0}"]);
+    h.state_mut().repos[0].queue_for_test(gitem_core::ops::only_if_stash_is(gitem_core::hunkstash::apply("stash@{0}", true), "stash@{0}", &sha));
+    settle(&mut h);
+    assert_eq!(f.read("h.txt"), text);
+    assert_eq!(f.git(&["stash", "list"]), "");
+    no_errors(&h);
+}
+
+#[test]
+fn a_file_with_staged_changes_says_why_it_cant_offer_hunks() {
+    let f = Fx::new();
+    hunk_file(&f);
+    f.git(&["add", "h.txt"]);
+    f.write("h.txt", &(f.read("h.txt") + "more\n"));
+    let mut h = f.harness(|_| {});
+    h.state_mut().repos[0].open_tab(Tab::StashHunks(Box::default()));
+    settle(&mut h);
+    wait_for_text(&mut h, "It has staged changes too");
+    assert!(h.query_all_by_label_contains("h.txt: lines").next().is_none());
+    assert!(h.query_by_label("Stash 0 hunks").is_some_and(|n| n.accesskit_node().is_disabled()));
+}
+
+/// Off, none of it is there. On, a feature is started and finished by clicks, as far as a form.
+#[test]
+fn the_branch_model_is_absent_until_turned_on_then_clicks_through() {
+    let f = Fx::new();
+    f.git(&["branch", "develop"]);
+    let mut off = f.harness(|_| {});
+    off.state_mut().repos[0].open_tab(Tab::home());
+    settle(&mut off);
+    assert!(off.query_by_label("Start feature…").is_none());
+    off.state_mut().open_palette_with("Start Feature");
+    settle(&mut off);
+    assert!(off.query_by_label("Start Feature…").is_none());
+    drop(off);
+
+    let mut h = f.harness(|s| s.branch_model.enabled = true);
+    h.state_mut().repos[0].open_tab(Tab::home());
+    settle(&mut h);
+    click(&mut h, "Start feature…");
+    wait_for_label(&mut h, "Start");
+    h.state_mut().form_set_for_test("name", "login");
+    click(&mut h, "Start");
+    wait_for(&mut h, "the branch", |_| f.git(&["symbolic-ref", "--short", "HEAD"]) == "feature/login");
+    settle(&mut h);
+    f.write("login.txt", "l\n");
+    f.commit("login");
+    settle(&mut h);
+    h.state_mut().open_palette_with("Finish Feature");
+    settle(&mut h);
+    click(&mut h, "Finish Feature…");
+    wait_for_label(&mut h, "Next");
+    click(&mut h, "Next");
+    wait_for_label(&mut h, "Finish");
+    wait_for_text(&mut h, "Merges feature/login into develop");
+    click(&mut h, "Finish");
+    wait_for(&mut h, "the finish", |_| f.git(&["branch", "--list", "feature/login"]).is_empty());
+    settle(&mut h);
+    assert_eq!(f.git(&["symbolic-ref", "--short", "HEAD"]), "develop");
+    no_errors(&h);
+}
+
+#[test]
+fn finishing_with_changes_in_the_tree_is_refused_in_the_form() {
+    let f = Fx::new();
+    f.git(&["branch", "develop"]);
+    f.git(&["switch", "-q", "-c", "feature/x"]);
+    f.write("a.txt", "dirty\n");
+    let mut h = f.harness(|s| s.branch_model.enabled = true);
+    settle(&mut h);
+    h.state_mut().open_palette_with("Finish Feature");
+    settle(&mut h);
+    click(&mut h, "Finish Feature…");
+    wait_for_label(&mut h, "Next");
+    click(&mut h, "Next");
+    wait_for_text(&mut h, "Commit or stash your changes first");
+    assert_eq!(f.git(&["symbolic-ref", "--short", "HEAD"]), "feature/x");
+}
+
 fn click(h: &mut Harness<GitemApp>, label: &str) {
     wait_for_label(h, label);
     a_moment(h);

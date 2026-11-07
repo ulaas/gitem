@@ -17,6 +17,8 @@ use crate::views::Tab;
 use crate::widgets::*;
 
 pub struct Sidebar {
+    /// Branches picked with Ctrl+click.
+    picked: std::collections::BTreeSet<String>,
     /// Branch folders folded away.
     closed_folders: HashSet<String>,
     filter: String,
@@ -92,6 +94,11 @@ fn branch_tree(branches: &[(usize, &str)], closed: &HashSet<String>, all_open: b
     out
 }
 
+/// Git refuses to delete these.
+fn can_pick(b: &Branch) -> bool {
+    !b.is_current && b.worktree.is_none()
+}
+
 struct Lists {
     /// What the positions below are positions in. Kept, and compared by identity, since not
     /// every change to it bumps `refs_gen`: adding a remote doesn't.
@@ -108,7 +115,7 @@ struct Lists {
 
 impl Default for Sidebar {
     fn default() -> Self {
-        Self { closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None }
+        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None }
     }
 }
 
@@ -277,6 +284,7 @@ impl Sidebar {
         let p = cx.pal.clone();
         let Some(lists) = self.lists.take() else { return };
         let refs = lists.refs.clone();
+        self.picked_bar(ui, cx, &refs);
         let action = section(ui, "sb-branches", crate::chrome::icon::GIT_BRANCH, p.series[0], "Branches", &lists.branch_count.to_string(), true, &[(crate::chrome::icon::PLUS, "New branch")], &p, |ui| {
             let mut from = 0;
             for &at in lists.open_lines.iter().chain(std::iter::once(&lists.lines.len())) {
@@ -295,6 +303,26 @@ impl Sidebar {
         if action.is_some() {
             cx.form(forms::new_branch(None));
         }
+    }
+
+    /// What's picked with Ctrl+click, and the one thing to do with it. Only there while there is any.
+    fn picked_bar(&mut self, ui: &mut Ui, cx: &mut Cx, refs: &Refs) {
+        // What's been deleted, or has become current, drops out by itself.
+        self.picked.retain(|n| refs.branches.iter().any(|b| !b.is_remote && b.name == *n && can_pick(b)));
+        if self.picked.is_empty() {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if ui.small_button(format!("Delete {}…", plural(self.picked.len(), "branch", "branches"))).clicked() {
+                let names: Vec<String> = self.picked.iter().cloned().collect();
+                cx.out.push(crate::views::prune::delete_picked(cx.repo.clone(), names, cx.data.base_branch(), cx.settings.confirm_destructive));
+                self.picked.clear();
+            }
+            if ui.small_button("Clear").on_hover_text("Stop picking. Nothing is changed.").clicked() {
+                self.picked.clear();
+            }
+        });
     }
 
     fn branch_line(&mut self, ui: &mut Ui, cx: &mut Cx, refs: &Refs, line: &BranchLine) {
@@ -329,8 +357,9 @@ impl Sidebar {
 
     fn branch_row(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch, label: &str) {
         let p = cx.pal.clone();
-        let (rect, resp) = keyed_row(ui, ROW, b.is_current, &p, ("sidebar branch", b.is_remote, &b.name));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        let picked = !b.is_remote && self.picked.contains(&b.name);
+        let (rect, resp) = keyed_row(ui, ROW, b.is_current || picked, &p, ("sidebar branch", b.is_remote, &b.name));
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, picked, label));
         let text_color = if b.is_current { p.text } else { p.dim };
         // Any branch opens to its commits. Ones with something incoming start open.
         let open = self.is_open(b);
@@ -349,7 +378,11 @@ impl Sidebar {
                 self.expanded_gen += 1;
             }
         }
-        ui.painter().circle(pos2(rect.left() + 21.0, rect.center().y), 3.5, if b.is_current { p.accent } else { p.panel }, egui::Stroke::new(1.0, if b.is_current { p.accent } else { p.faint }), );
+        if picked {
+            ui.painter().text(pos2(rect.left() + 21.0, rect.center().y), egui::Align2::CENTER_CENTER, crate::chrome::icon::CHECK, prop(12.0), p.accent);
+        } else {
+            ui.painter().circle(pos2(rect.left() + 21.0, rect.center().y), 3.5, if b.is_current { p.accent } else { p.panel }, egui::Stroke::new(1.0, if b.is_current { p.accent } else { p.faint }), );
+        }
         let mut right = rect.right() - 4.0;
         // Incoming comes last, at the edge, so it's the easiest to spot.
         if b.behind > 0 {
@@ -372,10 +405,16 @@ impl Sidebar {
         }
         paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), pos2(right, rect.bottom())), label, prop(12.5), text_color);
         let resp = resp.on_hover_text(format!("{}\n{}\n{} · {}", b.name, b.subject, b.author, gitem_core::util::relative_time(b.date, gitem_core::util::now_ts())));
-        if resp.clicked() {
+        let picking = !b.is_remote && ui.input(|i| i.modifiers.command);
+        if resp.clicked() && picking {
+            // Those that can't be deleted can't be picked, and say so only by not changing.
+            if can_pick(b) && !self.picked.remove(&b.name) {
+                self.picked.insert(b.name.clone());
+            }
+        } else if resp.clicked() {
             cx.inspect(&b.sha);
         }
-        if resp.double_clicked() && !b.is_current {
+        if resp.double_clicked() && !b.is_current && !picking {
             if b.is_remote {
                 cx.run(cx.data.check_out_remote(&b.name));
             } else {

@@ -64,6 +64,7 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Create Branch…" => (icon::GIT_BRANCH, "", None),
         "Create Tag…" => (icon::TAG, "", None),
         "Stash…" => (icon::ARCHIVE, "Set your changes aside", None),
+        "Stash Hunks…" => (icon::ARCHIVE, "Set aside only some of a file's changes", None),
         "Stage All" => (icon::CHECK_SQUARE, "", None),
         "Add Remote…" | "Add Remote, Checking the URL…" => (icon::CLOUD, "", None),
         "Add Worktree…" => (icon::TREE_STRUCTURE, "", None),
@@ -150,6 +151,7 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Git", "Create Branch…", |cx| cx.form(forms::new_branch(None))));
     v.push(item("Git", "Create Tag…", |cx| cx.form(forms::new_tag(None))));
     v.push(item("Git", "Stash…", |cx| cx.form(forms::stash_form(Vec::new()))));
+    v.push(item("Git", "Stash Hunks…", |cx| cx.open(Tab::StashHunks(Box::default()))));
     v.push(item("Git", "Stage All", |cx| cx.run(ops::stage_all())));
     v.push(item("Git", "Add Remote…", |cx| cx.form(forms::add_remote())));
     v.push(item("Git", "Add Worktree…", |cx| cx.form(forms::add_worktree(cx.repo, cx.data.ref_names(), None))));
@@ -234,7 +236,7 @@ pub fn commands() -> Vec<Item> {
                 let chosen = v.opt("s").ok_or("Choose a stash.")?;
                 let (name, sha) = list.iter().find(|x| x.0 == chosen).ok_or("Choose a stash from the list.")?;
                 let sel = name.split(':').next().unwrap_or_default();
-                let op = if drop { ops::stash_drop(sel) } else { ops::stash_apply(sel, pop, false) };
+                let op = if drop { ops::stash_drop(sel) } else if gitem_core::hunkstash::is_hunk_stash(name) { gitem_core::hunkstash::apply(sel, pop) } else { ops::stash_apply(sel, pop, false) };
                 let op = ops::only_if_stash_is(op, sel, sha);
                 Ok(vec![if drop { Action::Confirm { title: "Drop stash".to_string(), body: format!("Drop {name}? The toolbar's Undo can restore it straight afterwards."), label: "Drop".to_string(), op } } else { Action::Run(op) }])
             }));
@@ -343,6 +345,21 @@ pub fn commands() -> Vec<Item> {
     v.push(item("App", "Zen Mode (Hide Side Panels)", |cx| cx.out.push(Action::ToggleZen)));
     v.push(item("App", "Open Terminal Here", |cx| cx.out.push(Action::OpenTerminal(cx.repo.root.clone(), None))));
     v.push(item("App", "Refresh", |cx| cx.out.push(Action::Refresh)));
+    v
+}
+
+/// With the branch model on: Start and Finish for each kind. Off, none of these exist.
+fn branch_model_commands() -> Vec<Item> {
+    use gitem_core::branchmodel::Kind;
+    let mut v = Vec::new();
+    for kind in Kind::ALL {
+        let mut start = item("Git", format!("Start {}…", kind.title()), move |cx| cx.form(forms::start_branch(&cx.settings.branch_model, kind, cx.data)));
+        start.glyph = icon::GIT_BRANCH;
+        v.push(start);
+        let mut finish = item("Git", format!("Finish {}…", kind.title()), move |cx| cx.form(forms::finish_branch(&cx.settings.branch_model, kind, cx.data, cx.status(), cx.current_branch().and_then(|b| cx.settings.branch_model.kind_of(&b)).filter(|(k, _)| *k == kind).map(|(_, n)| n))));
+        finish.glyph = icon::GIT_MERGE;
+        v.push(finish);
+    }
     v
 }
 
@@ -617,6 +634,9 @@ impl PaletteState {
         let mut items = Vec::new();
         if matches!(mode, Mode::All | Mode::Commands) {
             items = commands();
+            if cx.settings.branch_model.enabled {
+                items.extend(branch_model_commands());
+            }
         }
         if matches!(mode, Mode::All | Mode::Branches) {
             let current = cx.current_branch();

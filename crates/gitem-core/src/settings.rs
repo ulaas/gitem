@@ -160,6 +160,9 @@ pub struct Settings {
     /// Ask the host for the current branch's pull request, for the status bar.
     #[serde(default)]
     pub status_bar_pr: bool,
+    /// Start and finish feature, release and hotfix branches. Off unless turned on.
+    #[serde(default)]
+    pub branch_model: crate::branchmodel::BranchModel,
     /// Keys chosen for commands, by the command's name in `keys::BINDABLE`.
     #[serde(default)]
     pub key_bindings: std::collections::HashMap<String, String>,
@@ -303,6 +306,7 @@ impl Default for Settings {
             pull_autostash: false,
             single_window: false,
             status_bar_pr: false,
+            branch_model: Default::default(),
             key_bindings: Default::default(),
             recurse_submodules: false,
             attention_when_done: true,

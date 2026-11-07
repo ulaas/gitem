@@ -34,6 +34,32 @@ pub fn candidates(branches: &[Branch], merged: &BTreeSet<String>, base: &str) ->
         .collect()
 }
 
+/// The question before deleting several, here and from the sidebar: `rest` isn't merged into `base`.
+pub fn deleting_says(safe: &[String], rest: &[String], base: &str) -> String {
+    let mut body = format!("Delete {}?", plural(safe.len() + rest.len(), "branch", "branches"));
+    if !rest.is_empty() {
+        body.push_str(&format!(" {} commits that aren't merged into {base}: {}.", if rest.len() == 1 { "This one has".to_string() } else { format!("{} of them have", rest.len()) }, rest.join(", ")));
+    }
+    body.push_str(" The toolbar's Undo can restore them straight afterwards.");
+    body
+}
+
+/// Deleting branches picked elsewhere: finds out off the UI thread which are merged, then asks as
+/// Clean up branches does, and has the same Undo.
+pub fn delete_picked(repo: gitem_core::Repo, names: Vec<String>, base: String, confirming: bool) -> crate::action::Action {
+    crate::action::Action::Later(Box::new(move || {
+        // With no such base here, nothing counts as merged, and the question names them all.
+        let merged: BTreeSet<String> = if repo.resolve(&base).is_ok() { repo.merged_branches(&base).map_err(|e| e.to_string())?.into_iter().collect() } else { BTreeSet::new() };
+        let (safe, rest): (Vec<String>, Vec<String>) = names.into_iter().partition(|n| merged.contains(n));
+        let op = ops::branches_delete(&safe, &rest);
+        Ok(if confirming {
+            crate::action::Later::Confirm { title: "Delete branches".to_string(), body: deleting_says(&safe, &rest, &base), label: "Delete".to_string(), op }
+        } else {
+            crate::action::Later::Run(op)
+        })
+    }))
+}
+
 #[derive(Default)]
 pub struct PruneView {
     merged: Task<BTreeSet<String>>,
@@ -89,12 +115,7 @@ impl PruneView {
                 let (safe, unsafe_): (Vec<&Candidate>, Vec<&Candidate>) = chosen.iter().partition(|c| c.merged);
                 let safe: Vec<String> = safe.iter().map(|c| c.name.clone()).collect();
                 let rest: Vec<String> = unsafe_.iter().map(|c| c.name.clone()).collect();
-                let mut body = format!("Delete {}?", plural(safe.len() + rest.len(), "branch", "branches"));
-                if !rest.is_empty() {
-                    body.push_str(&format!(" {} commits on no other branch: {}.", if rest.len() == 1 { "This one has".to_string() } else { format!("{} of them have", rest.len()) }, rest.join(", ")));
-                }
-                body.push_str(" The toolbar's Undo can restore them straight afterwards.");
-                cx.confirm("Clean up branches", &body, "Delete", ops::branches_delete(&safe, &rest));
+                cx.confirm("Clean up branches", &deleting_says(&safe, &rest, &base), "Delete", ops::branches_delete(&safe, &rest));
             }
             if self.merged.busy() {
                 ui.add(spinner(14.0));

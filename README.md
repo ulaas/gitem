@@ -151,6 +151,7 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 | `Tab` | Move between controls. What has the keyboard gets an outline |
 | `Shift+F10` | Open the menu of the current row, in Changes and the graph |
 | `↑ ↓` | Move through the files in Changes, or the commits in the graph |
+| `Ctrl+click` | Pick several branches in the sidebar, to delete together |
 | `J` `K` | Next and previous commit in the graph |
 | `Space` | Stage or unstage the current file in Changes |
 | `Alt+↑, Alt+↓` | Previous and next change in a diff |

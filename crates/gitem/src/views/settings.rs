@@ -574,6 +574,30 @@ impl SettingsView {
                 field(ui, &mut s.start_work_format, "${id}-${title}", 240.0);
             });
         });
+        group(ui, "Branch model", p, |g| {
+            g.switch(&mut s.branch_model.enabled, "Use a branch model", "Start and finish feature, release and hotfix branches, in the spirit of git flow, from the palette, Home and a branch's menu. Nothing else changes or is enforced.");
+            if s.branch_model.enabled {
+                let m = &mut s.branch_model;
+                g.row("Main branch", "What's released. Hotfixes start here.", |ui| {
+                    field(ui, &mut m.main, "main", 160.0);
+                });
+                g.row("Develop branch", "Features and releases start here. The same as the main branch if there's only one.", |ui| {
+                    field(ui, &mut m.develop, "develop", 160.0);
+                });
+                g.row("Feature prefix", "", |ui| {
+                    field(ui, &mut m.feature_prefix, "feature/", 160.0);
+                });
+                g.row("Release prefix", "", |ui| {
+                    field(ui, &mut m.release_prefix, "release/", 160.0);
+                });
+                g.row("Hotfix prefix", "", |ui| {
+                    field(ui, &mut m.hotfix_prefix, "hotfix/", 160.0);
+                });
+                g.row("Tag prefix", "Goes before a release's or hotfix's version in its tag.", |ui| {
+                    field(ui, &mut m.tag_prefix, "v", 160.0);
+                });
+            }
+        });
         group(ui, "Keyboard", p, |g| {
             for (name, keys, what) in crate::keys::BINDABLE {
                 g.row(what, keys, |ui| {

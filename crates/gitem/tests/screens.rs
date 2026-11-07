@@ -289,6 +289,63 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         settle_a_moment(&mut h);
         out.save(&mut h, "norepo-everything");
     }
+    if wanted("10d") {
+        // Hunks to pick, a drawing, its diff, branches picked, and the model's settings and form.
+        let lines: Vec<String> = (1..=40).map(|i| format!("line {i}")).collect();
+        std::fs::write(f.root.join("h.txt"), lines.join("\n") + "\n").unwrap();
+        std::fs::write(f.root.join("drawing.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" rx="8" fill="#2563eb"/><circle cx="80" cy="45" r="30" fill="#fbbf24"/><text x="10" y="20">A label</text></svg>"##).unwrap();
+        run(&f.git, &f.root, &["add", "h.txt", "drawing.svg"]);
+        run(&f.git, &f.root, &["commit", "-q", "-m", "drawing and lines"]);
+        let mut changed = lines.clone();
+        changed[3] = "early change".to_string();
+        changed[30] = "late change".to_string();
+        std::fs::write(f.root.join("h.txt"), changed.join("\n") + "\n").unwrap();
+        std::fs::write(f.root.join("drawing.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" rx="8" fill="#16a34a"/><circle cx="80" cy="45" r="30" fill="#fbbf24"/><text x="10" y="20">A label</text></svg>"##).unwrap();
+        let mut h = f.harness(move |s: &mut Settings| {
+            s.theme = theme;
+            s.branch_model.enabled = true;
+        }, vec![]);
+        open(&mut h, Tab::StashHunks(Box::default()));
+        wait_for(&mut h, "h.txt: lines");
+        settle_a_moment(&mut h);
+        let first = h.query_all_by_label_contains("h.txt: lines").next().unwrap().accesskit_node().label().unwrap().to_string();
+        click(&mut h, &first);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "stashhunks");
+        open(&mut h, Tab::file("drawing.svg", None, None));
+        wait_for(&mut h, "Picture");
+        quiet(&mut h);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "svgfile");
+        open(&mut h, Tab::diff(DiffSource::Unstaged, Some("drawing.svg".to_string())));
+        wait_for(&mut h, "Pictures");
+        click(&mut h, "Pictures");
+        quiet(&mut h);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "svgdiff");
+        open(&mut h, Tab::home());
+        settle_a_moment(&mut h);
+        out.save(&mut h, "modelhome");
+        h.query_all_by_label("one").next().unwrap().click_modifiers(egui::Modifiers::COMMAND);
+        h.step();
+        h.query_all_by_label("two").next().unwrap().click_modifiers(egui::Modifiers::COMMAND);
+        h.step();
+        settle_a_moment(&mut h);
+        out.save(&mut h, "pickedbranches");
+        h.state_mut().open_palette_with("Finish");
+        settle_a_moment(&mut h);
+        out.save(&mut h, "modelpalette");
+        let ctx = h.ctx.clone();
+        let model = gitem_core::branchmodel::BranchModel { enabled: true, ..Default::default() };
+        h.state_mut().open_palette_with("");
+        h.key_press(egui::Key::Escape);
+        h.step();
+        let form = gitem::forms::start_branch(&model, gitem_core::branchmodel::Kind::Feature, &h.state().repos[0].data);
+        h.state_mut().apply_action(&ctx, gitem::action::Action::Form(form));
+        settle_a_moment(&mut h);
+        out.save(&mut h, "modelstart");
+        run(&f.git, &f.root, &["checkout", "--", "h.txt", "drawing.svg"]);
+    }
     if wanted("rail") {
         let mut h = f.harness(move |s: &mut Settings| {
             s.theme = theme;
