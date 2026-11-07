@@ -91,6 +91,8 @@ pub struct BlameOpts {
     pub moves: bool,
     /// `-C`: follow lines copied from other files.
     pub copies: bool,
+    /// Look through the commits listed in the project's ignore-revs file.
+    pub ignore_revs: bool,
 }
 
 /// What a diff compares. Every diff in the UI is expressed as one of these.
@@ -841,6 +843,9 @@ impl Repo {
 
     pub fn blame(&self, path: &str, rev: Option<&str>, opts: BlameOpts) -> Result<Vec<BlameLine>> {
         let mut a: Vec<String> = vec!["blame".into(), "--line-porcelain".into()];
+        if opts.ignore_revs {
+            a.push(format!("--ignore-revs-file={}", self.root.join(IGNORE_REVS_FILE).to_string_lossy()));
+        }
         if opts.ignore_ws {
             a.push("-w".into());
         }
@@ -938,6 +943,93 @@ impl Repo {
             1 => Ok(o.text().split('\0').skip(1).filter(|l| !l.is_empty()).map(String::from).collect()),
             _ => Err(Error::Git(o.stderr.trim().to_string())),
         }
+    }
+
+    /// What replaying `commits`, oldest first, onto `onto` would run into. Stops at the first
+    /// conflict, since what follows depends on how that gets resolved. Nothing is touched: the
+    /// results are objects nothing refers to, which git cleans up itself. Needs git 2.40.
+    pub fn predict_replay(&self, onto: &str, commits: &[String]) -> Result<Option<(String, Vec<String>)>> {
+        let mut ours = self.resolve_git(rev_arg(onto)?)?;
+        // commit-tree wants someone's name, and any will do for an object nobody will see.
+        let env: Vec<(String, String)> = ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"].iter().map(|k| (k.to_string(), "gitem".to_string())).chain(["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"].iter().map(|k| (k.to_string(), "gitem@localhost".to_string()))).collect();
+        for sha in commits {
+            let sha = rev_arg(sha)?;
+            let parent = self.resolve_git(&format!("{sha}^"))?;
+            let o = self.git.run_raw(Some(&self.root), &["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", &format!("--merge-base={parent}"), &ours, sha])?;
+            match o.code {
+                0 => {
+                    let tree = o.text().split('\0').next().unwrap_or("").trim().to_string();
+                    let args: Vec<String> = ["commit-tree", &tree, "-p", &ours, "-m", "gitem prediction"].iter().map(|s| s.to_string()).collect();
+                    let opts = crate::runner::RunOpts { env: env.clone(), ..Default::default() };
+                    ours = self.git.run_opts(Some(&self.root), &args, &opts, &mut |_| {})?.into_result()?.text().trim().to_string();
+                }
+                1 => return Ok(Some((sha.to_string(), o.text().split('\0').skip(1).take_while(|l| !l.is_empty()).map(String::from).collect()))),
+                _ => return Err(Error::Git(o.stderr.trim().to_string())),
+            }
+        }
+        Ok(None)
+    }
+
+    fn resolve_git(&self, rev: &str) -> Result<String> {
+        Ok(self.git.run(Some(&self.root), &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])?.text().trim().to_string())
+    }
+
+    /// Lines in tracked files that match, here or at a revision.
+    pub fn grep(&self, query: &str, rev: Option<&str>, ignore_case: bool, regex: bool) -> Result<Vec<GrepHit>> {
+        let mut a: Vec<String> = ["grep", "-n", "-I", "--null", "--no-color", "--full-name"].map(String::from).to_vec();
+        a.push(if regex { "-E".to_string() } else { "-F".to_string() });
+        if ignore_case {
+            a.push("-i".to_string());
+        }
+        a.extend(["-e".to_string(), query.to_string()]);
+        if let Some(r) = rev {
+            a.push(rev_arg(r)?.to_string());
+        }
+        a.push("--".to_string());
+        let o = self.git.run_opts(Some(&self.root), &a, &Default::default(), &mut |_| {})?;
+        // One means nothing found, which isn't a failure.
+        if o.code == 1 && o.stderr.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let text = o.into_result()?.text();
+        Ok(parse_grep(&text, rev))
+    }
+
+    /// The commit template named by `commit.template`, without its comment lines.
+    pub fn commit_template(&self) -> Option<String> {
+        let name = self.config_get("commit.template").filter(|p| !p.trim().is_empty())?;
+        let path = match name.strip_prefix("~/") {
+            Some(rest) => home_dir().ok()?.join(rest),
+            None if Path::new(&name).is_absolute() => PathBuf::from(&name),
+            None => self.root.join(&name),
+        };
+        let text = std::fs::read_to_string(path).ok()?;
+        let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+        Some(kept.join("\n").trim().to_string()).filter(|t| !t.is_empty())
+    }
+
+    /// Your own last commit messages, newest first, with repeats left out.
+    pub fn recent_messages(&self, limit: usize) -> Result<Vec<String>> {
+        let email = self.config_get("user.email").unwrap_or_default();
+        let (count, author) = (format!("--max-count={}", limit * 3), format!("--author={email}"));
+        let mut args = vec!["log", &count, "-z", "--format=%B", "--fixed-strings"];
+        if !email.is_empty() {
+            args.push(&author);
+        }
+        let o = self.git.run_raw(Some(&self.root), &args)?;
+        if !o.ok() {
+            return if has_no_commits(&o.stderr) { Ok(Vec::new()) } else { Err(Error::Git(o.stderr.trim().to_string())) };
+        }
+        let mut seen = Vec::new();
+        for m in o.text().split('\0').map(str::trim).filter(|m| !m.is_empty()) {
+            if !seen.iter().any(|x: &String| x == m) {
+                seen.push(m.to_string());
+            }
+            if seen.len() == limit {
+                break;
+            }
+        }
+        Ok(seen)
     }
 
     /// (path, size in bytes) of every file at `rev`.
@@ -1361,6 +1453,29 @@ impl Repo {
         let (Ok(a), Ok(b)) = (rev_arg(a), rev_arg(b)) else { return false };
         self.git.run_raw(Some(&self.root), &["merge-base", "--is-ancestor", a, b]).map(|o| o.ok()).unwrap_or(false)
     }
+}
+
+/// Where projects list commits that blame should look through, such as reformats.
+pub const IGNORE_REVS_FILE: &str = ".git-blame-ignore-revs";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrepHit {
+    pub path: String,
+    pub line: u32,
+    pub text: String,
+}
+
+/// `path NUL number : text`. With a revision, git puts `rev:` before the path.
+pub fn parse_grep(output: &str, rev: Option<&str>) -> Vec<GrepHit> {
+    output
+        .lines()
+        .filter_map(|l| {
+            let (path, rest) = l.split_once('\0')?;
+            let path = rev.and_then(|r| path.strip_prefix(r)).and_then(|p| p.strip_prefix(':')).unwrap_or(path);
+            let (line, text) = rest.split_once([':', '\0'])?;
+            Some(GrepHit { path: path.to_string(), line: line.parse().ok()?, text: text.to_string() })
+        })
+        .collect()
 }
 
 fn home_dir() -> Result<PathBuf> {

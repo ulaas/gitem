@@ -217,7 +217,7 @@ impl HomeView {
         ui.spacing_mut().item_spacing.y = 4.0;
     }
 
-    fn start_sweep(&mut self, ctx: &egui::Context, cx: &Cx, repos: Vec<String>, done: &'static str, op: impl Fn() -> ops::GitOp + Send + 'static) {
+    fn start_sweep(&mut self, ctx: &egui::Context, cx: &Cx, repos: Vec<String>, done: (&'static str, &'static str), op: impl Fn() -> ops::GitOp + Send + 'static) {
         let git = cx.repo.git.clone();
         self.sweep.spawn(ctx, move || sweep(git, repos, done, op));
     }
@@ -275,10 +275,10 @@ impl HomeView {
             let why = "One of these is already going through the repositories.";
             if ui.add_enabled(!busy, egui::Button::new("Fetch all").small()).on_disabled_hover_text(why).clicked() {
                 let prune = cx.settings.prune_on_fetch;
-                self.start_sweep(ui.ctx(), cx, w.repos.clone(), "Fetched", move || ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() }));
+                self.start_sweep(ui.ctx(), cx, w.repos.clone(), ("Fetched", "fetching"), move || ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() }));
             }
             if ui.add_enabled(!busy, egui::Button::new("Pull all").small()).on_hover_text("Fast-forward only, so nothing needs resolving. A repository that can't is left as it is and reported").on_disabled_hover_text(why).clicked() {
-                self.start_sweep(ui.ctx(), cx, w.repos.clone(), "Pulled", || ops::pull(ops::PullMode::FfOnly, false));
+                self.start_sweep(ui.ctx(), cx, w.repos.clone(), ("Pulled", "pulling"), || ops::pull(ops::PullMode::FfOnly, false));
             }
             if ui.small_button("Open all").clicked() {
                 for r in &w.repos {
@@ -375,12 +375,15 @@ impl HomeView {
 /// One op through each repository in turn, off the UI thread. What failed is reported once, all
 /// together, and doesn't stop the others. A repository that hasn't been opened and has config
 /// that would run a program is left out until someone has decided about it.
-fn sweep(git: gitem_core::GitExe, repos: Vec<String>, done: &str, op: impl Fn() -> ops::GitOp) -> Result<String, String> {
+fn sweep(git: gitem_core::GitExe, repos: Vec<String>, (done, doing): (&str, &str), op: impl Fn() -> ops::GitOp) -> Result<String, String> {
     let (mut worked, mut failed) = (0, Vec::new());
     for path in &repos {
         let dir = std::path::Path::new(path);
         let result = match Repo::open(git.clone(), dir) {
-            Ok(r) if r.trust.restricted() => Err("its config names programs that you haven't said can run. Open it to decide.".to_string()),
+            Ok(r) if r.trust.restricted() => {
+                failed.push(format!("Not {doing} {path}: its config names programs that you haven't said can run. Open it to decide."));
+                continue;
+            }
             Ok(r) => op().unattended().run(&r.git, Some(dir), None, &mut |_| {}).map(|_| ()).map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         };

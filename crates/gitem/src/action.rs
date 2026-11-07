@@ -22,6 +22,8 @@ pub enum Action {
     OpenSettings,
     /// Run a write op on this repo's queue.
     Run(GitOp),
+    /// Run on this repo's queue, then this if it worked, as a terminal in a folder it made.
+    RunThen(GitOp, Box<Action>),
     /// Take back the last thing done in this repository, if that's still possible.
     UndoLast,
     /// Ask first, then run.

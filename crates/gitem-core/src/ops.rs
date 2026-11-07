@@ -498,6 +498,10 @@ pub struct CommitOpts {
     pub allow_empty: bool,
     pub author: Option<String>,
     pub all: bool,
+    /// Amending: the author and date become you and now.
+    pub reset_author: bool,
+    /// Amending: the date becomes now, and the author stays.
+    pub reset_date: bool,
 }
 
 pub fn commit(o: &CommitOpts) -> GitOp {
@@ -517,6 +521,12 @@ pub fn commit(o: &CommitOpts) -> GitOp {
     }
     if o.allow_empty {
         a.push("--allow-empty".into());
+    }
+    if o.reset_author {
+        a.push("--reset-author".into());
+    }
+    if o.reset_date {
+        a.push("--date=now".into());
     }
     if o.all {
         a.push("--all".into());
@@ -915,6 +925,26 @@ pub fn tags_push_all(remote: &str, replacing: bool) -> GitOp {
     }
     a.extend(v(&["--", remote]));
     GitOp::new(format!("Push all tags to {remote}")).names(&[remote]).step_v(a).net()
+}
+
+/// Every branch of a stack, after a rebase moved them. All or none, and each only over what was
+/// last seen there.
+pub fn push_stack(remote: &str, branches: &[String]) -> GitOp {
+    let mut a = v(&["push", "--force-with-lease", "--atomic", "--", remote]);
+    a.extend_from_slice(branches);
+    let mut names: Vec<&str> = branches.iter().map(String::as_str).collect();
+    names.push(remote);
+    GitOp::new(format!("Push {} to {remote}", crate::util::count_of(branches.len(), "branch").replace("branchs", "branches"))).names(&names).step_v(a).net()
+}
+
+/// Have what git is about to do include submodules, for the commands that take that.
+pub fn recursing_submodules(mut op: GitOp) -> GitOp {
+    for s in &mut op.steps {
+        if matches!(s.args.first().map(String::as_str), Some("pull" | "switch")) {
+            s.args.insert(1, "--recurse-submodules".to_string());
+        }
+    }
+    op
 }
 
 pub fn tag_delete_remote(remote: &str, name: &str) -> GitOp {

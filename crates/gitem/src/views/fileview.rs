@@ -92,6 +92,8 @@ pub struct FileView {
     scroll_to: Option<usize>,
     ignore_ws: bool,
     moves: bool,
+    copies: bool,
+    ignore_revs: bool,
     code_lens: Option<bool>,
     /// Blame anyway, for a file over the limit.
     force_blame: bool,
@@ -170,6 +172,8 @@ impl FileView {
             scroll_to: None,
             ignore_ws: false,
             moves: false,
+            copies: false,
+            ignore_revs: false,
             code_lens: None,
             force_blame: false,
             long_jobs: HashMap::new(),
@@ -203,7 +207,7 @@ impl FileView {
 
     fn load(&mut self, ctx: &egui::Context, cx: &Cx) {
         let (path, rev) = (self.path.clone(), self.rev.clone());
-        let opts = BlameOpts { ignore_ws: self.ignore_ws, moves: self.moves, copies: false };
+        let opts = BlameOpts { ignore_ws: self.ignore_ws, moves: self.moves, copies: self.copies, ignore_revs: self.ignore_revs };
         let dark = cx.pal.dark;
         let force_blame = self.force_blame;
         self.long_jobs.clear();
@@ -303,7 +307,7 @@ impl FileView {
                 None => {}
             }
         }
-        let key = format!("{:?}{}{}{}", self.rev, self.ignore_ws, self.moves, pal.dark);
+        let key = format!("{:?}{}{}{}{}{}", self.rev, self.ignore_ws, self.moves, self.copies, self.ignore_revs, pal.dark);
         // Worktree files follow edits; revisions are immutable. Edits wait for a load under
         // way, and start another when it lands, or a slow blame under steady changes piles
         // up. Asking for something else replaces it.
@@ -368,6 +372,10 @@ impl FileView {
             ui.menu_button("Blame options \u{E136}", |ui| {
                 ui.checkbox(&mut self.ignore_ws, "Ignore whitespace (-w)");
                 ui.checkbox(&mut self.moves, "Detect moved lines (-M)");
+                ui.checkbox(&mut self.copies, "Detect lines copied from other files (-C)");
+                if cx.repo.root.join(gitem_core::repo::IGNORE_REVS_FILE).is_file() {
+                    ui.checkbox(&mut self.ignore_revs, "Look through commits in .git-blame-ignore-revs");
+                }
             });
             ui.separator();
             let repo = cx.repo.clone();

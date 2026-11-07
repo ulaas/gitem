@@ -9,6 +9,10 @@ use serde_json::Value;
 use crate::ai::AiConfig;
 use crate::forge::ForgeKind;
 
+fn yes() -> bool {
+    true
+}
+
 /// The folder named by `GITEM_CONFIG_DIR`. When it's set, everything gitem keeps
 /// stays in there: settings, window state and secrets.
 pub fn config_dir_override() -> Option<PathBuf> {
@@ -147,6 +151,12 @@ pub struct Settings {
     /// The toolbar's Pull stashes local changes first, and puts them back after.
     #[serde(default)]
     pub pull_autostash: bool,
+    /// Pull and check out bring submodules along.
+    #[serde(default)]
+    pub recurse_submodules: bool,
+    /// Draw attention in the taskbar when something long finishes while gitem isn't in front.
+    #[serde(default = "yes")]
+    pub attention_when_done: bool,
     /// Ask once a day whether there's a newer release. Off unless turned on.
     #[serde(default)]
     pub check_updates: bool,
@@ -275,6 +285,8 @@ impl Default for Settings {
             commit_sign: false,
             commit_signoff: false,
             pull_autostash: false,
+            recurse_submodules: false,
+            attention_when_done: true,
             terminal: String::new(),
             external_diff_tool: String::new(),
             external_merge_tool: String::new(),
@@ -373,6 +385,25 @@ fn merge_json(base: Option<&Value>, mine: Option<&Value>, disk: Option<&Value>) 
 }
 
 impl Settings {
+    /// A copy for another machine or a backup. Secrets are never in here to begin with.
+    pub fn export_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::write(path, serde_json::to_string_pretty(self).map_err(std::io::Error::other)?)
+    }
+
+    /// Takes on what the file says, but keeps what belongs to this machine: what's open, recent
+    /// and restored. A file that doesn't read changes nothing.
+    pub fn import_from(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+        let mut new: Settings = serde_json::from_str(&text).map_err(|e| format!("{} isn't a gitem settings file: {e}", path.display()))?;
+        new.recent_repos = std::mem::take(&mut self.recent_repos);
+        new.open_repos = std::mem::take(&mut self.open_repos);
+        new.session_tabs = std::mem::take(&mut self.session_tabs);
+        new.session_layouts = std::mem::take(&mut self.session_layouts);
+        new.git_path = std::mem::take(&mut self.git_path);
+        *self = new;
+        Ok(())
+    }
+
     pub fn path() -> PathBuf {
         config_dir().join("settings.json")
     }

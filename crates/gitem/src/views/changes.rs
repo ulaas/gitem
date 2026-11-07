@@ -118,6 +118,11 @@ pub fn forget_draft(root: &std::path::Path) {
 pub struct ChangesView {
     pub message: String,
     amend: bool,
+    reset_author: bool,
+    reset_date: bool,
+    /// The commit template and your recent messages, read when the menu's opened.
+    earlier: Task<(Option<String>, Vec<String>)>,
+    earlier_read: bool,
     signoff: bool,
     /// The two settings as last seen, so changing one reaches a Changes tab that's open.
     sign_settings: (bool, bool),
@@ -735,6 +740,11 @@ impl ChangesView {
         if squash_waiting(st) {
             ui.label(RichText::new("A squash merge is staged. Git has made it no commit yet: committing this is what records it.").small().color(p.dim));
         }
+        if self.amend
+            && let Some(up) = st.upstream.as_ref().filter(|_| st.ahead == 0)
+        {
+            ui.label(RichText::new(format!("This commit is already on {up}. Amending it means the next push has to overwrite it, and anyone who has it has to catch up.")).small().color(p.warn));
+        }
         if self.message.lines().nth(1).is_some_and(|l| !l.trim().is_empty()) {
             ui.label(RichText::new("Leave the second line blank: git and most tools read the first line alone as the subject.").small().color(p.warn));
         }
@@ -742,6 +752,40 @@ impl ChangesView {
             if ui.checkbox(&mut self.amend, "Amend").changed() && self.amend && self.message.trim().is_empty() {
                 self.amend_message.spawn_git(ui.ctx(), cx.repo, |r| r.commit("HEAD").map(|c| c.message()));
             }
+            if self.amend {
+                ui.checkbox(&mut self.reset_author, "Reset author").on_hover_text("You become its author, as of now");
+                if !self.reset_author {
+                    ui.checkbox(&mut self.reset_date, "Reset date").on_hover_text("Its author stays, and its date becomes now");
+                }
+            }
+            ui.menu_button("Message \u{E136}", |ui| {
+                ui.set_max_width(420.0);
+                self.earlier.poll();
+                if !std::mem::replace(&mut self.earlier_read, true) {
+                    let repo = cx.repo.clone();
+                    self.earlier.spawn(ui.ctx(), move || -> Result<(Option<String>, Vec<String>), String> { Ok((repo.commit_template(), repo.recent_messages(15).map_err(|e| e.to_string())?)) });
+                }
+                let Some((template, recent)) = self.earlier.get().cloned() else {
+                    spinner_row(ui, "Reading…", &p);
+                    return;
+                };
+                if let Some(t) = template
+                    && ui.button("Use the commit template").clicked()
+                {
+                    self.message = t;
+                    ui.close();
+                }
+                if recent.is_empty() {
+                    ui.label(RichText::new("You've no earlier messages here.").small().color(p.dim));
+                }
+                for m in recent.iter() {
+                    let first = m.lines().next().unwrap_or("");
+                    if ui.button(first).on_hover_text(m.as_str()).clicked() {
+                        self.message = m.clone();
+                        ui.close();
+                    }
+                }
+            });
             ui.checkbox(&mut self.signoff, "Sign-off");
             ui.checkbox(&mut self.sign, "GPG/SSH sign");
             ui.checkbox(&mut self.no_verify, "Skip hooks");
@@ -885,6 +929,8 @@ impl ChangesView {
             allow_empty: false,
             author: Some(self.author.trim().to_string()).filter(|s| !s.is_empty()),
             all: false,
+            reset_author: self.amend && self.reset_author,
+            reset_date: self.amend && self.reset_date && !self.reset_author,
         }));
         // The status is read after every write, so this is HEAD as of the last one.
         let head = cx.status().map(|s| s.head_sha.clone()).unwrap_or_default();

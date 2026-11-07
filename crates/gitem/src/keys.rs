@@ -28,7 +28,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Space", "Changes: stage or unstage the current file"),
     ("Enter", "Changes: open the current file's diff in a tab"),
     ("/", "Graph: find a ref"),
-    ("Ctrl+F", "Find in a file, or search the graph"),
+    ("Ctrl+F", "Find in a file or a diff, or search the graph"),
     ("F3, Shift+F3", "Next and previous match"),
     ("Alt+↑, Alt+↓", "Diff: previous and next change. Rebase: move the step"),
     ("Alt+B", "File: show or hide blame"),

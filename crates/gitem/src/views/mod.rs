@@ -16,6 +16,7 @@ pub mod fileview;
 pub mod filetree;
 pub mod graph;
 pub mod graphcols;
+pub mod grep;
 pub mod health;
 pub mod history;
 pub mod home;
@@ -72,6 +73,7 @@ tabs! {
     Console(console::ConsoleView),
     Patches(patches::PatchesView),
     Prune(prune::PruneView),
+    Grep(grep::GrepView),
     PullRequest(pullrequest::PullRequestView),
     Composer(composer::ComposerView),
     Tree(tree::TreeView),
@@ -103,7 +105,7 @@ impl Tab {
     /// Whether a commit picked elsewhere has anything to do with this view. The Details panel
     /// only takes room beside those that do.
     pub fn shows_commits(&self) -> bool {
-        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_) | Tab::Prune(_) | Tab::PullRequest(_))
+        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_) | Tab::Prune(_) | Tab::PullRequest(_) | Tab::Grep(_))
     }
 
     pub fn unsaved(&self) -> Option<String> {
@@ -144,6 +146,7 @@ impl Tab {
             Tab::Agents(_) => "agents".into(),
             Tab::Review(_) => "review".into(),
             Tab::Prune(_) => "prune".into(),
+            Tab::Grep(_) => "grep".into(),
             Tab::File(v) if v.rev.is_none() => format!("file:{}", v.path),
             _ => return None,
         })
@@ -172,6 +175,7 @@ impl Tab {
             "agents" => Tab::Agents(Box::default()),
             "review" => Tab::Review(Box::default()),
             "prune" => Tab::Prune(Box::default()),
+            "grep" => Tab::Grep(Box::default()),
             other => Tab::file(other.strip_prefix("file:")?, None, None),
         })
     }

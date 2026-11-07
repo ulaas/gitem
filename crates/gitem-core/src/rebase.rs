@@ -16,6 +16,11 @@ pub enum RebaseAction {
 }
 
 impl RebaseAction {
+    /// Its commit gets applied, whatever else happens to its message or its neighbour.
+    pub fn replays(self) -> bool {
+        matches!(self, Self::Pick | Self::Reword | Self::Edit | Self::Squash | Self::Fixup)
+    }
+
     pub const CHOICES: [RebaseAction; 6] = [Self::Pick, Self::Reword, Self::Edit, Self::Squash, Self::Fixup, Self::Drop];
 
     pub fn keyword(self) -> &'static str {

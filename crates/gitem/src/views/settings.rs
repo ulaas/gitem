@@ -532,6 +532,14 @@ impl SettingsView {
         group(ui, "Files", p, |g| {
             g.stacked("Settings file", "", |ui| {
                 ui.add(egui::Label::new(RichText::new(Settings::path().display().to_string()).monospace().size(11.5).color(p.dim)).wrap());
+                ui.horizontal(|ui| {
+                    if ui.small_button("Export…").on_hover_text("A copy for another machine. Tokens and passwords aren't in it").clicked() {
+                        cx.form(export_settings_form(s.clone()));
+                    }
+                    if ui.small_button("Import…").on_hover_text("Takes on another copy's settings, and keeps what's open and recent here").clicked() {
+                        cx.form(import_settings_form());
+                    }
+                });
             });
             g.row("Reset preferences", "Back to how gitem came. Open and recent repositories, workspaces, favorites, and saved secrets stay.", |ui| {
                 if ui.button("Reset…").clicked() {
@@ -553,6 +561,8 @@ impl SettingsView {
             });
             g.switch(&mut s.prune_on_fetch, "Prune when fetching", "Removes remote branches that were deleted on the server.");
             g.switch(&mut s.pull_autostash, "Stash changes around a pull", "The toolbar's Pull puts uncommitted changes aside and brings them back after.");
+            g.switch(&mut s.recurse_submodules, "Bring submodules along", "Pull and check out also update submodules, as --recurse-submodules does.");
+            g.switch(&mut s.attention_when_done, "Flash the taskbar when something's done", "When something that took a while finishes, or anything fails, while you're in another window.");
         });
         group(ui, "Commits", p, |g| {
             g.switch(&mut s.commit_sign, "Sign commits", "On by default in the commit box.");
@@ -848,6 +858,28 @@ fn secret_form(title: &str, host: &'static str) -> FormDialog {
 }
 
 /// Register the `gitem://` scheme for this user only, without a shell.
+pub fn export_settings_form(current: Settings) -> crate::forms::FormDialog {
+    crate::forms::FormDialog::new("Export settings", "Export").new_file("path", "Save as", "").on_submit(move |v| {
+        let path = v.opt("path").ok_or("Choose where to save it.")?;
+        current.export_to(std::path::Path::new(&path)).map_err(|e| format!("Could not write {path}: {e}"))?;
+        Ok(vec![crate::action::Action::Toast(format!("Settings saved to {path}"))])
+    })
+}
+
+pub fn import_settings_form() -> crate::forms::FormDialog {
+    crate::forms::FormDialog::new("Import settings", "Import").danger().info("Replaces these settings with what the file says. What's open and recent here stays.").path("path", "File", "", false).on_submit(|v| {
+        let path = v.opt("path").ok_or("Choose a file.")?;
+        // Read here, so that a bad file is said in the form with nothing changed.
+        Settings::default().import_from(std::path::Path::new(&path))?;
+        Ok(vec![
+            crate::action::Action::Settings(Box::new(move |s| {
+                let _ = s.import_from(std::path::Path::new(&path));
+            })),
+            crate::action::Action::Toast("Settings imported".to_string()),
+        ])
+    })
+}
+
 pub fn register_links(exe: &str) -> Result<(), String> {
     let exe = exe.replace('/', "\\");
     let root = r"HKCU\Software\Classes\gitem";

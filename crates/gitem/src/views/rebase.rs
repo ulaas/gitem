@@ -12,6 +12,9 @@ use crate::task::Task;
 use crate::theme::Palette;
 use crate::widgets::*;
 
+/// The plan a dry run was for, and the commit it would stop at with the files in conflict.
+type Prediction = (String, Option<(String, Vec<String>)>);
+
 pub struct RebaseView {
     /// `None` means rebase from the root.
     base: Option<String>,
@@ -37,6 +40,8 @@ pub struct RebaseView {
     pub finished: Option<bool>,
     /// The plan as it came, to tell whether anyone has changed it.
     plan_as_loaded: String,
+    /// What a dry run found, and the plan it was for: changing the plan makes it out of date.
+    prediction: Task<Prediction>,
 }
 
 impl RebaseView {
@@ -59,6 +64,7 @@ impl RebaseView {
             selected: 0,
             finished: None,
             plan_as_loaded: String::new(),
+            prediction: Task::default(),
         }
     }
 
@@ -128,6 +134,7 @@ impl RebaseView {
                 }
             }
         self.planned_head.poll();
+        self.prediction.poll();
         if !self.started {
             self.load(&ui.ctx().clone(), cx);
         }
@@ -167,6 +174,17 @@ impl RebaseView {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.autostash, "Autostash");
                 ui.checkbox(&mut self.update_refs, "Update dependent branches");
+                let can_check = self.base.is_some() && !self.items.is_empty() && !self.prediction.busy();
+                if ui.add_enabled(can_check, egui::Button::new("Check for conflicts").small()).on_hover_text("Tries the plan out without touching anything").on_disabled_hover_text("Pick a base with commits to replay first.").clicked()
+                    && let Some(base) = self.base.clone()
+                {
+                    let (repo, plan) = (cx.repo.clone(), rebase::render_todo(&self.items));
+                    let shas: Vec<String> = self.items.iter().filter(|i| i.action.replays()).map(|i| i.sha.clone()).collect();
+                    self.prediction.spawn(ui.ctx(), move || repo.predict_replay(&base, &shas).map(|found| (plan, found)).map_err(|e| e.to_string()));
+                }
+                if self.prediction.busy() {
+                    ui.add(spinner(14.0));
+                }
                 ui.label(RichText::new("Merge commits aren't kept: a rebase replays them as linear history.").small().color(p.faint));
             });
             if self.stale {
@@ -180,6 +198,27 @@ impl RebaseView {
         }
         if let Some(e) = &self.loaded.error {
             error_box(ui, e, &p);
+        }
+        if let Some(e) = &self.prediction.error {
+            ui.colored_label(p.warn, format!("Couldn't check for conflicts: {e}"));
+        }
+        if let Some((_, found)) = self.prediction.get().filter(|(plan, _)| *plan == rebase::render_todo(&self.items)) {
+            match found {
+                None => {
+                    ui.colored_label(p.good, "No conflicts expected.");
+                }
+                Some((sha, files)) => {
+                    let which = self.items.iter().find(|i| i.sha == *sha).map_or(sha.as_str(), |i| i.text.as_str());
+                    ui.colored_label(p.warn, format!("\"{which}\" will conflict in {}. Anything after that depends on how it's resolved.", files.join(", ")));
+                }
+            }
+        }
+        if self.todo_file.is_none()
+            && let Some(st) = cx.status()
+            && let Some(up) = &st.upstream
+            && (st.ahead as usize) < self.items.len()
+        {
+            ui.colored_label(p.warn, format!("{} already on {up}. Rewriting them means the next push has to overwrite it.", plural(self.items.len() - st.ahead as usize, "of these commits is", "of these commits are")));
         }
         ui.horizontal(|ui| {
             // With nothing in the plan, these have nothing to work on.

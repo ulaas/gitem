@@ -115,6 +115,11 @@ impl FormDialog {
         self.fields.push(Field::Multiline { key, label: label.into(), value: value.into() });
         self
     }
+    /// A check box only where it means something. Without it, `on` says false.
+    pub fn check_if(self, when: bool, key: &'static str, label: &str, value: bool) -> Self {
+        if when { self.check(key, label, value) } else { self }
+    }
+
     pub fn check(mut self, key: &'static str, label: &str, value: bool) -> Self {
         self.fields.push(Field::Check { key, label: label.into(), value });
         self
@@ -642,6 +647,11 @@ pub fn pull_form() -> FormDialog {
 }
 
 pub fn push_form(branch: Option<String>, remotes: Vec<String>, has_upstream: bool, confirm_force: bool) -> FormDialog {
+    push_form_guarding(branch, remotes, has_upstream, confirm_force, String::new())
+}
+
+/// With the default branch named, a force push of it is asked about, lease or no lease.
+pub fn push_form_guarding(branch: Option<String>, remotes: Vec<String>, has_upstream: bool, confirm_force: bool, base: String) -> FormDialog {
     let default_remote = remotes.iter().position(|r| r == "origin").unwrap_or(0);
     let mut f = FormDialog::new(if has_upstream { "Push" } else { "Publish branch" }, if has_upstream { "Push" } else { "Publish" });
     f.fields.push(Field::Choice { key: "remote", label: "Remote".into(), options: remotes, value: default_remote });
@@ -665,6 +675,12 @@ pub fn push_form(branch: Option<String>, remotes: Vec<String>, has_upstream: boo
                 tags: v.on("tags"),
                 no_verify: v.on("no_verify"),
             });
+            // Whatever the name of the check box: everyone else starts from this branch.
+            let on_base = v.opt("branch").is_some_and(|b| b == base);
+            if (v.on("force") || v.on("lease")) && on_base && confirm_force {
+                let remote = v.opt("remote").unwrap_or_else(|| "its remote".to_string());
+                return Ok(vec![Action::Confirm { title: "Rewrite the default branch".into(), body: format!("{base} is this repository's default branch, and everyone else's work starts from it. Force pushing it to {remote} rewrites that history for them too."), label: "Force push".into(), op }]);
+            }
             if v.on("force") && confirm_force {
                 let (branch, remote) = (v.opt("branch").unwrap_or_else(|| "the current branch".to_string()), v.opt("remote").unwrap_or_else(|| "its remote".to_string()));
                 return Ok(vec![Action::Confirm { title: "Force push".into(), body: format!("Force push {branch} to {remote}? This replaces the branch there, including any commits others have pushed."), label: "Force push".into(), op }]);

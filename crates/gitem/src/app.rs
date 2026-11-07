@@ -29,7 +29,7 @@ use crate::widgets::*;
 enum OpMsg {
     Line(String),
     /// How to take it back, now that it has worked.
-    Undo(gitem_core::undo::UndoEntry),
+    Undo(Box<gitem_core::undo::UndoEntry>),
     /// Why this one will have no way back, said before it runs.
     NoUndo(String),
     Done(Result<String, String>),
@@ -57,6 +57,7 @@ struct Running {
     asking_to_stop: bool,
     /// How to take it back, once it has worked.
     undo: Option<gitem_core::undo::UndoEntry>,
+    then: Option<Action>,
 }
 
 /// A fetch only updates remote-tracking refs, and can simply be done again.
@@ -92,12 +93,12 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
             && let (Some(c), Some(dir)) = (captured, &cwd)
             && let Some(entry) = c.into_entry(&git, dir)
         {
-            let _ = tx.send(OpMsg::Undo(entry));
+            let _ = tx.send(OpMsg::Undo(Box::new(entry)));
         }
         let _ = tx.send(OpMsg::Done(res));
         ctx2.request_repaint();
     });
-    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, is_commit, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false, undo: None }
+    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, is_commit, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false, undo: None, then: None }
 }
 
 /// A write waiting its turn. `batch` tells what was asked for together: the steps of one
@@ -106,6 +107,8 @@ struct Queued {
     op: GitOp,
     open_after: Option<PathBuf>,
     batch: u64,
+    /// What to do next if this works.
+    then: Option<Action>,
 }
 
 /// Something done for the user without being asked, beside the queue. It never holds up
@@ -164,6 +167,8 @@ pub struct RepoTab {
     undoable: Option<String>,
     /// The way back from the last thing done, other than a commit.
     undo_entry: Option<gitem_core::undo::UndoEntry>,
+    /// Something long finished, or anything failed, with the window in the background.
+    attention_due: bool,
     /// What there isn't room for beside the view at this window size.
     squeeze: Squeeze,
     /// Which of those is being shown over the view.
@@ -258,6 +263,7 @@ impl RepoTab {
             recent_branches: Vec::new(),
             undoable: None,
             undo_entry: None,
+            attention_due: false,
             squeeze: Squeeze::default(),
             peek: None,
             more_tab: None,
@@ -345,7 +351,7 @@ impl RepoTab {
             loop {
                 match r.rx.try_recv() {
                     Ok(OpMsg::Line(l)) => r.last_line = l,
-                    Ok(OpMsg::Undo(entry)) => r.undo = Some(entry),
+                    Ok(OpMsg::Undo(entry)) => r.undo = Some(*entry),
                     Ok(OpMsg::NoUndo(why)) => out.push(Action::Toast(why)),
                     Ok(OpMsg::Done(res)) => {
                         done = Some(res);
@@ -369,6 +375,10 @@ impl RepoTab {
                     self.undo_entry = r.undo.take();
                 }
                 let (own_config, batch) = (r.own_config, r.batch);
+                if wants_attention(r.started.elapsed(), res.is_err(), ctx.input(|i| i.focused)) {
+                    self.attention_due = true;
+                }
+                let then = r.then.take();
                 self.running = None;
                 // A pull can bring in config through a tracked `include.path`.
                 if let Err(e) = self.repo.recheck_trust(own_config) {
@@ -381,6 +391,7 @@ impl RepoTab {
                         if let Some(p) = open_after {
                             out.push(Action::OpenRepo(p));
                         }
+                        out.extend(then);
                         if !note.is_empty() || self.queue.is_empty() {
                             out.push(Action::Toast(ops::done_message(&title, &note)));
                         }
@@ -420,13 +431,14 @@ impl RepoTab {
             && let Some(q) = self.queue.pop_front() {
                 let mut running = spawn_op(ctx, self.repo.git.clone(), Some(self.repo.root.clone()), q.op, q.open_after);
                 running.batch = q.batch;
+                running.then = q.then;
                 self.running = Some(running);
             }
     }
 
     /// Runs an op as a button would. For tests of what follows it.
     pub fn queue_for_test(&mut self, op: GitOp) {
-        self.queue.push_back(Queued { op, open_after: None, batch: 0 });
+        self.queue.push_back(Queued { op, open_after: None, batch: 0, then: None });
     }
 
     /// What closing an open tab would lose. For tests.
@@ -1530,12 +1542,13 @@ impl GitemApp {
         match a {
             Action::Run(op) => {
                 let batch = self.frame_no;
+                let op = if self.settings.recurse_submodules { ops::recursing_submodules(op) } else { op };
                 if let Some(r) = self.repos.get_mut(self.active) {
                     // Two of the same in one frame are two parts of one action.
                     let doubled = r.last_asked.as_ref().is_some_and(|(last, at)| same_op(last, &op) && at.elapsed() < DOUBLE_CLICK && r.queue.back().is_none_or(|q| q.batch != batch));
                     r.last_asked = Some((op.clone(), Instant::now()));
                     if !doubled {
-                        r.queue.push_back(Queued { op, open_after: None, batch });
+                        r.queue.push_back(Queued { op, open_after: None, batch, then: None });
                     }
                 } else {
                     self.global_queue.push_back((op, None));
@@ -1544,7 +1557,7 @@ impl GitemApp {
             Action::RunThenOpen(op, path) => {
                 let batch = self.frame_no;
                 if let Some(r) = self.repos.get_mut(self.active) {
-                    r.queue.push_back(Queued { op, open_after: Some(path), batch });
+                    r.queue.push_back(Queued { op, open_after: Some(path), batch, then: None });
                 } else {
                     self.global_queue.push_back((op, Some(path)));
                 }
@@ -1731,6 +1744,13 @@ impl GitemApp {
             Action::OpenFromMore(t) => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.open_from_more(t);
+                }
+            }
+            Action::RunThen(op, then) => {
+                let batch = self.frame_no;
+                let op = if self.settings.recurse_submodules { ops::recursing_submodules(op) } else { op };
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    r.queue.push_back(Queued { op, open_after: None, batch, then: Some(*then) });
                 }
             }
             Action::UndoLast => {
@@ -2025,13 +2045,13 @@ impl GitemApp {
                     let names: Vec<&str> = remotes.iter().map(String::as_str).collect();
                     out.push(Action::Run(ops::push_to_upstream(branch.as_deref(), upstream.as_deref(), &names)));
                 } else {
-                    out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), false, self.settings.confirm_destructive)));
+                    out.push(Action::Form(forms::push_form_guarding(branch.clone(), remotes.clone(), false, self.settings.confirm_destructive, tab.data.base_branch())));
                 }
             }
             let push_more = ui.small_button(chrome::icon::CARET_DOWN);
             push_more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Push options"));
             if push_more.on_hover_text("Push options").clicked() {
-                out.push(Action::Form(forms::push_form(branch.clone(), remotes.clone(), upstream.is_some(), self.settings.confirm_destructive)));
+                out.push(Action::Form(forms::push_form_guarding(branch.clone(), remotes.clone(), upstream.is_some(), self.settings.confirm_destructive, tab.data.base_branch())));
             }
             ui.separator();
             if chrome::tool_button(ui, chrome::icon::ARCHIVE, p.series[6], crate::i18n::t("Stash"), "Stash changes", false, &p).clicked() {
@@ -2045,10 +2065,10 @@ impl GitemApp {
                 if chrome::tool_button(ui, chrome::icon::ARROW_COUNTER_CLOCKWISE, p.dim, &name, "Take it back, keeping its changes staged", false, &p).clicked() {
                     out.push(crate::menus::undo_commit_action(&tab.repo, tab.data.status.get().is_some_and(|s| s.upstream.is_some() && s.ahead == 0), self.settings.confirm_destructive));
                 }
-            } else if let Some(entry) = tab.undo_entry.clone() {
-                if chrome::tool_button(ui, chrome::icon::ARROW_COUNTER_CLOCKWISE, p.dim, &entry.label, &entry.detail, false, &p).clicked() {
-                    out.push(undo_action(&tab.repo, entry, self.settings.confirm_destructive));
-                }
+            } else if let Some(entry) = tab.undo_entry.clone()
+                && chrome::tool_button(ui, chrome::icon::ARROW_COUNTER_CLOCKWISE, p.dim, &entry.label, &entry.detail, false, &p).clicked()
+            {
+                out.push(undo_action(&tab.repo, entry, self.settings.confirm_destructive));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Shown over the view when there's no room to put them beside it.
@@ -2115,6 +2135,7 @@ impl GitemApp {
             ui.add_space(4.0);
             ui.label(RichText::new("gitem").size(30.0).strong());
             ui.label(RichText::new("A Git client. Open a repository, clone one, or start a new one.").color(p.dim));
+            ui.label(RichText::new("Once one is open: Ctrl+P finds any command, and F1 lists the keys and the words used here.").small().color(p.faint));
             ui.add_space(14.0);
             if let Err(e) = &self.git {
                 error_box(ui, e, &p);
@@ -2898,6 +2919,15 @@ impl GitemApp {
         self.apply_ca_file(&ctx);
         self.look_for_updates(&ctx);
         self.handle_shot(ui);
+        // The window flashes in the taskbar until it's looked at. No more than that: a pop-up on
+        // every fetch would be the reason to turn it off.
+        let mut flash = false;
+        for r in &mut self.repos {
+            flash |= std::mem::take(&mut r.attention_due);
+        }
+        if flash && self.settings.attention_when_done {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+        }
         self.check_window_close(&ctx);
         let mut out: Vec<Action> = Vec::new();
         // egui's own Ctrl+Plus and Ctrl+Minus change this without telling anyone.
@@ -3200,6 +3230,20 @@ impl eframe::App for GitemApp {
     fn on_exit(&mut self) {
         self.save_settings();
     }
+}
+
+/// A long job finishing, or anything failing, while you're working elsewhere is worth a mention.
+fn wants_attention(took: Duration, failed: bool, focused: bool) -> bool {
+    !focused && (failed || took >= Duration::from_secs(10))
+}
+
+#[test]
+fn only_what_finishes_out_of_sight_and_matters_asks_for_attention() {
+    let (short, long) = (Duration::from_secs(1), Duration::from_secs(30));
+    assert!(!wants_attention(long, true, true), "you're looking at it");
+    assert!(!wants_attention(short, false, false), "a moment's work");
+    assert!(wants_attention(long, false, false));
+    assert!(wants_attention(short, true, false));
 }
 
 /// Reads whether it can still be done, off the UI thread, then does it.

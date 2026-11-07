@@ -461,6 +461,14 @@ impl LaunchpadView {
                     && here && ui.small_button("Rebase stack").on_hover_text(format!("Rebase onto {}, moving the branches between with it", parent.head)).clicked() {
                         cx.form(forms::rebase_stack_form(parent.head.clone()));
                     }
+                let stack = stack_of(pr, all);
+                if here && stack.len() > 1 && ui.small_button("Push stack…").on_hover_text("Force-with-lease every branch below this one, all or none. For after a rebase moved them").clicked() {
+                    cx.confirm("Push the stack", &format!("Push {} to {remote} with force-with-lease? It only overwrites what was last fetched from there, and either all of them go or none does.", stack.join(", ")), "Push stack", ops::push_stack(&remote, &stack));
+                }
+                let agent = cx.settings.agent_command.clone();
+                if here && !agent.trim().is_empty() && ui.small_button("Review with agent").on_hover_text(format!("Run {agent} here, in a new terminal")).clicked() {
+                    cx.out.push(Action::OpenTerminal(cx.repo.root.clone(), Some(agent)));
+                }
                 if let Some(r) = repo {
                     let n = pr.number;
                     // A host refuses your own, and saying so here beats a failed request.
@@ -536,7 +544,7 @@ impl LaunchpadView {
                     ui.horizontal(|ui| {
                         if ui.small_button("Start work…").on_hover_text("Create a branch or worktree for this issue").clicked() {
                             let base = cx.data.refs.get().and_then(|r| r.default_branch.clone());
-                            cx.form(start_work_form(cx.repo, i, &cx.settings.start_work_format, base));
+                            cx.form(start_work_form_with_agent(cx.repo, i, &cx.settings.start_work_format, base, &cx.settings.agent_command));
                         }
                         if ui.small_button("Open").clicked() {
                             cx.url(i.url.clone());
@@ -633,6 +641,21 @@ impl LaunchpadView {
     }
 }
 
+/// The branches of a stack from its bottom up to this pull request, following each one's base to
+/// the pull request whose branch that is. Only branches in this repository.
+pub fn stack_of(pr: &PullRequest, all: &[PullRequest]) -> Vec<String> {
+    let mut chain = vec![pr.head.clone()];
+    let mut at = pr;
+    while let Some(parent) = all.iter().find(|x| !x.from_fork && x.head == at.base) {
+        if chain.contains(&parent.head) {
+            break;
+        }
+        chain.insert(0, parent.head.clone());
+        at = parent;
+    }
+    chain
+}
+
 /// A host that sends no date for it gets none shown, rather than one from 1970.
 fn when(ts: i64, relative: bool) -> Option<String> {
     (ts > 0).then(|| time_label(ts, relative))
@@ -651,23 +674,41 @@ fn issue_line(i: &Issue, relative: bool) -> String {
 }
 
 pub fn start_work_form(repo: &gitem_core::Repo, i: &Issue, format: &str, base: Option<String>) -> FormDialog {
+    start_work_form_with_agent(repo, i, format, base, "")
+}
+
+/// With a coding agent set up, it can start there too. Only the command from settings goes to the
+/// terminal: the issue's words came from elsewhere, and a shell would run what's in them.
+pub fn start_work_form_with_agent(repo: &gitem_core::Repo, i: &Issue, format: &str, base: Option<String>, agent: &str) -> FormDialog {
     let name = i.branch_name_as(format);
     let base = base.unwrap_or_else(|| "HEAD".to_string());
     let wt = repo.root.parent().map(|x| x.join(format!("{}.worktrees/{name}", repo.name()))).unwrap_or_default().to_string_lossy().replace('\\', "/");
+    let (agent_command, root) = (agent.to_string(), repo.root.clone());
     FormDialog::new(format!("Start work on {}", i.id), "Start")
         .info(i.title.clone())
         .text("name", "Branch name", &name)
         .text("base", "Based on", &base)
         .check("worktree", "Use a new worktree", false)
         .path("path", "Worktree location", &wt, true)
-        .on_submit(|v| {
+        .check_if(!agent.trim().is_empty(), "agent", &format!("Start {agent} there, in a new terminal"), false)
+        .on_submit(move |v| {
             let n = v.opt("name").ok_or("A branch name is required.")?;
             let b = v.opt("base");
+            let with_agent = v.on("agent").then(|| agent_command.clone());
             Ok(if v.on("worktree") {
                 let p = v.opt("path").ok_or("A worktree location is required.")?;
-                vec![Action::RunThenOpen(ops::worktree_start_work(&p, &n, b.as_deref()), p.into())]
+                let op = ops::worktree_start_work(&p, &n, b.as_deref());
+                match with_agent {
+                    // Opening it comes first, or a terminal would look for a folder not yet there.
+                    Some(a) => vec![Action::RunThen(op, Box::new(Action::Many(vec![Action::OpenRepo(p.clone().into()), Action::OpenTerminal(p.into(), Some(a))])))],
+                    None => vec![Action::RunThenOpen(op, p.into())],
+                }
             } else {
-                vec![Action::Run(ops::branch_start_work(&n, b.as_deref()))]
+                let op = ops::branch_start_work(&n, b.as_deref());
+                match with_agent {
+                    Some(a) => vec![Action::RunThen(op, Box::new(Action::OpenTerminal(root.clone(), Some(a))))],
+                    None => vec![Action::Run(op)],
+                }
             })
         })
 }
@@ -778,5 +819,15 @@ mod tests {
         assert!(card_line(&dated, true).contains("ago"), "{}", card_line(&dated, true));
         let i = Issue { source: "Jira".into(), state: "Open".into(), ..Default::default() };
         assert_eq!(issue_line(&i, true), "Jira · Open");
+    }
+
+    #[test]
+    fn a_stack_runs_from_its_bottom_to_this_one_and_stops_at_a_fork_or_a_loop() {
+        let pr = |n, head: &str, base: &str| PullRequest { number: n, head: head.into(), base: base.into(), ..Default::default() };
+        let all = vec![pr(1, "a", "main"), pr(2, "b", "a"), pr(3, "c", "b"), PullRequest { from_fork: true, ..pr(4, "main", "x") }];
+        assert_eq!(stack_of(&all[2], &all), ["a", "b", "c"]);
+        assert_eq!(stack_of(&all[0], &all), ["a"]);
+        let round = vec![pr(1, "a", "b"), pr(2, "b", "a")];
+        assert_eq!(stack_of(&round[0], &round), ["b", "a"]);
     }
 }

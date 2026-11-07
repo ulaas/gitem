@@ -167,8 +167,8 @@ impl Captured {
                     detail.push_str(" Your uncommitted changes come back too.");
                 }
                 // Undoing an undo is a redo, and needs no more than this.
-                if label.starts_with("Undo ") {
-                    op = op.undoable(UndoPlan::MoveHead { label: format!("Redo {}", &label["Undo ".len()..]), how, snapshot: false });
+                if let Some(what) = label.strip_prefix("Undo ") {
+                    op = op.undoable(UndoPlan::MoveHead { label: format!("Redo {what}"), how, snapshot: false });
                 }
                 Some(UndoEntry { label, detail, op: op.lossless(), check: Check::Head { branch, sha: now } })
             }

@@ -142,7 +142,7 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Git", "Push…", |cx| {
         let r = cx.data.remotes().iter().map(|x| x.name.clone()).collect();
         let has = cx.status().is_some_and(|s| s.upstream.is_some());
-        cx.form(forms::push_form(cx.current_branch(), r, has, cx.settings.confirm_destructive));
+        cx.form(forms::push_form_guarding(cx.current_branch(), r, has, cx.settings.confirm_destructive, cx.data.base_branch()));
     }));
     v.push(item("Git", "Create Branch…", |cx| cx.form(forms::new_branch(None))));
     v.push(item("Git", "Create Tag…", |cx| cx.form(forms::new_tag(None))));
@@ -275,6 +275,7 @@ pub fn commands() -> Vec<Item> {
         }));
     }));
     v.push(item("Git", "Fetch the Full History", |cx| cx.run(ops::unshallow())));
+    view!("Search File Contents", Tab::Grep(Box::default()));
     v.push(item("App", "Change Theme…", |cx| {
         use gitem_core::settings::ThemeChoice;
         let names: Vec<&str> = ThemeChoice::ALL.iter().map(|t| t.name()).collect();

@@ -54,6 +54,15 @@ struct Prepared {
     marked: HashMap<(usize, usize), String>,
 }
 
+/// The rows holding `q`, already lower case, as they're laid out. Ascending.
+fn find_rows(pr: &Prepared, unified: bool, q: &str) -> Vec<usize> {
+    if unified {
+        pr.unified_texts.iter().enumerate().filter(|(_, t)| t.as_ref().is_some_and(|t| t.to_lowercase().contains(q))).map(|(i, _)| i).collect()
+    } else {
+        pr.side.iter().enumerate().filter(|(_, r)| [&r.left, &r.right].into_iter().flatten().any(|(_, t)| t.to_lowercase().contains(q))).map(|(i, _)| i).collect()
+    }
+}
+
 fn prepare(f: &FileDiff, dark: bool) -> Prepared {
     let side = diff::side_by_side(f);
     let mut words = HashMap::new();
@@ -164,6 +173,14 @@ pub struct DiffView {
     /// What the selection was made on, to tell whether a reload changed anything under it.
     selected_on: Option<(usize, Vec<diff::Hunk>)>,
     scroll_to_row: Option<usize>,
+    /// A row of the unified list, for a match found there.
+    scroll_to_unified: Option<usize>,
+    find_open: bool,
+    find: String,
+    /// Rows with a match, in the layout showing, and which of them is current.
+    find_hits: Vec<usize>,
+    find_pos: usize,
+    find_key: Option<(String, usize, bool, bool)>,
     images: ImagePair,
     wrap_key: String,
     dark: Option<bool>,
@@ -200,6 +217,12 @@ impl DiffView {
             selected_lines: HashSet::new(),
             selected_on: None,
             scroll_to_row: None,
+            scroll_to_unified: None,
+            find_open: false,
+            find: String::new(),
+            find_hits: Vec::new(),
+            find_pos: 0,
+            find_key: None,
             images: ImagePair::default(),
             wrap_key: String::new(),
             dark: None,
@@ -327,6 +350,7 @@ impl DiffView {
         }
 
         self.toolbar(ui, cx);
+        self.find_bar(ui, cx);
         ui.separator();
 
         if let Some(e) = &self.files.error {
@@ -471,6 +495,79 @@ impl DiffView {
         });
         if reload {
             self.reload(&ui.ctx().clone(), cx);
+        }
+    }
+
+    fn find_bar(&mut self, ui: &mut Ui, cx: &Cx) {
+        if cx.in_front && !cx.dialog_open && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+            self.find_open = !self.find_open;
+        }
+        if !self.find_open {
+            return;
+        }
+        let mut changed = false;
+        let mut step = 0;
+        ui.horizontal(|ui| {
+            let r = ui.add(crate::widgets::input(&mut self.find).hint_text("Find in this file's diff").desired_width(240.0));
+            changed = r.changed();
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                step = 1;
+                r.request_focus();
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::F3)) {
+                step = if ui.input(|i| i.modifiers.shift) { -1 } else { 1 };
+            }
+            if small_icon_button(ui, "\u{E13C}", "Previous match", "Shift+F3").clicked() {
+                step = -1;
+            }
+            if small_icon_button(ui, "\u{E136}", "Next match", "F3").clicked() {
+                step = 1;
+            }
+            let says = if self.find.is_empty() { String::new() } else if self.find_hits.is_empty() { "No matches".to_string() } else { format!("{} of {}", self.find_pos + 1, self.find_hits.len()) };
+            ui.label(RichText::new(says).small().color(cx.pal.dim));
+            if ui.small_button("Close").clicked() {
+                self.find_open = false;
+                self.find_hits.clear();
+            }
+        });
+        // Each frame only while the answer can change: the text, the file or the layout.
+        let key = (self.find.clone(), self.selected_file, self.mode == Mode::Unified, self.files.get().is_some());
+        if changed || self.find_key.as_ref() != Some(&key) {
+            self.find_key = Some(key);
+            self.update_find();
+        }
+        if step != 0 && !self.find_hits.is_empty() {
+            let n = self.find_hits.len() as i32;
+            self.find_pos = (self.find_pos as i32 + step).rem_euclid(n) as usize;
+            self.scroll_to_hit();
+        }
+    }
+
+    fn update_find(&mut self) {
+        self.find_hits.clear();
+        self.find_pos = 0;
+        let q = self.find.to_lowercase();
+        if q.is_empty() {
+            return;
+        }
+        let hits = self.files.get().and_then(|l| l.prepared.get(&self.selected_file)).map(|pr| find_rows(pr, self.mode == Mode::Unified, &q));
+        self.find_hits = hits.unwrap_or_default();
+        self.scroll_to_hit();
+    }
+
+    fn scroll_to_hit(&mut self) {
+        let Some(&row) = self.find_hits.get(self.find_pos) else { return };
+        if self.mode == Mode::Unified && !self.wrap {
+            self.scroll_to_unified = Some(row);
+        } else {
+            self.scroll_to_row = Some(row);
+        }
+    }
+
+    fn paint_hit(&self, ui: &Ui, rect: Rect, i: usize, pal: &crate::theme::Palette) {
+        if self.find_hits.binary_search(&i).is_ok() {
+            let current = self.find_hits.get(self.find_pos) == Some(&i);
+            ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(if current { 2.0 } else { 1.0 }, if current { pal.accent } else { pal.accent.gamma_multiply(0.5) }), egui::StrokeKind::Inside);
         }
     }
 
@@ -758,6 +855,7 @@ impl DiffView {
         let rrect = Rect::from_min_size(pos2(rect.left() + half + 1.0, rect.top()), vec2(half - 1.0, rect.height()));
         let id = ui.id().with(("row", i));
         self.draw_cell(ui, pal, lrect, r.left.as_ref().map(|x| x.0), r.left.as_ref().map(|x| x.1.as_str()), r.left_kind, r.left_idx.map(|l| (r.hunk, l)), pr, font, gutter, scroll_x, id.with("l"));
+        self.paint_hit(ui, rect, i, pal);
         self.draw_cell(ui, pal, rrect, r.right.as_ref().map(|x| x.0), r.right.as_ref().map(|x| x.1.as_str()), r.right_kind, r.right_idx.map(|l| (r.hunk, l)), pr, font, gutter, scroll_x, id.with("r"));
     }
 
@@ -827,7 +925,9 @@ impl DiffView {
         }
         let width = ((max_chars as f32 * char_w) + gutter + 24.0).max(ui.available_width() - 10.0);
         let mut sa = egui::ScrollArea::both().id_salt(("unified", self.selected_file)).auto_shrink([false, false]);
-        if let Some(r) = self.scroll_to_row.take() {
+        if let Some(y) = self.scroll_to_unified.take() {
+            sa = sa.vertical_scroll_offset((y as f32 * row_h - 40.0).max(0.0));
+        } else if let Some(r) = self.scroll_to_row.take() {
             // The stored index is a side-by-side row; map through its hunk.
             let hunk = pr.side.get(r).map(|x| x.hunk).unwrap_or(0);
             let y = rows.iter().position(|x| x.0 == hunk && x.1.is_none()).unwrap_or(0);
@@ -840,6 +940,7 @@ impl DiffView {
             for i in range {
                 let (rect, _) = ui.allocate_exact_size(vec2(width, row_h), Sense::hover());
                 self.unified_row(ui, cx, f, pr, rect, i, gutter, font, &pal);
+                self.paint_hit(ui, rect, i, &pal);
             }
         });
     }

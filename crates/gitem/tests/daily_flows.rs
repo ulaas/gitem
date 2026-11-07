@@ -502,3 +502,208 @@ fn zen_mode_comes_through_its_own_action() {
     h.state_mut().apply_action(&ctx, gitem::action::Action::ToggleZen);
     assert!(h.state().repos[0].panels_showing());
 }
+
+#[test]
+fn searching_contents_opens_the_file_and_works_at_a_revision() {
+    let f = Fx::new();
+    f.write("src.txt", "alpha\nneedle here\nomega\n");
+    f.commit("with a needle");
+    f.write("src.txt", "alpha\nomega\n");
+    f.commit("without it");
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    assert!(repo.grep("needle", None, false, false).unwrap().is_empty());
+    let found = repo.grep("NEEDLE", Some("HEAD~1"), true, false).unwrap();
+    assert_eq!(found, vec![gitem_core::repo::GrepHit { path: "src.txt".into(), line: 2, text: "needle here".into() }]);
+    assert_eq!(repo.grep("n[e]+dle", Some("HEAD~1"), false, true).unwrap().len(), 1);
+    assert!(repo.grep("n[e]+dle", Some("HEAD~1"), false, false).unwrap().is_empty(), "plain text unless asked");
+    assert!(repo.grep("x", Some("--output=evil"), false, false).is_err(), "a revision can't be an option");
+
+    let mut h = f.harness(|_| {});
+    h.state_mut().repos[0].open_tab(Tab::Grep(Box::new(gitem::views::grep::GrepView::looking_for("needle", "HEAD~1"))));
+    h.step();
+    wait_for(&mut h, "the view", |h| h.query_all_by_label("Search").count() > 1);
+    h.query_all_by_label("Search").last().unwrap().click();
+    h.step();
+    wait_for_label(&mut h, "src.txt:2");
+    click(&mut h, "src.txt:2");
+    settle(&mut h);
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(v) if v.path == "src.txt" && v.rev.as_deref() == Some("HEAD~1"))), "at the revision it was found in");
+}
+
+#[test]
+fn a_commit_template_and_recent_messages_are_there_to_use() {
+    let f = Fx::new();
+    let t = f.beside("tmpl.txt");
+    std::fs::write(&t, "# a comment\nfeat: \n\nBecause\n").unwrap();
+    f.git(&["config", "commit.template", &t.to_string_lossy().replace('\\', "/")]);
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    assert_eq!(repo.commit_template().as_deref(), Some("feat: \n\nBecause"));
+    assert_eq!(repo.recent_messages(5).unwrap(), vec!["first".to_string()]);
+    f.write("a.txt", "b\n");
+    f.git(&["add", "-A"]);
+    f.git(&["commit", "-q", "-m", "first"]);
+    f.write("a.txt", "c\n");
+    f.git(&["add", "-A"]);
+    f.git(&["commit", "-q", "--author=Someone <s@example.com>", "-m", "not mine"]);
+    assert_eq!(repo.recent_messages(5).unwrap(), vec!["first".to_string()], "repeats go, and others' too");
+}
+
+#[test]
+fn amend_can_reset_author_and_date() {
+    let f = Fx::new();
+    f.git(&["commit", "-q", "--amend", "--no-edit", "--author=Other <o@example.com>", "--date=2001-01-01T00:00:00"]);
+    let run = |o: gitem_core::ops::CommitOpts| gitem_core::ops::commit(&o).run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap();
+    run(gitem_core::ops::CommitOpts { message: "m".into(), amend: true, reset_date: true, ..Default::default() });
+    let (who, year) = (f.git(&["log", "-1", "--format=%ae"]), f.git(&["log", "-1", "--format=%ad", "--date=format:%Y"]));
+    assert_eq!(who.trim(), "o@example.com");
+    assert_ne!(year.trim(), "2001");
+    run(gitem_core::ops::CommitOpts { message: "m".into(), amend: true, reset_author: true, ..Default::default() });
+    assert_eq!(f.git(&["log", "-1", "--format=%ae"]).trim(), "test@example.com");
+}
+
+#[test]
+fn amending_a_pushed_commit_says_what_that_means() {
+    let f = Fx::new();
+    let bare = f.beside("r.git");
+    f.git.run(None, &["init", "-q", "--bare", "-b", "main", &bare.to_string_lossy().replace('\\', "/")]).unwrap();
+    f.git(&["remote", "add", "origin", &bare.to_string_lossy().replace('\\', "/")]);
+    f.git(&["push", "-q", "-u", "origin", "main"]);
+    let mut h = f.harness(|_| {});
+    open(&mut h, Tab::changes());
+    click(&mut h, "Amend");
+    wait_for_text(&mut h, "already on origin/main");
+}
+
+#[test]
+fn a_force_push_of_the_default_branch_is_asked_about_even_with_a_lease() {
+    use gitem::action::Action;
+    let mut form = gitem::forms::push_form_guarding(Some("main".into()), vec!["origin".into()], true, true, "main".into());
+    form.set_for_test("lease", "1");
+    let got = form.submit_for_test().unwrap();
+    assert!(matches!(&got[0], Action::Confirm { title, .. } if title == "Rewrite the default branch"));
+    let mut other = gitem::forms::push_form_guarding(Some("topic".into()), vec!["origin".into()], true, true, "main".into());
+    other.set_for_test("lease", "1");
+    assert!(matches!(&other.submit_for_test().unwrap()[0], Action::Run(_)), "any other branch goes straight through");
+}
+
+#[test]
+fn start_work_can_start_the_agent_and_only_its_own_command_reaches_the_terminal() {
+    use gitem::action::Action;
+    let f = Fx::new();
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    let issue = gitem_core::forge::Issue { id: "#5".into(), title: "& del everything".into(), ..Default::default() };
+    let mut form = gitem::views::launchpad::start_work_form_with_agent(&repo, &issue, "", None, "fake-agent");
+    form.set_for_test("agent", "1");
+    let got = form.submit_for_test().unwrap();
+    let Action::RunThen(_, then) = &got[0] else { panic!("the agent starts after the branch does") };
+    let Action::OpenTerminal(dir, Some(cmd)) = &**then else { panic!("a terminal") };
+    assert_eq!(cmd, "fake-agent");
+    assert_eq!(dir, &repo.root);
+    let mut plain = gitem::views::launchpad::start_work_form_with_agent(&repo, &issue, "", None, "");
+    assert!(matches!(&plain.submit_for_test().unwrap()[0], Action::Run(_)));
+}
+
+#[test]
+fn run_then_goes_on_only_if_it_worked() {
+    use gitem::action::Action;
+    let f = Fx::new();
+    let mut h = f.harness(|_| {});
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::RunThen(gitem_core::ops::branch_create("made", None, false), Box::new(Action::Toast("then this".into()))));
+    wait_for_text(&mut h, "then this");
+    settle(&mut h);
+    h.state_mut().apply_action(&ctx, Action::RunThen(gitem_core::ops::branch_create("made", None, false), Box::new(Action::Toast("not this".into()))));
+    settle(&mut h);
+    assert!(h.query_by_label_contains("not this").is_none());
+    assert!(!h.state().errors_showing().is_empty());
+}
+
+#[test]
+fn settings_export_and_import_keep_what_belongs_here() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("copy.json");
+    let there = Settings { start_work_format: "x-${id}".into(), recent_repos: vec!["there".into()], ..Default::default() };
+    there.export_to(&file).unwrap();
+    let mut here = Settings { recent_repos: vec!["here".into()], ..Default::default() };
+    here.import_from(&file).unwrap();
+    assert_eq!(here.start_work_format, "x-${id}");
+    assert_eq!(here.recent_repos, ["here"]);
+
+    std::fs::write(&file, "not json").unwrap();
+    let before = here.start_work_format.clone();
+    assert!(here.import_from(&file).unwrap_err().contains("isn't a gitem settings file"));
+    assert_eq!(here.start_work_format, before);
+    let mut form = gitem::views::settings::import_settings_form();
+    form.set_for_test("path", &file.to_string_lossy());
+    assert!(form.submit_for_test().is_err(), "said in the form");
+}
+
+#[test]
+fn recursing_adds_itself_to_pull_and_check_out_only() {
+    use gitem_core::ops;
+    assert_eq!(ops::recursing_submodules(ops::checkout("x")).steps[0].args[..2], ["switch", "--recurse-submodules"]);
+    assert_eq!(ops::recursing_submodules(ops::pull(ops::PullMode::FfOnly, false)).steps[0].args[..2], ["pull", "--recurse-submodules"]);
+    assert_eq!(ops::recursing_submodules(ops::stage_all()).steps[0].args, ops::stage_all().steps[0].args);
+}
+
+#[test]
+fn a_conflict_is_predicted_at_the_commit_it_would_stop_at() {
+    let f = Fx::new();
+    f.git(&["switch", "-q", "-c", "topic"]);
+    f.write("t.txt", "t\n");
+    f.commit("harmless");
+    let harmless = f.head();
+    f.write("a.txt", "topic\n");
+    f.commit("touches a");
+    let touching = f.head();
+    f.git(&["switch", "-q", "main"]);
+    f.write("a.txt", "main\n");
+    f.commit("on main");
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    let before = (f.git(&["status", "--porcelain"]), f.head());
+    assert_eq!(repo.predict_replay("main", std::slice::from_ref(&harmless)).unwrap(), None);
+    assert_eq!(repo.predict_replay("main", &[harmless, touching.clone()]).unwrap(), Some((touching, vec!["a.txt".to_string()])));
+    assert_eq!((f.git(&["status", "--porcelain"]), f.head()), before, "and nothing moved");
+}
+
+#[test]
+fn the_rebase_view_reports_what_it_predicts() {
+    let f = Fx::new();
+    f.git(&["switch", "-q", "-c", "topic"]);
+    f.write("a.txt", "topic\n");
+    f.commit("touches a");
+    f.git(&["switch", "-q", "main"]);
+    f.write("a.txt", "main\n");
+    f.commit("on main");
+    f.git(&["switch", "-q", "topic"]);
+    let mut h = f.harness(|_| {});
+    open(&mut h, Tab::rebase(Some("main".to_string())));
+    click(&mut h, "Check for conflicts");
+    wait_for_text(&mut h, "will conflict in a.txt");
+}
+
+#[test]
+fn find_in_a_diff_counts_and_moves_through_matches() {
+    let f = Fx::new();
+    let many: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    f.write("a.txt", &many);
+    f.commit("long");
+    f.write("a.txt", &many.replace("line 3\n", "needle 3\n").replace("line 30\n", "needle 30\n"));
+    let mut h = f.harness(|_| {});
+    open(&mut h, Tab::diff(gitem_core::repo::DiffSource::Unstaged, Some("a.txt".to_string())));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    h.step();
+    wait_for(&mut h, "the find box", |h| h.query_by_label_contains("Next match").is_some());
+    let inputs = h.query_all_by_role(Role::TextInput).count();
+    assert!(inputs >= 1);
+    h.query_all_by_role(Role::TextInput).last().unwrap().focus();
+    h.step();
+    h.query_all_by_role(Role::TextInput).last().unwrap().type_text("NEEDLE");
+    h.step();
+    h.step();
+    wait_for_text(&mut h, "1 of 2");
+    click(&mut h, "Next match");
+    wait_for_text(&mut h, "2 of 2");
+    click(&mut h, "Next match");
+    wait_for_text(&mut h, "1 of 2");
+}
