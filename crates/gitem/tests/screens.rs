@@ -346,6 +346,17 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         out.save(&mut h, "modelstart");
         run(&f.git, &f.root, &["checkout", "--", "h.txt", "drawing.svg"]);
     }
+    if wanted("wip") {
+        let mut h = f.harness(move |s: &mut Settings| {
+            s.theme = theme;
+            s.wip_in_details = true;
+        }, vec![]);
+        settle_a_moment(&mut h);
+        click(&mut h, "Work in progress");
+        quiet(&mut h);
+        settle_a_moment(&mut h);
+        out.save(&mut h, "wipdetails");
+    }
     if wanted("rail") {
         let mut h = f.harness(move |s: &mut Settings| {
             s.theme = theme;

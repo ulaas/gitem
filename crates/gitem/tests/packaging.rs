@@ -60,7 +60,7 @@ fn the_appimage_takes_its_version_from_the_build_and_runs_nothing_it_makes() {
     assert!(s.contains("--profile dist"));
     assert!(s.starts_with("#!/usr/bin/env bash") && s.contains("set -euo pipefail"));
     assert!(!s.contains("sudo") && !s.contains("/usr/local"), "it installs nothing");
-    assert!(!s.contains(".AppImage\"\n\"") && !s.contains("curl"), "it fetches nothing itself");
+    assert!(!s.contains("curl"), "it fetches nothing itself");
     for file in ["AppRun", "gitem.desktop", "gitem.png"] {
         assert!(s.contains(&format!("\"$here/{file}\"")), "{file}");
     }

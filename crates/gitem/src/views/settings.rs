@@ -570,6 +570,7 @@ impl SettingsView {
         group(ui, "Commits", p, |g| {
             g.switch(&mut s.commit_sign, "Sign commits", "On by default in the commit box.");
             g.switch(&mut s.commit_signoff, "Add Signed-off-by", "On by default in the commit box.");
+            g.switch(&mut s.wip_in_details, "Stage and commit from the graph", "Clicking Work in progress shows the files and the commit box in Details, beside the graph, in place of going to Changes. It's the same message either way.");
             g.row("Start Work branch name", "Tokens: ${id} ${title}", |ui| {
                 field(ui, &mut s.start_work_format, "${id}-${title}", 240.0);
             });

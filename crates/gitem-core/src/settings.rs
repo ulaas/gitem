@@ -160,6 +160,9 @@ pub struct Settings {
     /// Ask the host for the current branch's pull request, for the status bar.
     #[serde(default)]
     pub status_bar_pr: bool,
+    /// Clicking the graph's working-changes row shows Changes' list and commit box in Details.
+    #[serde(default)]
+    pub wip_in_details: bool,
     /// Start and finish feature, release and hotfix branches. Off unless turned on.
     #[serde(default)]
     pub branch_model: crate::branchmodel::BranchModel,
@@ -306,6 +309,7 @@ impl Default for Settings {
             pull_autostash: false,
             single_window: false,
             status_bar_pr: false,
+            wip_in_details: false,
             branch_model: Default::default(),
             key_bindings: Default::default(),
             recurse_submodules: false,

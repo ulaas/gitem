@@ -205,7 +205,8 @@ impl ChangesView {
         (!message.is_empty() && message != self.prefilled.trim()).then(|| "A commit message you've written.".to_string())
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+    /// What goes on whichever place this is showing in, up to the status to show.
+    fn prepare(&mut self, ui: &mut Ui, cx: &mut Cx) -> Option<std::sync::Arc<RepoStatus>> {
         let p = cx.pal.clone();
         let sign_settings = (cx.settings.commit_sign, cx.settings.commit_signoff);
         if !self.init || self.sign_settings != sign_settings {
@@ -287,8 +288,9 @@ impl ChangesView {
                 }
                 None => spinner_row(ui, "Reading status…", &p),
             }
-            return;
+            return None;
         };
+        let held = st.clone();
         let st: &RepoStatus = &st;
         // During a merge or similar, git prepares the commit message. A squash merge does too,
         // though its only sign is a file. That file can outlive what was staged, so it counts
@@ -307,7 +309,21 @@ impl ChangesView {
                 self.message.clear();
             }
         }
+        Some(held)
+    }
 
+    /// The list and the commit box in Details, for the working-changes row in the graph. This is
+    /// the Changes tab itself drawn elsewhere, so it's one draft and one way of committing, not a
+    /// second copy of them. A file's diff opens in a tab, as there's no room for it here.
+    pub fn details_ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let Some(st) = self.prepare(ui, cx) else { return };
+        self.follow_current(&st);
+        self.files_column(ui, cx, &st, false);
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let Some(st) = self.prepare(ui, cx) else { return };
+        let st: &RepoStatus = &st;
         let room = ui.available_width();
         let beside = room >= PREVIEW_MIN_WIDTH;
         if let Some(path) = self.show_first.take() {

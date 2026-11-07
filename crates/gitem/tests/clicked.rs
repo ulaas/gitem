@@ -219,6 +219,91 @@ fn the_current_branch_and_one_in_a_worktree_cant_be_picked() {
     assert!(h.query_all_by_label_contains("Delete 1 branch").next().is_none());
 }
 
+// ---- UX-36
+
+fn with_message(h: &Harness<GitemApp>) -> String {
+    h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Changes(v) = t { Some(v.message.clone()) } else { None }).unwrap_or_default()
+}
+
+/// Off by default, the row goes to Changes as it always did.
+#[test]
+fn the_work_in_progress_row_goes_to_changes_unless_turned_on() {
+    let f = Fx::new();
+    f.write("a.txt", "changed\n");
+    let mut h = f.harness(|_| {});
+    settle(&mut h);
+    click(&mut h, "Work in progress");
+    settle(&mut h);
+    let front = h.state_mut().repos[0].dock.find_active_focused().map(|(_, t)| t.key());
+    assert_eq!(front.as_deref(), Some("changes"));
+}
+
+/// Turned on, one draft: what's typed in Details is what Changes has, what Changes had is what
+/// Details shows, there's only ever one box, and committing from Details clears the one draft.
+#[test]
+fn staging_in_details_shares_one_draft_with_changes() {
+    let f = Fx::new();
+    f.write("a.txt", "changed\n");
+    let mut h = f.harness(|s| s.wip_in_details = true);
+    settle(&mut h);
+    // Changes first, with something written there.
+    h.state_mut().repos[0].open_tab(Tab::changes());
+    settle(&mut h);
+    let boxes = |h: &Harness<GitemApp>| h.query_all_by_role(egui::accesskit::Role::MultilineTextInput).count();
+    assert_eq!(boxes(&h), 1, "the commit box");
+    if let Some(Tab::Changes(v)) = h.state_mut().repos[0].dock.iter_all_tabs_mut().map(|(_, t)| t).find(|t| matches!(t, Tab::Changes(_))) {
+        v.message = "written in Changes".to_string();
+    }
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    settle(&mut h);
+    assert_eq!(boxes(&h), 0, "none beside the graph yet");
+
+    click(&mut h, "Work in progress");
+    settle(&mut h);
+    wait_for_label(&mut h, "Open Changes");
+    assert_eq!(boxes(&h), 1, "one, in Details");
+    let in_box = h.query_all_by_role(egui::accesskit::Role::MultilineTextInput).next().unwrap().accesskit_node().value().unwrap_or_default().to_string();
+    assert_eq!(in_box, "written in Changes", "the same draft");
+    let front = h.state_mut().repos[0].dock.find_active_focused().map(|(_, t)| t.key());
+    assert_eq!(front.as_deref(), Some("graph"), "it doesn't leave the graph");
+
+    // Staged from there, and committed from there, with the one message.
+    click(&mut h, "Stage all");
+    wait_for(&mut h, "it to be staged", |_| f.git(&["status", "--short"]).starts_with('M'));
+    settle(&mut h);
+    click(&mut h, "Commit 1 file");
+    wait_for(&mut h, "the commit", |_| f.git(&["log", "-1", "--format=%s"]) == "written in Changes");
+    settle(&mut h);
+    no_errors(&h);
+    wait_for(&mut h, "the draft to clear", |h| with_message(h).is_empty());
+
+    // A commit picked goes back to its details.
+    let sha = f.git(&["rev-parse", "HEAD"]);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::Inspect(sha));
+    settle(&mut h);
+    assert!(h.query_by_label("Open Changes").is_none());
+}
+
+/// A split with Changes showing already has the box: Details doesn't draw another.
+#[test]
+fn with_changes_in_a_pane_details_points_to_it() {
+    let f = Fx::new();
+    f.write("a.txt", "changed\n");
+    let mut h = f.harness(|s| s.wip_in_details = true);
+    settle(&mut h);
+    let r = &mut h.state_mut().repos[0];
+    let at = r.dock.find_tab_from(|t| matches!(t, Tab::Changes(_))).unwrap();
+    let tab = r.dock.remove_tab(at).unwrap();
+    let first = r.dock.iter_leaves().next().map(|(p, _)| p).unwrap();
+    r.dock.split(first, egui_dock::Split::Below, 0.5, egui_dock::Node::leaf(tab));
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::ShowWip);
+    settle(&mut h);
+    assert_eq!(h.query_all_by_role(egui::accesskit::Role::MultilineTextInput).count(), 1, "one box");
+}
+
 // ---- SVG
 
 /// A hostile file is drawn at the largest size or refused, and its text is never far away.

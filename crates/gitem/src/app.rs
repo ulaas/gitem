@@ -178,6 +178,8 @@ pub struct RepoTab {
     squeeze: Squeeze,
     /// Which of those is being shown over the view.
     peek: Option<Peek>,
+    /// Details is showing Changes' list and commit box, not a commit.
+    show_wip: bool,
     /// The tab opened last from the rail's More list, which the next one replaces.
     more_tab: Option<String>,
     /// When FETCH_HEAD was last written, as read for this status.
@@ -278,6 +280,7 @@ impl RepoTab {
             branch_pr_for: None,
             squeeze: Squeeze::default(),
             peek: None,
+            show_wip: false,
             more_tab: None,
             fetched: (u64::MAX, None),
         }
@@ -1719,6 +1722,18 @@ impl GitemApp {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.inspect.set(&sha);
                     r.show_inspect = true;
+                    r.show_wip = false;
+                }
+            }
+            Action::ShowWip => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    // It needs the tab, whose draft it shows, and room beside the graph.
+                    if !r.squeeze.details && r.dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Changes(_))) {
+                        r.show_wip = true;
+                        r.show_inspect = true;
+                    } else {
+                        r.open_tab(Tab::changes());
+                    }
                 }
             }
             Action::InspectFirst(sha) => {
@@ -3253,7 +3268,7 @@ impl GitemApp {
         }
 
         if let Some(tab) = self.repos.get_mut(self.active) {
-            let RepoTab { repo, data, dock, inspect, show_inspect, sidebar, show_sidebar, show_rail, squeeze: tab_squeeze, peek, .. } = tab;
+            let RepoTab { repo, data, dock, inspect, show_inspect, sidebar, show_sidebar, show_rail, squeeze: tab_squeeze, peek, show_wip, .. } = tab;
             if let Some(s) = data.status.get()
                 && s.op != RepoOp::None {
                     let frame = egui::Frame::new().fill(pal.banner_fill());
@@ -3314,12 +3329,33 @@ impl GitemApp {
             }
             // With nothing picked, or beside a view with no commits, it's only lost room.
             let front_shows_commits = dock.find_active_focused().map(|(_, t)| t.shows_commits()).or_else(|| dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).map(Tab::shows_commits)).unwrap_or(true);
-            if *show_inspect && !squeeze.details && inspect.sha.is_some() && front_shows_commits {
+            // The tab it draws from can have been closed since.
+            *show_wip = *show_wip && dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Changes(_)));
+            if *show_inspect && !squeeze.details && (inspect.sha.is_some() || *show_wip) && front_shows_commits {
                 egui::Panel::right("inspect").resizable(true).default_size(DETAILS_WIDTH).size_range(220.0..=800.0).show(ui, |ui| {
                     // A short message mustn't shrink the panel and move everything beside it.
                     ui.set_min_width(ui.available_width());
-                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
-                    ui.push_id(&cx.repo.root, |ui| inspect.ui(ui, &mut cx));
+                    if *show_wip {
+                        // One commit box on screen at a time. In a split it can be showing already.
+                        let in_a_pane = dock.iter_leaves().any(|(_, l)| l.tabs().get(l.active.0).is_some_and(|t| matches!(t, Tab::Changes(_))));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Work in progress").strong());
+                            if ui.small_button("Open Changes").clicked() {
+                                out.push(Action::OpenTab(Tab::changes()));
+                            }
+                        });
+                        ui.separator();
+                        if in_a_pane {
+                            empty_state(ui, "Changes is showing", "Its commit box is beside this.", &pal);
+                        } else if let Some(view) = dock.iter_all_tabs_mut().find_map(|(_, t)| if let Tab::Changes(v) = t { Some(v) } else { None }) {
+                            // The keyboard stays with the graph.
+                            let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: false };
+                            ui.push_id((&cx.repo.root, "wip"), |ui| view.details_ui(ui, &mut cx));
+                        }
+                    } else {
+                        let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
+                        ui.push_id(&cx.repo.root, |ui| inspect.ui(ui, &mut cx));
+                    }
                 });
             }
             let style = theme::dock_style(ui.style(), &pal);
