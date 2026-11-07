@@ -307,7 +307,8 @@ fn the_versions_of_changed_files_can_be_told_apart() {
     let before = f.repo.compare_blobs("main", "HEAD").unwrap();
     assert_eq!(before.len(), 1);
     assert_eq!(before["b"].len(), 40);
-    f.commit("b", "two");
+    // Longer, as a same-sized change in the same instant can look unchanged to `git add`.
+    f.commit("b", "a second, longer version");
     assert_ne!(f.repo.compare_blobs("main", "HEAD").unwrap()["b"], before["b"]);
 }
 

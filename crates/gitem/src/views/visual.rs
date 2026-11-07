@@ -148,8 +148,7 @@ impl VisualView {
         let p = cx.pal.clone();
         // Lanes ordered by first appearance so an author keeps lane and colour
         // regardless of zoom. Busiest authors get their own lane.
-        let Lanes { names: lanes, kept } = &*self.lanes.get_or_insert_with(|| lanes_of(pts));
-        let (lanes, kept) = (lanes.clone(), kept.clone());
+        let Lanes { names: lanes, kept } = self.lanes.take().unwrap_or_else(|| lanes_of(pts));
         let lane_of = |author: &str| -> usize { lanes.iter().position(|l| l == author).unwrap_or(lanes.len() - 1) };
 
         let (mut t0, mut t1) = pts.iter().fold((i64::MAX, i64::MIN), |(a, b), x| (a.min(x.time), b.max(x.time)));
@@ -318,6 +317,7 @@ impl VisualView {
                 }
             });
         }
+        self.lanes = Some(Lanes { names: lanes, kept });
     }
 }
 
