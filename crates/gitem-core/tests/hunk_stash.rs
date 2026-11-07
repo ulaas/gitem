@@ -257,7 +257,8 @@ fn stopping_partway_through_the_files_puts_them_all_back_and_keeps_no_stash() {
     let before = f.state();
     let picked = f.picked(&[("a.txt", vec![0]), ("b.txt", vec![0])]);
     let head = f.head();
-    let locked = hold_against_deletion(&f.root.join("b.txt"));
+    let second = f.root.join("b.txt");
+    let locked = hold_against_deletion(&second);
     let result = f.run(hunkstash::stash(picked, "x", &head));
     drop(locked);
     let e = result.unwrap_err();
