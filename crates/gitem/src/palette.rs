@@ -174,6 +174,8 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Show", "Unstaged Diff", |cx| cx.diff(DiffSource::Unstaged, None)));
     v.push(item("Show", "All Changes vs HEAD", |cx| cx.diff(DiffSource::WorkingVsHead, None)));
     v.push(item("Git", "Undo Last Commit", crate::menus::undo_commit));
+    v.push(item("Git", "Undo Last Action", |cx| cx.out.push(Action::UndoLast)));
+    v.push(item("Git", "Clean Up Branches…", |cx| cx.open(Tab::Prune(Box::default()))));
     v.push(item("Git", "Commit Changes", |cx| cx.open(Tab::changes())));
     v.push(item("Git", "Amend Last Commit's Message…", |cx| {
         let repo = cx.repo.clone();
@@ -535,14 +537,8 @@ impl PaletteState {
             for b in cx.data.remote_branches() {
                 let n = b.name.clone();
                 let mut it = item("Check out remote", b.name.clone(), move |cx| {
-                    let remotes = cx.data.remote_names();
                     // With a local branch of that name, that's the one meant. Git would refuse.
-                    let local = gitem_core::parse::split_remote_ref(&n, &remotes).1.to_string();
-                    if cx.data.local_branches().any(|l| l.name == local) {
-                        cx.run(ops::checkout(&local));
-                    } else {
-                        cx.run(ops::checkout_remote(&n, &remotes));
-                    }
+                    cx.run(cx.data.check_out_remote(&n));
                 });
                 (it.glyph, it.detail, it.record) = (icon::CLOUD, b.subject.clone(), false);
                 items.push(it);

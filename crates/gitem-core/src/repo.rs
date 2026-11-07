@@ -1331,6 +1331,12 @@ impl Repo {
         Ok(v)
     }
 
+    /// Local branches with nothing that `base` doesn't have.
+    pub fn merged_branches(&self, base: &str) -> Result<Vec<String>> {
+        let base = rev_arg(base)?;
+        Ok(self.git.run(Some(&self.root), &["branch", "--merged", base, "--format=%(refname:short)"])?.text().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+    }
+
     pub fn is_ancestor(&self, a: &str, b: &str) -> bool {
         let (Ok(a), Ok(b)) = (rev_arg(a), rev_arg(b)) else { return false };
         self.git.run_raw(Some(&self.root), &["merge-base", "--is-ancestor", a, b]).map(|o| o.ok()).unwrap_or(false)

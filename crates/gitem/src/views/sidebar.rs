@@ -377,7 +377,7 @@ impl Sidebar {
         }
         if resp.double_clicked() && !b.is_current {
             if b.is_remote {
-                cx.run(ops::checkout_remote(&b.name, &cx.data.remote_names()));
+                cx.run(cx.data.check_out_remote(&b.name));
             } else {
                 cx.run(ops::checkout(&b.name));
             }
@@ -417,13 +417,7 @@ impl Sidebar {
             if b.behind > 0 {
                 headed = true;
                 if tracking_heading(ui, crate::chrome::icon::ARROW_DOWN, &format!("Incoming from {up}"), b.behind, p.incoming(), b.is_current.then_some("Pull")) {
-                    let mode = match cx.settings.pull_mode.as_str() {
-                        "ff-only" => ops::PullMode::FfOnly,
-                        "rebase" => ops::PullMode::Rebase,
-                        "merge" => ops::PullMode::Merge,
-                        _ => ops::PullMode::Default,
-                    };
-                    cx.run(ops::pull(mode, false));
+                    cx.run(ops::pull(crate::app::pull_mode(&cx.settings.pull_mode), cx.settings.pull_autostash));
                 }
                 if listed_commits(ui, cx, t.incoming.get(), Some(b.behind as usize), t.incoming_limit, TRACKING_PAGE, t.incoming.busy()) {
                     t.incoming_limit += TRACKING_PAGE;

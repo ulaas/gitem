@@ -28,6 +28,10 @@ use crate::widgets::*;
 
 enum OpMsg {
     Line(String),
+    /// How to take it back, now that it has worked.
+    Undo(gitem_core::undo::UndoEntry),
+    /// Why this one will have no way back, said before it runs.
+    NoUndo(String),
     Done(Result<String, String>),
 }
 
@@ -51,6 +55,8 @@ struct Running {
     started: Instant,
     /// Cancel was pressed, on something where that needs saying twice.
     asking_to_stop: bool,
+    /// How to take it back, once it has worked.
+    undo: Option<gitem_core::undo::UndoEntry>,
 }
 
 /// A fetch only updates remote-tracking refs, and can simply be done again.
@@ -74,11 +80,24 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
             let _ = tx2.send(OpMsg::Line(l.to_string()));
             ctx3.request_repaint();
         };
+        // Read before anything changes. An op with no way back still does what was asked.
+        let captured = match (&op.undo, &cwd) {
+            (Some(plan), Some(dir)) => plan.capture(&git, dir).map_err(|why| {
+                let _ = tx.send(OpMsg::NoUndo(why));
+            }).ok(),
+            _ => None,
+        };
         let res = op.run(&git, cwd.as_deref(), Some(c2), &mut on_line).map(|o| op.outcome_note(&o).unwrap_or_default()).map_err(|e| e.to_string());
+        if res.is_ok()
+            && let (Some(c), Some(dir)) = (captured, &cwd)
+            && let Some(entry) = c.into_entry(&git, dir)
+        {
+            let _ = tx.send(OpMsg::Undo(entry));
+        }
         let _ = tx.send(OpMsg::Done(res));
         ctx2.request_repaint();
     });
-    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, is_commit, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false }
+    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, is_commit, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false, undo: None }
 }
 
 /// A write waiting its turn. `batch` tells what was asked for together: the steps of one
@@ -143,6 +162,8 @@ pub struct RepoTab {
     recent_branches: Vec<String>,
     /// The commit made here last, while nothing else has been run since.
     undoable: Option<String>,
+    /// The way back from the last thing done, other than a commit.
+    undo_entry: Option<gitem_core::undo::UndoEntry>,
     /// What there isn't room for beside the view at this window size.
     squeeze: Squeeze,
     /// Which of those is being shown over the view.
@@ -236,6 +257,7 @@ impl RepoTab {
             branch_filter: String::new(),
             recent_branches: Vec::new(),
             undoable: None,
+            undo_entry: None,
             squeeze: Squeeze::default(),
             peek: None,
             more_tab: None,
@@ -323,6 +345,8 @@ impl RepoTab {
             loop {
                 match r.rx.try_recv() {
                     Ok(OpMsg::Line(l)) => r.last_line = l,
+                    Ok(OpMsg::Undo(entry)) => r.undo = Some(entry),
+                    Ok(OpMsg::NoUndo(why)) => out.push(Action::Toast(why)),
                     Ok(OpMsg::Done(res)) => {
                         done = Some(res);
                         break;
@@ -339,6 +363,11 @@ impl RepoTab {
                 let open_after = r.open_after.clone();
                 // Only straight after it: anything else run since is what an undo would meet.
                 self.undoable = res.as_ref().ok().filter(|_| r.is_commit).and_then(|n| n.split_whitespace().next()).map(String::from);
+                // A fetch changes nothing an undo would meet. Anything else, and only the newest
+                // is on offer: older ones may no longer mean what they say.
+                if !r.harmless {
+                    self.undo_entry = r.undo.take();
+                }
                 let (own_config, batch) = (r.own_config, r.batch);
                 self.running = None;
                 // A pull can bring in config through a tracked `include.path`.
@@ -393,6 +422,11 @@ impl RepoTab {
                 running.batch = q.batch;
                 self.running = Some(running);
             }
+    }
+
+    /// Runs an op as a button would. For tests of what follows it.
+    pub fn queue_for_test(&mut self, op: GitOp) {
+        self.queue.push_back(Queued { op, open_after: None, batch: 0 });
     }
 
     /// Brings the next scheduled fetch forward to now, for tests: the shortest wait is a minute.
@@ -1352,6 +1386,7 @@ impl GitemApp {
                         }
                         return false;
                     }
+                    Ok(OpMsg::Undo(_) | OpMsg::NoUndo(_)) => {}
                     Err(TryRecvError::Empty) => return true,
                     Err(TryRecvError::Disconnected) => return false,
                 }
@@ -1661,6 +1696,15 @@ impl GitemApp {
                     r.open_from_more(t);
                 }
             }
+            Action::UndoLast => {
+                let confirming = self.settings.confirm_destructive;
+                let found = self.repos.get(self.active).map(|r| (r.repo.clone(), r.undo_entry.clone()));
+                match found {
+                    Some((repo, Some(entry))) => self.apply_action(ctx, undo_action(&repo, entry, confirming)),
+                    Some((_, None)) => self.toasts.push(("There's nothing to undo right now. The reflog has older states.".to_string(), Instant::now())),
+                    None => {}
+                }
+            }
             Action::BranchPr(pr) => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.data.branch_pr = pr;
@@ -1908,7 +1952,7 @@ impl GitemApp {
             let pull_label = if behind > 0 { format!("Pull {behind}") } else { "Pull".to_string() };
             let pull = ui.add_enabled_ui(!sync_off, |ui| chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_DOWN, p.incoming(), &pull_label, "Bring in the upstream's commits (Ctrl+Shift+L)", behind > 0, &p)).inner;
             if pull.on_disabled_hover_text(sync_why).clicked() {
-                out.push(Action::Run(ops::pull(pull_mode(&self.settings.pull_mode), false)));
+                out.push(Action::Run(ops::pull(pull_mode(&self.settings.pull_mode), self.settings.pull_autostash)));
             }
             let pull_more = ui.small_button(chrome::icon::CARET_DOWN);
             pull_more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Pull options"));
@@ -1945,6 +1989,10 @@ impl GitemApp {
                 let name = format!("Undo commit {short}");
                 if chrome::tool_button(ui, chrome::icon::ARROW_COUNTER_CLOCKWISE, p.dim, &name, "Take it back, keeping its changes staged", false, &p).clicked() {
                     out.push(crate::menus::undo_commit_action(&tab.repo, tab.data.status.get().is_some_and(|s| s.upstream.is_some() && s.ahead == 0), self.settings.confirm_destructive));
+                }
+            } else if let Some(entry) = tab.undo_entry.clone() {
+                if chrome::tool_button(ui, chrome::icon::ARROW_COUNTER_CLOCKWISE, p.dim, &entry.label, &entry.detail, false, &p).clicked() {
+                    out.push(undo_action(&tab.repo, entry, self.settings.confirm_destructive));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2589,7 +2637,7 @@ impl GitemApp {
         }
         let idle = st.is_some_and(|s| s.op == RepoOp::None);
         if pull && idle && !r.data.remotes().is_empty() {
-            out.push(Action::Run(ops::pull(pull_mode(&self.settings.pull_mode), false)));
+            out.push(Action::Run(ops::pull(pull_mode(&self.settings.pull_mode), self.settings.pull_autostash)));
         }
         if push && idle && !r.data.remotes().is_empty() {
             if st.is_some_and(|s| s.upstream.is_some()) {
@@ -2704,6 +2752,7 @@ impl GitemApp {
                 match g.rx.try_recv() {
                     Ok(OpMsg::Line(l)) => g.last_line = l,
                     Ok(OpMsg::Done(r)) => done = Some(r),
+                    Ok(OpMsg::Undo(_) | OpMsg::NoUndo(_)) => {}
                     Err(TryRecvError::Empty) => break,
                     // Its thread is gone. Without this the spinner stays and nothing else starts.
                     Err(TryRecvError::Disconnected) => {
@@ -3067,7 +3116,22 @@ impl eframe::App for GitemApp {
     }
 }
 
-fn pull_mode(setting: &str) -> ops::PullMode {
+/// Reads whether it can still be done, off the UI thread, then does it.
+fn undo_action(repo: &Repo, entry: gitem_core::undo::UndoEntry, confirming: bool) -> Action {
+    let repo = repo.clone();
+    Action::Later(Box::new(move || {
+        if let Some(why) = entry.refusal(&repo.git, &repo.root) {
+            return Err(why);
+        }
+        Ok(if confirming {
+            crate::action::Later::Confirm { title: entry.label.clone(), body: entry.detail.clone(), label: entry.label, op: entry.op }
+        } else {
+            crate::action::Later::Run(entry.op)
+        })
+    }))
+}
+
+pub fn pull_mode(setting: &str) -> ops::PullMode {
     match setting {
         "ff-only" => ops::PullMode::FfOnly,
         "rebase" => ops::PullMode::Rebase,

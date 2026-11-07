@@ -246,7 +246,7 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
     if !b.is_current {
         if b.is_remote {
             if item(ui, "Check out as local branch") {
-                cx.run(ops::checkout_remote(&name, &cx.data.remote_names()));
+                cx.run(cx.data.check_out_remote(&name));
             }
         } else if item(ui, "Check out") {
             cx.run(ops::checkout(&name));
@@ -375,6 +375,13 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             cx.run(ops::branch_unset_upstream(&name));
         }
         if !b.is_current {
+            if b.behind > 0 && b.ahead == 0
+                && let Some(up) = &b.upstream
+                && !b.upstream_gone
+                && item(ui, "Fast-forward to upstream")
+            {
+                cx.run(ops::fast_forward_branch(&name, up, &cx.data.remote_names()));
+            }
             if item(ui, "Move to another commit…") {
                 cx.form(forms::move_branch(name.clone(), cx.data.ref_names()));
             }
@@ -384,6 +391,9 @@ pub fn branch_menu(ui: &mut Ui, cx: &mut Cx, b: &Branch) {
             if risky(ui, cx, "Force delete…") {
                 cx.confirm("Force delete branch", &format!("Delete {name} even if it has unmerged commits? Those commits are then reachable only through the reflog, until git expires them."), "Force delete", ops::branch_delete(&name, true));
             }
+        }
+        if item(ui, "Clean up branches…") {
+            cx.open(Tab::Prune(Box::default()));
         }
         if item(ui, "Push…") {
             let remotes = cx.data.remotes().iter().map(|r| r.name.clone()).collect();

@@ -527,8 +527,9 @@ impl DiffView {
             }
         }
         if !op.steps.is_empty() {
+            op = op.undoable(gitem_core::undo::UndoPlan::Discard { label: "Undo discard".to_string(), paths: vec![f.new_path.clone()] });
             let n = self.selected_lines.len();
-            cx.confirm("Discard lines", &format!("Discard {} from the working tree? This cannot be undone.", plural(n, "selected line", "selected lines")), "Discard", op);
+            cx.confirm("Discard lines", &format!("Discard {} from the working tree? The toolbar's Undo can bring them back straight afterwards.", plural(n, "selected line", "selected lines")), "Discard", op);
         }
         self.selected_lines.clear();
     }
@@ -550,7 +551,7 @@ impl DiffView {
                     }
                 if ui.small_button("Discard hunk…").clicked()
                     && let Some(p) = diff::build_patch(f, hunk, None, PatchMode::Reverse) {
-                        cx.confirm("Discard hunk", "Discard this hunk from the working tree? This cannot be undone.", "Discard", ops::apply_patch("Discard hunk", p, false, true));
+                        cx.confirm("Discard hunk", "Discard this hunk from the working tree? The toolbar's Undo can bring it back straight afterwards.", "Discard", ops::apply_patch("Discard hunk", p, false, true).undoable(gitem_core::undo::UndoPlan::Discard { label: "Undo discard".to_string(), paths: vec![f.new_path.clone()] }));
                     }
             }
             DiffSource::Staged => {

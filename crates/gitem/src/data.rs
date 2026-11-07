@@ -277,6 +277,18 @@ impl RepoData {
         self.remotes().iter().map(|r| r.name.clone()).collect()
     }
 
+    /// A remote branch to work on: the local one of that name if there is one, as a new one
+    /// tracking it would be refused, or else a new one.
+    pub fn check_out_remote(&self, remote_branch: &str) -> gitem_core::ops::GitOp {
+        let remotes = self.remote_names();
+        let local = gitem_core::parse::split_remote_ref(remote_branch, &remotes).1;
+        if self.local_branches().any(|b| b.name == local) {
+            gitem_core::ops::checkout(local)
+        } else {
+            gitem_core::ops::checkout_remote(remote_branch, &remotes)
+        }
+    }
+
     pub fn local_branches(&self) -> impl Iterator<Item = &Branch> {
         self.branches().iter().filter(|b| !b.is_remote)
     }

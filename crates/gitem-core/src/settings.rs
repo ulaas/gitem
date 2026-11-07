@@ -144,6 +144,9 @@ pub struct Settings {
     pub commit_sign: bool,
     pub commit_signoff: bool,
     pub prune_on_fetch: bool,
+    /// The toolbar's Pull stashes local changes first, and puts them back after.
+    #[serde(default)]
+    pub pull_autostash: bool,
     pub pull_mode: String,
     pub graph_page_size: usize,
     pub default_external_editor: String,
@@ -254,6 +257,7 @@ impl Default for Settings {
             confirm_destructive: true,
             commit_sign: false,
             commit_signoff: false,
+            pull_autostash: false,
             prune_on_fetch: true,
             pull_mode: "default".to_string(),
             graph_page_size: 2000,

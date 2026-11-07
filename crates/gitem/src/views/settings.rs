@@ -552,6 +552,7 @@ impl SettingsView {
                 ui.add(egui::DragValue::new(&mut s.auto_fetch_minutes).range(0..=240));
             });
             g.switch(&mut s.prune_on_fetch, "Prune when fetching", "Removes remote branches that were deleted on the server.");
+            g.switch(&mut s.pull_autostash, "Stash changes around a pull", "The toolbar's Pull puts uncommitted changes aside and brings them back after.");
         });
         group(ui, "Commits", p, |g| {
             g.switch(&mut s.commit_sign, "Sign commits", "On by default in the commit box.");

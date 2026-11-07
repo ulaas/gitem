@@ -863,7 +863,7 @@ impl ChangesView {
                 self.selected.clear();
             }
             if !tracked.is_empty() && ui.small_button("Discard…").clicked() {
-                cx.confirm("Discard changes", &format!("Discard unstaged changes in {}? This cannot be undone.", plural(tracked.len(), "file", "files")), "Discard", ops::discard_paths(&tracked));
+                cx.confirm("Discard changes", &format!("Discard unstaged changes in {}? The toolbar's Undo can bring them back straight afterwards.", plural(tracked.len(), "file", "files")), "Discard", ops::discard_paths(&tracked));
                 self.selected.clear();
             }
             if ui.small_button("Clear").clicked() {
@@ -1155,12 +1155,12 @@ fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, state: &mut RowState,
                     // `git clean` would leave it alone and report success.
                     cx.error(format!("{} is a Git repository of its own, with its own history. gitem won't delete that: remove the folder by hand if you're sure.", e.path));
                 } else {
-                    cx.confirm("Delete file", &format!("Permanently delete the untracked file {}?", e.path), "Delete", ops::delete_untracked(std::slice::from_ref(&e.path)));
+                    cx.confirm("Delete file", &format!("Delete the untracked file {}? The toolbar's Undo can bring it back straight afterwards.", e.path), "Delete", ops::delete_untracked(std::slice::from_ref(&e.path)));
                 }
                 ui.close();
             }
         } else if ui.button("Discard changes…").clicked() {
-            cx.confirm("Discard changes", &format!("Discard all unstaged changes in {}? This cannot be undone.", e.path), "Discard", ops::discard_paths(std::slice::from_ref(&e.path)));
+            cx.confirm("Discard changes", &format!("Discard all unstaged changes in {}? The toolbar's Undo can bring them back straight afterwards.", e.path), "Discard", ops::discard_paths(std::slice::from_ref(&e.path)));
             ui.close();
         }
         ui.separator();

@@ -23,6 +23,7 @@ pub mod inspect;
 pub mod launchpad;
 pub mod mergeview;
 pub mod patches;
+pub mod prune;
 pub mod rebase;
 pub mod reflog;
 pub mod review;
@@ -69,6 +70,7 @@ tabs! {
     Settings(settings::SettingsView),
     Console(console::ConsoleView),
     Patches(patches::PatchesView),
+    Prune(prune::PruneView),
     Composer(composer::ComposerView),
     Tree(tree::TreeView),
     Health(health::HealthView),
@@ -99,7 +101,7 @@ impl Tab {
     /// Whether a commit picked elsewhere has anything to do with this view. The Details panel
     /// only takes room beside those that do.
     pub fn shows_commits(&self) -> bool {
-        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_))
+        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_) | Tab::Prune(_))
     }
 
     pub fn unsaved(&self) -> Option<String> {

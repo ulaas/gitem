@@ -22,6 +22,8 @@ pub enum Action {
     OpenSettings,
     /// Run a write op on this repo's queue.
     Run(GitOp),
+    /// Take back the last thing done in this repository, if that's still possible.
+    UndoLast,
     /// Ask first, then run.
     Confirm { title: String, body: String, label: String, op: GitOp },
     Form(FormDialog),

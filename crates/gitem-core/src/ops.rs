@@ -52,6 +52,8 @@ pub struct GitOp {
     pub remove_after: Vec<std::path::PathBuf>,
     /// Nothing is lost by saying yes to this, so a question about it needn't look alarming.
     pub lossless: bool,
+    /// What it's about to change, so that it can be taken back afterwards.
+    pub undo: Option<crate::undo::UndoPlan>,
 }
 
 impl GitOp {
@@ -61,6 +63,15 @@ impl GitOp {
     pub fn lossless(mut self) -> Self {
         self.lossless = true;
         self
+    }
+    pub fn undoable(mut self, plan: crate::undo::UndoPlan) -> Self {
+        self.undo = Some(plan);
+        self
+    }
+    /// It moves HEAD, and `reset --keep` puts it back. Uncommitted changes aren't touched by
+    /// either, and it stops rather than lose them.
+    fn moves_head(self, what: &str) -> Self {
+        self.undoable(crate::undo::UndoPlan::MoveHead { label: format!("Undo {what}"), how: "--keep", snapshot: false })
     }
     pub fn step<S: AsRef<str>>(mut self, args: &[S]) -> Self {
         self.steps.push(Step { args: args.iter().map(|s| s.as_ref().to_string()).collect(), ..Default::default() });
@@ -416,7 +427,12 @@ pub fn unstage_during_op(paths: &[String]) -> GitOp {
 
 /// Discard worktree changes of tracked files.
 pub fn discard_paths(paths: &[String]) -> GitOp {
-    step_on_paths(GitOp::new(format!("Discard changes in {}", crate::util::count_of(paths.len(), "file"))), v(&["restore", "--worktree"]), paths).literal()
+    step_on_paths(GitOp::new(format!("Discard changes in {}", crate::util::count_of(paths.len(), "file"))), v(&["restore", "--worktree"]), paths).literal().undoable(crate::undo::UndoPlan::Discard { label: "Undo discard".to_string(), paths: paths.to_vec() })
+}
+
+/// Put these files in the working tree back as a tree holds them. The index stays as it is.
+pub fn restore_worktree_from(title: &str, tree: &str, paths: &[String]) -> GitOp {
+    step_on_paths(GitOp::new(title), v(&["restore", &format!("--source={tree}"), "--worktree"]), paths).literal()
 }
 
 /// Delete untracked paths through `git clean`, so nothing else can be affected.
@@ -435,7 +451,7 @@ pub fn delete_untracked(paths: &[String]) -> GitOp {
     if !batch.is_empty() {
         op = step_on_paths(op, v(&["clean", "-f", "-d"]), &batch);
     }
-    op.literal()
+    op.literal().undoable(crate::undo::UndoPlan::Discard { label: "Undo delete".to_string(), paths: paths.to_vec() })
 }
 
 /// Apply a patch produced by `diff::build_patch` to the index or worktree.
@@ -603,6 +619,28 @@ pub fn branch_start_work(name: &str, start: Option<&str>) -> GitOp {
     GitOp::new(format!("Create branch {name}")).names(&[name, start.unwrap_or_default()]).step_v(a)
 }
 
+/// Bring a branch that isn't checked out up to its upstream, without visiting it. Git refuses if
+/// that isn't a fast-forward, or if a worktree has it.
+pub fn fast_forward_branch(branch: &str, upstream: &str, remotes: &[String]) -> GitOp {
+    let (remote, there) = crate::parse::split_remote_ref(upstream, remotes);
+    GitOp::new(format!("Fast-forward {branch}")).names(&[branch, remote, there]).step(&["fetch", remote, &format!("refs/heads/{there}:refs/heads/{branch}")]).net()
+}
+
+/// Delete several branches in one go: `merged` as git would, `unmerged` whatever they hold.
+pub fn branches_delete(merged: &[String], unmerged: &[String]) -> GitOp {
+    let mut op = GitOp::new(format!("Delete {}", if merged.len() + unmerged.len() == 1 { "1 branch".to_string() } else { format!("{} branches", merged.len() + unmerged.len()) }));
+    for (flag, names) in [("-d", merged), ("-D", unmerged)] {
+        if !names.is_empty() {
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            op = op.names(&refs);
+            let mut a = v(&["branch", flag]);
+            a.extend_from_slice(names);
+            op = op.step_v(a);
+        }
+    }
+    op.undoable(crate::undo::UndoPlan::DeleteBranches(merged.iter().chain(unmerged).cloned().collect()))
+}
+
 pub fn branch_rename(old: &str, new: &str) -> GitOp {
     GitOp::new(format!("Rename {old} to {new}")).names(&[old, new]).step(&["branch", "-m", old, new])
 }
@@ -611,9 +649,9 @@ pub fn branch_delete(name: &str, force: bool) -> GitOp {
     let flag = if force { "-D" } else { "-d" };
     // A name a server delivered, shown in full. Getting rid of it has to work.
     if let Some(short) = name.strip_prefix("refs/heads/") {
-        return GitOp::new(format!("Delete branch {name}")).step(&["branch", flag, "--", short]);
+        return GitOp::new(format!("Delete branch {name}")).step(&["branch", flag, "--", short]).undoable(crate::undo::UndoPlan::DeleteBranches(vec![name.to_string()]));
     }
-    GitOp::new(format!("Delete branch {name}")).names(&[name]).step(&["branch", flag, name])
+    GitOp::new(format!("Delete branch {name}")).names(&[name]).step(&["branch", flag, name]).undoable(crate::undo::UndoPlan::DeleteBranches(vec![name.to_string()]))
 }
 
 pub fn branch_delete_remote(remote_branch: &str, remotes: &[String]) -> GitOp {
@@ -656,7 +694,7 @@ pub fn merge(rev: &str, mode: MergeMode) -> GitOp {
         MergeMode::NoCommit => a.push("--no-commit".into()),
     }
     a.push(rev.to_string());
-    GitOp::new(format!("Merge {rev}")).names(&[rev]).step_v(a)
+    GitOp::new(format!("Merge {rev}")).names(&[rev]).step_v(a).moves_head("merge")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -688,7 +726,7 @@ pub fn rebase(o: &RebaseOpts) -> GitOp {
     let mut a = v(&["rebase"]);
     rebase_flags(o, &mut a);
     a.push(o.onto.clone());
-    GitOp::new(format!("Rebase onto {}", o.onto)).names(&[&o.onto]).step_v(a)
+    GitOp::new(format!("Rebase onto {}", o.onto)).names(&[&o.onto]).step_v(a).moves_head("rebase")
 }
 
 /// Interactive rebase with a todo list already decided in the UI: our own
@@ -706,7 +744,7 @@ pub fn rebase_interactive(o: &RebaseOpts, root: bool, todo_file: &Path, helper: 
     }
     let helper = helper.to_string_lossy().replace('\\', "/");
     let todo = todo_file.to_string_lossy().replace('\\', "/");
-    GitOp::new("Interactive rebase").names(&[if root { "" } else { &o.onto }]).step_v(a).env("GIT_SEQUENCE_EDITOR", format!("\"{helper}\" --apply-todo \"{todo}\""))
+    GitOp::new("Interactive rebase").names(&[if root { "" } else { &o.onto }]).step_v(a).env("GIT_SEQUENCE_EDITOR", format!("\"{helper}\" --apply-todo \"{todo}\"")).moves_head("rebase")
 }
 
 pub fn op_continue(cmd: &str) -> GitOp {
@@ -738,7 +776,7 @@ pub fn cherry_pick(shas: &[String], no_commit: bool, x_trailer: bool) -> GitOp {
     }
     a.extend_from_slice(shas);
     let names: Vec<&str> = shas.iter().map(String::as_str).collect();
-    GitOp::new(format!("Cherry-pick {}", crate::util::count_of(shas.len(), "commit"))).names(&names).step_v(a)
+    GitOp::new(format!("Cherry-pick {}", crate::util::count_of(shas.len(), "commit"))).names(&names).step_v(a).moves_head("cherry-pick")
 }
 
 pub fn revert(sha: &str, no_commit: bool, mainline: Option<u32>) -> GitOp {
@@ -751,7 +789,7 @@ pub fn revert(sha: &str, no_commit: bool, mainline: Option<u32>) -> GitOp {
         a.push(m.to_string());
     }
     a.push(sha.to_string());
-    GitOp::new(format!("Revert {}", short(sha))).names(&[sha]).step_v(a)
+    GitOp::new(format!("Revert {}", short(sha))).names(&[sha]).step_v(a).moves_head("revert")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -769,7 +807,14 @@ pub fn reset(rev: &str, mode: ResetMode) -> GitOp {
         ResetMode::Hard => "--hard",
         ResetMode::Keep => "--keep",
     };
-    GitOp::new(format!("Reset {flag} to {}", short(rev))).names(&[rev]).step(&["reset", flag, rev, "--"])
+    // Soft and mixed leave the changes in the files, where `--keep` would refuse to touch them.
+    let how = match mode {
+        ResetMode::Soft => "--soft",
+        ResetMode::Mixed => "--mixed",
+        ResetMode::Hard | ResetMode::Keep => "--keep",
+    };
+    let plan = crate::undo::UndoPlan::MoveHead { label: "Undo reset".to_string(), how, snapshot: matches!(mode, ResetMode::Hard) };
+    GitOp::new(format!("Reset {flag} to {}", short(rev))).names(&[rev]).step(&["reset", flag, rev, "--"]).undoable(plan)
 }
 
 pub fn restore_file_from(rev: &str, path: &str) -> GitOp {
@@ -885,7 +930,7 @@ pub fn stash_apply(sel: &str, pop: bool, index: bool) -> GitOp {
 }
 
 pub fn stash_drop(sel: &str) -> GitOp {
-    GitOp::new(format!("Drop {sel}")).names(&[sel]).step(&["stash", "drop", sel])
+    GitOp::new(format!("Drop {sel}")).names(&[sel]).step(&["stash", "drop", sel]).undoable(crate::undo::UndoPlan::DropStash(sel.to_string()))
 }
 
 /// `stash@{N}` means whatever is Nth by the time it runs, and anything pushing a stash,
@@ -895,7 +940,7 @@ pub fn only_if_stash_is(op: GitOp, sel: &str, sha: &str) -> GitOp {
 }
 
 pub fn stash_clear() -> GitOp {
-    GitOp::new("Clear all stashes").step(&["stash", "clear"])
+    GitOp::new("Clear all stashes").step(&["stash", "clear"]).undoable(crate::undo::UndoPlan::ClearStashes)
 }
 
 pub fn stash_branch(name: &str, sel: &str) -> GitOp {
@@ -1057,7 +1102,7 @@ pub fn pull(mode: PullMode, autostash: bool) -> GitOp {
     if autostash {
         a.push("--autostash".into());
     }
-    GitOp::new("Pull").step_v(a).net()
+    GitOp::new("Pull").step_v(a).net().moves_head("pull")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1409,7 +1454,7 @@ pub fn maintenance_unregister() -> GitOp {
 }
 
 pub fn undo_commit() -> GitOp {
-    GitOp::new("Undo commit").step(&["reset", "--soft", "HEAD~1"])
+    GitOp::new("Undo commit").step(&["reset", "--soft", "HEAD~1"]).undoable(crate::undo::UndoPlan::MoveHead { label: "Redo commit".to_string(), how: "--soft", snapshot: false })
 }
 
 /// Push a branch only up to a given commit.
