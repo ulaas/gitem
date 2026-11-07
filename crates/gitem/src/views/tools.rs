@@ -422,8 +422,8 @@ impl ConfigView {
                             }
                         });
                     } else {
-                        // Tokens and passwords in remote URLs shouldn't be shown at a glance.
-                        let shown = if e.key.contains("token") || e.key.contains("password") { "•••••••".to_string() } else { e.value.clone() };
+                        // Tokens, passwords in URLs and auth headers shouldn't show at a glance.
+                        let shown = gitem_core::util::mask_config_value(&e.key, &e.value);
                         ui.add(egui::Label::new(shown).truncate());
                         ui.horizontal(|ui| {
                             if editable {

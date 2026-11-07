@@ -101,6 +101,22 @@ pub fn short_rev(s: &str) -> &str {
     if s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) { &s[..7] } else { s }
 }
 
+/// A config value for showing on screen, without any secret in it.
+pub fn mask_config_value(key: &str, value: &str) -> String {
+    let k = key.to_lowercase();
+    if k.contains("token") || k.contains("password") || k.contains("secret") {
+        return "•••••••".to_string();
+    }
+    // `http.extraHeader = Authorization: Basic ...`: the name of the header is useful.
+    if k.ends_with(".extraheader") {
+        return match value.split_once(':') {
+            Some((name, _)) => format!("{name}: •••••••"),
+            None => "•••••••".to_string(),
+        };
+    }
+    mask_url_credentials(value)
+}
+
 /// Replaces the credentials in any URL in `s` with `***`, for showing it on screen.
 /// Git itself still gets the real URL.
 pub fn mask_url_credentials(s: &str) -> String {
@@ -170,6 +186,15 @@ pub fn fuzzy_match(needle: &str, hay: &str) -> Option<(i32, Vec<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_values_hide_their_secrets() {
+        assert_eq!(mask_config_value("remote.origin.url", "https://me:SECRET@host/x.git"), "https://***@host/x.git");
+        assert_eq!(mask_config_value("http.https://host/.extraheader", "Authorization: Basic SECRET"), "Authorization: •••••••");
+        assert_eq!(mask_config_value("http.extraHeader", "SECRET"), "•••••••");
+        assert_eq!(mask_config_value("hub.oauthtoken", "SECRET"), "•••••••");
+        assert_eq!(mask_config_value("user.name", "Ann"), "Ann");
+    }
 
     #[test]
     fn short_rev_only_shortens_a_full_sha() {
