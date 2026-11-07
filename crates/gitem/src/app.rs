@@ -1076,6 +1076,11 @@ impl GitemApp {
         self.settings_dirty = true;
     }
 
+    /// The version a look for updates found, if any.
+    pub fn update_found_version(&self) -> Option<&str> {
+        self.update_found.as_ref().map(|r| r.version.as_str())
+    }
+
     /// Opens About, as its button would. For tests.
     pub fn apply_about_for_test(&mut self) {
         self.about_open = true;

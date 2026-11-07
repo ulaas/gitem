@@ -225,3 +225,72 @@ fn lfs_locks_and_a_dash_named_path_are_built_safely() {
     assert_eq!(ops::lfs_unlock("a.bin", true).steps[0].args, ["lfs", "unlock", "--force", "a.bin"]);
     assert!(ops::lfs_lock("--oops").bad_arg.is_some());
 }
+
+#[test]
+fn a_stack_goes_to_the_remote_together_and_stops_if_one_moved() {
+    let f = Fx::new();
+    let bare = f.bare();
+    f.git(&["push", "-q", "origin", "main"]);
+    f.git(&["switch", "-q", "-c", "one"]);
+    f.write("o.txt", "o\n");
+    f.commit("one");
+    f.git(&["switch", "-q", "-c", "two"]);
+    f.write("t.txt", "t\n");
+    let old_two = f.commit("two");
+    f.git(&["push", "-q", "origin", "one", "two"]);
+    f.git(&["fetch", "-q", "origin"]);
+    // A rebase moves both, as --update-refs would.
+    f.git(&["switch", "-q", "main"]);
+    f.write("m.txt", "m\n");
+    f.commit("on main");
+    f.git(&["switch", "-q", "two"]);
+    f.git(&["rebase", "-q", "--update-refs", "main"]);
+    let (new_one, new_two) = (f.git(&["rev-parse", "one"]), f.git(&["rev-parse", "two"]));
+    assert_ne!(new_two, old_two);
+    let stack = ["one".to_string(), "two".to_string()];
+    f.run(ops::push_stack("origin", &stack));
+    assert_eq!(f.at_bare(&bare, &["rev-parse", "refs/heads/one"]), new_one);
+    assert_eq!(f.at_bare(&bare, &["rev-parse", "refs/heads/two"]), new_two);
+
+    // Someone else pushes to one of them: nothing goes, not even the other.
+    let other = f.beside("other");
+    f.git(&["clone", "-q", &bare, &other.to_string_lossy().replace('\\', "/")]);
+    let run_other = |a: &[&str]| f.git.run(Some(&other), a).unwrap().text();
+    for (k, v) in [("user.name", "O"), ("user.email", "o@example.com")] {
+        run_other(&["config", k, v]);
+    }
+    run_other(&["switch", "-q", "two"]);
+    std::fs::write(other.join("x.txt"), "x").unwrap();
+    run_other(&["add", "-A"]);
+    run_other(&["commit", "-q", "-m", "theirs"]);
+    run_other(&["push", "-q", "origin", "two"]);
+    f.git(&["commit", "-q", "--amend", "-m", "two again"]);
+    f.git(&["branch", "-f", "one", "HEAD~1"]);
+    f.git(&["switch", "-q", "one"]);
+    f.git(&["commit", "-q", "--amend", "-m", "one again"]);
+    assert!(ops::push_stack("origin", &stack).run(&f.git, Some(&f.root), None, &mut |_| {}).is_err());
+    assert_eq!(f.at_bare(&bare, &["rev-parse", "refs/heads/one"]), new_one, "all or none");
+}
+
+#[test]
+fn blame_can_look_through_what_the_project_lists() {
+    use gitem_core::repo::{BlameOpts, IGNORE_REVS_FILE};
+    let f = Fx::new();
+    f.write("a.txt", "ONE\n");
+    let reformat = f.commit("reformat");
+    std::fs::write(f.root.join(IGNORE_REVS_FILE), format!("{reformat}\n")).unwrap();
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    let first = f.git(&["rev-parse", "HEAD~1"]);
+    assert_eq!(repo.blame("a.txt", None, BlameOpts::default()).unwrap()[0].sha, reformat);
+    assert_eq!(repo.blame("a.txt", None, BlameOpts { ignore_revs: true, ..Default::default() }).unwrap()[0].sha, first);
+}
+
+#[test]
+fn rerere_is_offered_in_health_and_shows_when_on() {
+    let f = Fx::new();
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    let item = |r: &gitem_core::Repo| r.health().unwrap().items.into_iter().find(|i| i.label == "Remember conflict resolutions").unwrap();
+    assert!(!item(&repo).enabled);
+    f.git(&["config", "rerere.enabled", "true"]);
+    assert!(item(&repo).enabled);
+}

@@ -1049,6 +1049,10 @@ fn conflict_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, leaf: Leaf, state: &m
             cx.open(Tab::merge(&e.path));
             ui.close();
         }
+        if ui.button("Open in external merge tool").on_hover_text("The one git is set up with, or the one named in Settings").clicked() {
+            cx.out.push(crate::action::Action::RunDetached(ops::mergetool_file(&cx.settings.external_merge_tool, &e.path)));
+            ui.close();
+        }
         // A side with no version of the file has nothing to take.
         let (has_ours, has_theirs) = conflict_sides(&code);
         if has_ours && ui.button(format!("Take {ours}…")).clicked() {

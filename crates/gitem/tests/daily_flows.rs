@@ -361,7 +361,8 @@ fn a_scheduled_check_says_what_it_found_once_a_day_only() {
         s.check_updates = true;
         s.update_url = url.clone();
     });
-    wait_for_text(&mut h, "gitem 99.0.0 is available");
+    // Not by its toast, which can come and go while the window's still settling on a busy machine.
+    wait_for(&mut h, "the check's answer", |h| h.state().update_found_version() == Some("99.0.0"));
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(h.state().settings.last_update_check > 0, "so the next run waits");
 

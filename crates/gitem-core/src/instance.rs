@@ -44,8 +44,10 @@ pub fn hand_off(dir: &Path, args: &[String]) -> bool {
     if s.write_all(message.as_bytes()).is_err() || s.shutdown(Shutdown::Write).is_err() {
         return false;
     }
-    let mut answer = String::new();
-    s.read_to_string(&mut answer).is_ok() && answer == "ok"
+    // Just the two bytes, not to the end. Windows can report the other side's close as a reset
+    // after the answer has arrived, and that would open a second window for nothing.
+    let mut answer = [0u8; 2];
+    s.read_exact(&mut answer).is_ok() && answer == *b"ok"
 }
 
 /// Listening. What arrives comes out of `incoming`, one launch at a time.
@@ -83,6 +85,7 @@ pub fn listen(dir: &Path, wake: impl Fn() + Send + 'static) -> std::io::Result<I
             }
             let mut s = s;
             let _ = s.write_all(b"ok");
+            let _ = s.shutdown(Shutdown::Write);
             wake();
         }
     });
@@ -106,6 +109,17 @@ mod tests {
         assert_eq!(wait(&i), args);
         assert!(hand_off(d.path(), &[]), "with nothing to open, it still means come to the front");
         assert!(wait(&i).is_empty());
+    }
+
+    /// One in two of these used to report failure on Windows, from a reset after the answer.
+    #[test]
+    fn a_handover_that_worked_always_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        let i = listen(d.path(), || {}).unwrap();
+        for n in 0..200 {
+            assert!(hand_off(d.path(), &[n.to_string()]), "attempt {n}");
+            assert_eq!(wait(&i), [n.to_string()]);
+        }
     }
 
     #[test]
