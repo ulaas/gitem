@@ -206,7 +206,13 @@ fn held_for(now: egui::Modifiers, wanted: egui::Modifiers, key: egui::Key) -> bo
 
 /// Whether these keys were pressed just now, with no others held.
 pub fn context_pressed(i: &egui::InputState, bindings: &std::collections::HashMap<String, String>, name: &str) -> bool {
-    context_chord(bindings, name).is_some_and(|(m, k)| held_for(i.modifiers, m, k) && i.key_pressed(k))
+    context_chord(bindings, name).is_some_and(|(m, k)| pressed_with(i, m, k))
+}
+
+/// Whether `k` went down this frame with exactly `m` held. The modifiers are the press's own:
+/// a quick Ctrl+S can go down and up within one frame, and by the frame's end Ctrl is up.
+fn pressed_with(i: &egui::InputState, m: egui::Modifiers, k: egui::Key) -> bool {
+    i.events.iter().any(|e| matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. } if *key == k && held_for(*modifiers, m, k)))
 }
 
 /// The same, keeping them from anything else that would act on them.
@@ -217,7 +223,7 @@ pub fn context_take(i: &mut egui::InputState, bindings: &std::collections::HashM
 /// Takes a key press with exactly these keys held. egui's own `consume_key` lets Shift go by,
 /// so Ctrl+Shift+O was also Ctrl+O, opening a folder picker from the editor's outline key.
 pub fn take_chord(i: &mut egui::InputState, m: egui::Modifiers, k: egui::Key) -> bool {
-    held_for(i.modifiers, m, k) && i.consume_key(m, k)
+    pressed_with(i, m, k) && i.consume_key(m, k)
 }
 
 /// How they read now, for a tooltip.
