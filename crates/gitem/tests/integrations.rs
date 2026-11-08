@@ -382,6 +382,9 @@ fn a_checked_out_pull_request_follows_its_branch_through_a_force_push() {
 
     // A force-push: Update refuses, as nothing may be lost without asking.
     let rewritten = f.author_force_pushes("topic rewritten");
+    // The same write again this soon is taken for a double click and skipped. Where git is
+    // quick, as on Linux, this came well within that.
+    std::thread::sleep(Duration::from_millis(700));
     click(&mut h, "Update");
     quiet(&mut h);
     assert!(!h.state().errors_showing().is_empty(), "it should say it couldn't");

@@ -816,6 +816,9 @@ fn merge_tab_reloads_when_the_conflict_changes_and_refuses_stale_saves() {
     }
     click(&mut h, "Take your commit");
     pump_for_label(&mut h, "Save and mark resolved");
+    // The same `git add` this soon after the last is taken for a double click and skipped.
+    // Where git is quick, as on Linux, the test got here well within that.
+    std::thread::sleep(Duration::from_millis(700));
     click(&mut h, "Save and mark resolved");
     wait_for(&mut h, "resolved again", || !f.git(&["status", "--short"]).contains("UU"));
     assert_eq!(std::fs::read_to_string(f.root.join("c.txt")).unwrap(), "mine two\n", "the second commit's content, not the first resolution");
@@ -1204,7 +1207,7 @@ fn a_rejected_commit_keeps_the_message() {
     f.write("c.txt", "new\n");
     let hook = f.root.join(".git/hooks/pre-commit");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\necho nope >&2\nexit 1\n").unwrap();
+    write_hook(&hook, "#!/bin/sh\necho nope >&2\nexit 1\n");
     let mut h = harness(&f);
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::changes());
@@ -2024,7 +2027,7 @@ fn deleting_a_hook_asks_first() {
     sample_history(&f);
     let hook = f.root.join(".git/hooks/pre-commit");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+    write_hook(&hook, "#!/bin/sh\nexit 0\n");
     let mut h = harness(&f);
     settle(&mut h);
     h.state_mut().repos[0].open_tab(Tab::Tools(Box::default()));
@@ -2290,10 +2293,20 @@ fn closing_a_repository_with_nothing_at_stake_just_closes() {
 }
 
 /// A slow op that ends in failure, so a test can close the tab while it runs.
+/// A hook git will run: written, and on Unix marked executable, which git needs to run it.
+fn write_hook(path: &std::path::Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 fn slow_failing_op(f: &Fx) -> gitem_core::ops::GitOp {
     let hook = f.root.join(".git/hooks/pre-commit");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\nsleep 2\necho refused by the slow hook >&2\nexit 1\n").unwrap();
+    write_hook(&hook, "#!/bin/sh\nsleep 2\necho refused by the slow hook >&2\nexit 1\n");
     ops::commit(&ops::CommitOpts { message: "slow".into(), allow_empty: true, ..Default::default() })
 }
 
@@ -3474,7 +3487,7 @@ fn a_rejected_composer_commit_keeps_what_has_not_landed() {
     f.write("two.txt", "2\n");
     let hook = f.root.join(".git/hooks/commit-msg");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\nif grep -q refused \"$1\"; then echo no >&2; exit 1; fi\n").unwrap();
+    write_hook(&hook, "#!/bin/sh\nif grep -q refused \"$1\"; then echo no >&2; exit 1; fi\n");
     let mut h = harness(&f);
     open_composer(&mut h);
     plan_commit(&mut h, 0, "fine one");
@@ -3578,7 +3591,7 @@ fn the_composer_can_split_a_commit_at_a_rebase_edit_stop() {
     f.commit("too big");
     f.write("after.txt", "a\n");
     f.commit("after");
-    let edit = gitem_core::runner::RunOpts { env: vec![("GIT_SEQUENCE_EDITOR".into(), "sed -i 1s/^pick/edit/".into())], ..Default::default() };
+    let edit = gitem_core::runner::RunOpts { env: vec![("GIT_SEQUENCE_EDITOR".into(), "sed -i.bak 1s/^pick/edit/".into())], ..Default::default() };
     let o = f.git.run_opts(Some(&f.root), &["rebase".to_string(), "-i".to_string(), "HEAD~2".to_string()], &edit, &mut |_| {}).unwrap();
     assert!(o.ok(), "{}", o.stderr);
     f.git(&["reset", "-q", "HEAD~1"]);
@@ -4689,7 +4702,7 @@ fn a_write_that_hangs_can_be_stopped() {
     sample_history(&f);
     let hook = f.root.join(".git/hooks/pre-commit");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\nsleep 300\n").unwrap();
+    write_hook(&hook, "#!/bin/sh\nsleep 300\n");
     f.write("n.txt", "n\n");
     f.git(&["add", "n.txt"]);
     let mut h = harness(&f);

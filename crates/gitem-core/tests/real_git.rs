@@ -268,7 +268,9 @@ fn branches_tags_tracking_and_graph() {
     assert_eq!(v1.sha, f.repo.resolve("HEAD").unwrap(), "annotated tag peeled to its commit");
     assert_eq!(ts.iter().find(|t| t.name == "light").unwrap().sha, s1);
 
-    let commits = f.repo.log(&LogQuery { all: true, ..Default::default() }).unwrap();
+    // In date order, as the graph view asks: plain log order can put a parent before its child
+    // when they were made in the same second, and the layout needs children first.
+    let commits = f.repo.log(&LogQuery { all: true, date_order: true, ..Default::default() }).unwrap();
     assert_eq!(commits.len(), 4);
     // A slash-named local branch must not be labelled as remote.
     let labels: Vec<_> = commits.iter().flat_map(|c| c.refs.clone()).collect();
@@ -729,7 +731,7 @@ fn a_repo_cannot_run_a_program_through_fsmonitor_on_a_read() {
     f.commit_all("base");
     let marker = f.repo.root.join("pwned");
     let script = f.repo.root.join("evil.sh");
-    std::fs::write(&script, format!("#!/bin/sh\ntouch '{}'\n", marker.to_string_lossy().replace('\\', "/"))).unwrap();
+    write_script(&script, &format!("#!/bin/sh\ntouch '{}'\n", marker.to_string_lossy().replace('\\', "/")));
     let path = script.to_string_lossy().replace('\\', "/");
     f.repo.git.run(Some(&f.repo.root), &["config", "core.fsmonitor", &path]).unwrap();
     f.repo.status().unwrap();
@@ -1667,4 +1669,14 @@ fn an_auto_rebase_that_fails_midway_still_says_where_it_began() {
     assert_eq!(done.start, start);
     assert!(done.paused.is_some());
     assert!(matches!(f.repo.current_op(), RepoOp::Rebase | RepoOp::RebaseInteractive), "left for the banner to pick up");
+}
+
+/// A script git or the shell will run: written, and on Unix marked executable, which they need.
+fn write_script(path: &std::path::Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }

@@ -428,7 +428,7 @@ fn hooks_block_pushes_and_no_verify_skips_only_the_local_one() {
     let n = Net::new();
     let local = n.a.repo.root.join(".git/hooks/pre-push");
     std::fs::create_dir_all(local.parent().unwrap()).unwrap();
-    std::fs::write(&local, "#!/bin/sh\necho local hook says no >&2\nexit 1\n").unwrap();
+    write_script(&local, "#!/bin/sh\necho local hook says no >&2\nexit 1\n");
     n.a.commit("f.txt", "1\n", "one");
     let e = n.a.fails(ops::push(&PushOpts::default()));
     assert!(e.contains("local hook says no"), "{e}");
@@ -437,7 +437,7 @@ fn hooks_block_pushes_and_no_verify_skips_only_the_local_one() {
 
     let server = n.bare.join("hooks/pre-receive");
     std::fs::create_dir_all(server.parent().unwrap()).unwrap();
-    std::fs::write(&server, "#!/bin/sh\necho server policy refuses >&2\nexit 1\n").unwrap();
+    write_script(&server, "#!/bin/sh\necho server policy refuses >&2\nexit 1\n");
     n.a.commit("f.txt", "2\n", "two");
     let e = n.a.fails(ops::push(&PushOpts { no_verify: true, ..Default::default() }));
     assert!(e.contains("server policy refuses"), "{e}");
@@ -472,9 +472,9 @@ fn cancelling_returns_promptly_even_when_a_child_process_holds_the_pipes() {
     let n = Net::new();
     let hook = n.a.repo.root.join(".git/hooks/pre-push");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh
+    write_script(&hook, "#!/bin/sh
 sleep 25
-").unwrap();
+");
     n.a.commit("f.txt", "1
 ", "one");
 
@@ -495,10 +495,20 @@ fn a_background_process_left_by_a_hook_does_not_hold_up_the_op() {
     let n = Net::new();
     let hook = n.a.repo.root.join(".git/hooks/pre-push");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\nsleep 25 &\nexit 0\n").unwrap();
+    write_script(&hook, "#!/bin/sh\nsleep 25 &\nexit 0\n");
     n.a.commit("f.txt", "1\n", "one");
     let start = std::time::Instant::now();
     n.a.push();
     assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
     assert_eq!(n.remote_sha("refs/heads/main").unwrap(), n.a.head());
+}
+
+/// A script git or the shell will run: written, and on Unix marked executable, which they need.
+fn write_script(path: &std::path::Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }

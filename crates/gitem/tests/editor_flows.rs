@@ -103,8 +103,10 @@ fn files_sidebar(h: &mut Harness<GitemApp>) {
     settle(h);
 }
 
-/// The file's row in the Files tree, not its tab of the same name.
-fn tree_row(h: &Harness<GitemApp>, name: &str) {
+/// The file's row in the Files tree, not its tab of the same name. The tree is listed in the
+/// background, so on a busy machine it may not be there yet.
+fn tree_row(h: &mut Harness<GitemApp>, name: &str) {
+    wait_for(h, name, |h| h.query_all_by_label(name).next().is_some());
     let row = h.get_all_by_label(name).min_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).unwrap();
     row.click();
 }
@@ -141,18 +143,18 @@ fn with_ide_mode_on_clicks_preview_and_a_double_click_keeps() {
     let mut h = harness(&f, true);
     settle(&mut h);
     files_sidebar(&mut h);
-    tree_row(&h, "a.rs");
+    tree_row(&mut h, "a.rs");
     settle(&mut h);
     assert_eq!(editors(&h), vec![("a.rs".to_string(), false)]);
-    tree_row(&h, "b.txt");
+    tree_row(&mut h, "b.txt");
     settle(&mut h);
     assert_eq!(editors(&h), vec![("b.txt".to_string(), false)], "the preview gave way");
-    tree_row(&h, "b.txt");
+    tree_row(&mut h, "b.txt");
     h.step();
-    tree_row(&h, "b.txt");
+    tree_row(&mut h, "b.txt");
     settle(&mut h);
     assert_eq!(editors(&h), vec![("b.txt".to_string(), true)]);
-    tree_row(&h, "a.rs");
+    tree_row(&mut h, "a.rs");
     settle(&mut h);
     assert_eq!(editors(&h).len(), 2, "a kept file stays when another is previewed: {:?}", editors(&h));
 }
@@ -384,7 +386,7 @@ fn a_file_with_conflicts_opens_where_they_are_resolved() {
     let mut h = harness(&f, true);
     settle(&mut h);
     files_sidebar(&mut h);
-    tree_row(&h, "b.txt");
+    tree_row(&mut h, "b.txt");
     settle(&mut h);
     assert!(editors(&h).is_empty());
     assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Merge(_))));

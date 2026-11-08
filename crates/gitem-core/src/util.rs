@@ -164,8 +164,12 @@ pub fn write_file_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::R
     let swapped = (|| -> std::io::Result<()> {
         std::fs::write(&scratch, bytes)?;
         // The new file gets the old one's permissions, as an executable script must stay one.
+        // On Unix the mode is copied as it is: clearing "read-only" there gives write to
+        // everyone, and a script saved this way came out world-writable.
         if let Ok(meta) = std::fs::metadata(path) {
+            #[allow(unused_mut)]
             let mut perms = meta.permissions();
+            #[cfg(not(unix))]
             #[allow(clippy::permissions_set_readonly_false)]
             perms.set_readonly(false);
             std::fs::set_permissions(&scratch, perms)?;

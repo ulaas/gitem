@@ -14,6 +14,15 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # A test that hangs used to hold the runner for its six-hour limit. This is a good deal
+    # more than a full run takes, and its log names the test that was still going.
+    timeout-minutes: 90
+    env:
+      # Each test file is its own binary with the whole UI linked in. With full debug info
+      # they filled the Linux runner's disk before the tests ran. Elsewhere line tables stay,
+      # so a stuck test's stacks name their functions.
+      CARGO_PROFILE_DEV_DEBUG: ${{ matrix.os == 'ubuntu-latest' && '0' || 'line-tables-only' }}
+      CARGO_PROFILE_TEST_DEBUG: ${{ matrix.os == 'ubuntu-latest' && '0' || 'line-tables-only' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,8 +32,16 @@ jobs:
       - name: Install Linux libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      # Every test binary runs, so one run shows every failure rather than the first file's.
       - name: Tests
-        run: cargo test --workspace --locked
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --locked --no-fail-fast
+      # The same on Windows, where a test has hung: a stuck binary's stacks are printed and
+      # it's stopped, rather than holding the runner for hours with nothing to show.
+      - name: Tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci-hang-watch.ps1
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked
       # The optional tree-sitter build compiles C grammars, so it's checked on every platform

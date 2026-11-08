@@ -600,11 +600,12 @@ fn click(h: &mut Harness<GitemApp>, label: &str) {
     h.step();
 }
 
-/// The first, which is the row rather than a tooltip or a menu.
+/// The widest, which is the row rather than a tooltip, a menu or the details panel's title:
+/// that one comes first in the tree once the details have loaded, sooner on some machines.
 fn right_click(h: &mut Harness<GitemApp>, label: &str) {
     wait_for_label(h, label);
     a_moment(h);
-    h.query_all_by_label(label).next().unwrap().click_secondary();
+    h.query_all_by_label(label).max_by(|a, b| a.rect().width().total_cmp(&b.rect().width())).unwrap().click_secondary();
     h.step();
     h.step();
 }
@@ -1178,9 +1179,11 @@ fn blames_boxes_each_change_the_blame_that_runs() {
         assert!(commands_with(&h, "blame").iter().all(|c| !c.contains(flag)), "{flag} isn't on yet");
         click(&mut h, "Blame options \u{E136}");
         click(&mut h, label);
-        wait_for(&mut h, "a new blame", |h| commands_with(h, "blame").len() > before);
-        assert!(commands_with(&h, "blame").last().unwrap().contains(flag), "{:?}", commands_with(&h, "blame").last());
+        // A refresh from the file watcher can blame again first, without it, so this waits for
+        // the one with it rather than for any new one.
+        wait_for(&mut h, "a new blame", |h| commands_with(h, "blame")[before..].iter().any(|c| c.contains(flag)));
         settle(&mut h);
+        assert!(commands_with(&h, "blame").last().unwrap().contains(flag), "{:?}", commands_with(&h, "blame").last());
         h.key_press(egui::Key::Escape);
         h.step();
         h.step();

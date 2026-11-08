@@ -416,7 +416,7 @@ fn colour_settings_and_an_external_tool_stay_out_of_patches() {
     f.q(&["config", "--unset", "color.diff"]);
 
     let tool = f.root.join(".git/ext.sh");
-    std::fs::write(&tool, "#!/bin/sh\necho EXTERNAL-TOOL-RAN\n").unwrap();
+    write_script(&tool, "#!/bin/sh\necho EXTERNAL-TOOL-RAN\n");
     f.q(&["config", "diff.external", &tool.to_string_lossy().replace('\\', "/")]);
     let repo = Repo::open(git(), &f.root).unwrap();
     assert!(!repo.diff_text(&DiffSource::Unstaged).unwrap().contains("EXTERNAL"));
@@ -626,7 +626,7 @@ fn hooks_of_literal_ops_dont_inherit_literal_pathspecs() {
     let log = f.root.join(".git/hook.log");
     let script = format!("#!/bin/sh\necho \"literal=[$GIT_LITERAL_PATHSPECS]\" >> \"{}\"\n", log.to_string_lossy().replace('\\', "/"));
     for hook in ["post-index-change", "post-checkout"] {
-        std::fs::write(f.root.join(".git/hooks").join(hook), &script).unwrap();
+        write_script(&f.root.join(".git/hooks").join(hook), &script);
     }
     f.write("[a].txt", "2\n");
     f.write("a.txt", "keep\n");
@@ -785,4 +785,14 @@ one
 two
 ").unwrap();
     gitem_core::Repo::open(git.clone(), root).unwrap()
+}
+
+/// A script git or the shell will run: written, and on Unix marked executable, which they need.
+fn write_script(path: &std::path::Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }

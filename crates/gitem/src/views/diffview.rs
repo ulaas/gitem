@@ -1105,26 +1105,19 @@ pub fn wrapped_lines(chars: usize, columns: usize) -> usize {
 
 /// Rows a line takes when wrapped to `width`, as `code_job` draws it. Plain ASCII is one width
 /// in a monospace font, so it's counted. Anything else can come from a fallback font twice as
-/// wide, as CJK does, and is measured glyph by glyph the way the layout breaks a line.
+/// wide, as CJK does, and is laid out the way the row draws it.
 pub fn wrapped_line_count(ctx: &egui::Context, text: &str, width: f32, font: f32) -> usize {
     let id = mono(font);
     if text.is_ascii() && !text.contains('\t') {
         let char_w = ctx.fonts_mut(|fx| fx.glyph_width(&id, 'm'));
         return wrapped_lines(shown_chars(text), wrap_columns(width, char_w));
     }
-    let shown = gitem_core::util::prefix(text, crate::widgets::MAX_SHOWN_LINE_BYTES);
-    ctx.fonts_mut(|fx| {
-        let (mut lines, mut x) = (1, 0.0);
-        for c in shown.chars() {
-            let w = fx.glyph_width(&id, c);
-            if x + w > width && x > 0.0 {
-                lines += 1;
-                x = 0.0;
-            }
-            x += w;
-        }
-        lines
-    })
+    // Laid out for real: a glyph's own width can disagree with the layout's for a fallback
+    // font, as macOS's CJK fallback does, and counting those said one row for seven.
+    let mut job = crate::widgets::code_job(text, font, egui::Color32::WHITE, None, None, egui::Color32::TRANSPARENT);
+    job.wrap.max_width = width;
+    job.wrap.break_anywhere = true;
+    ctx.fonts_mut(|fx| fx.layout_job(job).rows.len().max(1))
 }
 
 fn short(s: &str) -> &str {

@@ -391,11 +391,11 @@ fn each_way_a_read_could_start_a_program_is_closed() {
         f.set(k, &f.prog(word));
     }
     let gpg = f.parent.join("gpg.sh");
-    std::fs::write(&gpg, format!("#!/bin/sh\necho gpg >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/"))).unwrap();
+    write_script(&gpg, &format!("#!/bin/sh\necho gpg >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/")));
     f.set("gpg.program", &gpg.to_string_lossy().replace('\\', "/"));
     let hook = f.root.join(".git/hooks/post-index-change");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, format!("#!/bin/sh\necho hook >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/"))).unwrap();
+    write_script(&hook, &format!("#!/bin/sh\necho hook >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/")));
     f.stat_dirty("a.txt");
 
     // Each of these starts its program in plain git. Together they prove the fixture works.
@@ -454,7 +454,7 @@ fn reads_never_run_hooks_even_in_a_trusted_repository() {
     f.commit("base");
     let hook = f.root.join(".git/hooks/post-index-change");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, format!("#!/bin/sh\necho hook >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/"))).unwrap();
+    write_script(&hook, &format!("#!/bin/sh\necho hook >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/")));
     f.stat_dirty("a.txt");
     plain(&f.root, &["diff"]);
     assert!(f.fired().contains("hook"), "plain git fires it");
@@ -489,7 +489,7 @@ fn writes_skip_the_programs_but_keep_the_hooks() {
     let f = filtered();
     let hook = f.root.join(".git/hooks/pre-commit");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, format!("#!/bin/sh\necho precommit >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/"))).unwrap();
+    write_script(&hook, &format!("#!/bin/sh\necho precommit >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/")));
     f.write("a.txt", "two\n");
     let repo = f.open();
     ops::stage_all().run(&repo.git, Some(&repo.root), None, &mut |_| {}).unwrap();
@@ -505,7 +505,7 @@ fn a_write_nobody_started_runs_no_hooks() {
     f.commit("base");
     let hook = f.root.join(".git/hooks/reference-transaction");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, format!("#!/bin/sh\necho hook >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/"))).unwrap();
+    write_script(&hook, &format!("#!/bin/sh\necho hook >> \"{}\"\n", f.marker.to_string_lossy().replace('\\', "/")));
     let repo = f.open();
     let op = GitOp::new("t").step(&["update-ref", "refs/x/y", "HEAD"]);
     op.clone().background().run(&repo.git, Some(&repo.root), None, &mut |_| {}).unwrap();
@@ -525,7 +525,7 @@ fn network_programs_are_neutralised() {
     q(&f.parent, &["init", "-q", "--bare", &bare.to_string_lossy()]);
     let script = |name: &str, word: &str| {
         let p = f.parent.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\necho {word} >> \"{}\"\nexit 1\n", f.marker.to_string_lossy().replace('\\', "/"))).unwrap();
+        write_script(&p, &format!("#!/bin/sh\necho {word} >> \"{}\"\nexit 1\n", f.marker.to_string_lossy().replace('\\', "/")));
         p.to_string_lossy().replace('\\', "/")
     };
     f.set("core.sshCommand", &script("ssh.sh", "sshcommand"));
@@ -782,7 +782,7 @@ fn hooks_see_the_users_locale_and_no_literal_path_mode() {
     let log = f.parent.join("hookenv.txt");
     let hook = f.root.join(".git/hooks/pre-commit");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, format!("#!/bin/sh\necho \"lc=[$LC_ALL] literal=[$GIT_LITERAL_PATHSPECS]\" >> \"{}\"\n", log.to_string_lossy().replace('\\', "/"))).unwrap();
+    write_script(&hook, &format!("#!/bin/sh\necho \"lc=[$LC_ALL] literal=[$GIT_LITERAL_PATHSPECS]\" >> \"{}\"\n", log.to_string_lossy().replace('\\', "/")));
     f.write("[id].txt", "two\n");
     f.write("id.txt", "changed too\n");
     let repo = f.open();
@@ -890,14 +890,10 @@ fn a_damaged_record_means_asking_again() {
     f.open().set_trusted(true).unwrap();
     let path = gitem_core::settings::config_dir().join("trusted-repos.json");
     assert_eq!(f.open().trust.state, TrustState::Trusted);
-    let before = std::fs::read(&path).unwrap();
-    // Other tests run beside this one, and an empty object loses their records too, so
-    // this tampers with only one entry.
-    let mut all: serde_json::Value = serde_json::from_slice(&before).unwrap();
-    let key = f.open().root.to_string_lossy().replace('\\', "/");
-    let key = if cfg!(windows) { key.to_lowercase() } else { key };
-    all[&key]["hash"] = json!("something else");
-    std::fs::write(&path, serde_json::to_vec(&all).unwrap()).unwrap();
+    assert!(std::fs::read(&path).is_ok());
+    // Other tests run beside this one and share the file. Rewriting it by hand lost the
+    // records they added in between, so this one entry is damaged under the store's own lock.
+    gitem_core::trust::remember(&f.open().root, "something else", true).unwrap();
     assert_eq!(f.open().trust.state, TrustState::Undecided);
 }
 
@@ -925,4 +921,14 @@ fn a_local_lfs_install_is_asked_about_once_and_then_works() {
     let st = repo.status().unwrap();
     assert!(st.entries.is_empty(), "trusted, it's clean: {:?}", st.entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>());
     assert_eq!(f.open().trust.state, TrustState::Trusted, "and it isn't asked again");
+}
+
+/// A script git or the shell will run: written, and on Unix marked executable, which they need.
+fn write_script(path: &std::path::Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
