@@ -131,7 +131,7 @@ fn with_ide_mode_off_a_click_in_the_files_tree_opens_the_read_only_view() {
     let mut h = harness(&f, false);
     settle(&mut h);
     files_sidebar(&mut h);
-    h.get_by_label("a.rs").click();
+    tree_row(&mut h, "a.rs");
     settle(&mut h);
     assert!(editors(&h).is_empty());
     assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(v) if v.path == "a.rs")));
