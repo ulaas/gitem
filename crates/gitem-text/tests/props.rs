@@ -20,9 +20,15 @@ proptest! {
     #[test]
     fn utf8_and_utf16_files_come_back_byte_for_byte(t in text(), bom in any::<bool>(), wide in any::<bool>()) {
         let enc = if wide { gitem_text::Encoding::Utf16Le } else { gitem_text::Encoding::Utf8 };
-        let bytes = gitem_text::encoding::encode(&t, enc, bom || wide);
+        let bytes = gitem_text::encoding::encode(&t, enc, bom || wide).unwrap();
         let b = Buffer::from_bytes(&bytes).unwrap();
-        prop_assert_eq!(b.to_bytes(), bytes);
+        prop_assert_eq!(b.to_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn any_bytes_that_are_not_binary_come_back_as_they_were(bytes in proptest::collection::vec(1u8..=255, 0..200)) {
+        let b = Buffer::from_bytes(&bytes).unwrap();
+        prop_assert_eq!(b.to_bytes().unwrap(), bytes);
     }
 
     #[test]

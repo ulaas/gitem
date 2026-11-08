@@ -389,3 +389,41 @@ fn a_file_with_conflicts_opens_where_they_are_resolved() {
     assert!(editors(&h).is_empty());
     assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Merge(_))));
 }
+
+#[test]
+fn a_windows_1252_file_is_edited_and_saved_in_its_own_encoding() {
+    let f = Fx::new();
+    f.write_bytes("latin.txt", b"caf\xe9\n");
+    let mut h = harness(&f, true);
+    settle(&mut h);
+    open_in_editor(&mut h, "latin.txt");
+    assert_eq!(editor_text(&h, "latin.txt").unwrap(), "café\n");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Home);
+    h.key_press(Key::End);
+    h.event(Event::Text("s €".into()));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::S);
+    settle(&mut h);
+    assert_eq!(f.read("latin.txt"), b"caf\xe9s \x80\n");
+    // A character Windows-1252 hasn't got is refused, and nothing is written.
+    h.event(Event::Text("中".into()));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::S);
+    settle(&mut h);
+    assert_eq!(f.read("latin.txt"), b"caf\xe9s \x80\n");
+    assert!(!h.state().errors_showing().is_empty());
+}
+
+#[test]
+fn palette_commands_act_on_the_editor_in_front() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    settle(&mut h);
+    open_in_editor(&mut h, "a.rs");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::Editor(gitem::editor::Request::Run(gitem::editor::Cmd::SelectAll)));
+    h.state_mut().apply_action(&ctx, gitem::action::Action::Editor(gitem::editor::Request::Run(gitem::editor::Cmd::ToggleComment)));
+    settle(&mut h);
+    assert_eq!(editor_text(&h, "a.rs").unwrap(), "// fn a() {\r\n//     one();\r\n// }\r\n");
+    h.state_mut().apply_action(&ctx, gitem::action::Action::SaveAll);
+    settle(&mut h);
+    assert!(f.read("a.rs").starts_with(b"// fn a()"));
+}

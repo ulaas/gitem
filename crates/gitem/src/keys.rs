@@ -46,6 +46,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Ctrl+Shift+Up, Ctrl+Shift+Down", "Editor: add a caret above or below"),
     ("Alt+Up, Alt+Down", "Editor: move lines. With Shift, copy them"),
     ("Ctrl+/, Ctrl+L, Ctrl+J", "Editor: comment, select line, join lines"),
+    ("Ctrl+Shift+[, Ctrl+Shift+]", "Editor: fold the block at the caret, unfold it"),
+    ("Alt+Z", "Editor: word wrap on or off"),
     ("P, R, E, S, F, D", "Rebase: pick, reword, edit, squash, fixup, drop"),
 ];
 

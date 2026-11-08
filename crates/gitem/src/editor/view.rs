@@ -1,10 +1,14 @@
 //! Drawing the editor and turning keys and the mouse into commands. Only the rows in view are
 //! laid out, so a file of a million lines costs what a screenful does.
+//!
+//! Lines are one row each unless wrapping or folding is on. Then a table of where each line
+//! starts is kept, rebuilt when the text, the width or the folds change, and each line drawn
+//! corrects its own height if wrapping took more rows than the estimate.
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use egui::text::{CCursor, LayoutJob, TextFormat};
+use egui::text::{CCursor, CharIndex, LayoutJob, TextFormat};
 use egui::{Align2, Color32, CursorIcon, Event, EventFilter, Galley, Id, Key, Modifiers, Pos2, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
 use gitem_text::brackets;
 use gitem_text::selection::{self, Move};
@@ -20,11 +24,30 @@ const PAD: f32 = 6.0;
 /// Two clicks this close in time, at the same place, are a double click.
 const MULTI_CLICK_SECS: f64 = 0.4;
 
+const MINIMAP_WIDTH: f32 = 84.0;
+/// Each line's height in the minimap.
+const MINIMAP_LINE: f32 = 2.0;
+
 #[derive(Default)]
 pub struct ViewState {
     /// When and where the last click was, and how many in a row, for double and triple clicks.
     last_click: Option<(f64, usize, u8)>,
     drag: Option<Drag>,
+    rows: Rows,
+    /// A line to bring to the middle of the view, as from a click in the minimap.
+    center_on: Option<usize>,
+}
+
+/// Where lines start, when that isn't simply line times row height.
+#[derive(Default)]
+struct Rows {
+    /// What the table was built for: text version, wrap width in columns, folds, row height.
+    built_for: Option<(u64, u32, u64, u32)>,
+    /// `tops[l]` is where line `l` starts; one more entry for the end.
+    tops: Vec<f32>,
+    /// Rows a drawn line really took, where the estimate was wrong.
+    measured: HashMap<usize, u32>,
+    measured_for: u64,
 }
 
 /// A drag under way: the first selection it made, and by what it grows.
@@ -61,6 +84,8 @@ pub struct Look<'a> {
     pub pal: &'a Palette,
     pub whitespace: bool,
     pub indent_guides: bool,
+    pub wrap: bool,
+    pub minimap: bool,
     /// Changes against the index, by line, and those only against HEAD (staged already).
     pub marks: &'a HashMap<usize, Mark>,
     pub staged_marks: &'a HashMap<usize, Mark>,
@@ -74,6 +99,8 @@ pub struct Look<'a> {
 pub struct Shown {
     /// Ctrl+S was pressed.
     pub save: bool,
+    /// Alt+Z was pressed.
+    pub toggle_wrap: bool,
     /// A line number or change mark was clicked.
     pub gutter_click: Option<usize>,
     /// The text area, for a right-click menu.
@@ -81,12 +108,102 @@ pub struct Shown {
     pub focused: bool,
 }
 
-/// Lays out one line as it's drawn, with its colours.
-fn galley(ui: &Ui, ed: &Editor, line: usize, font_size: f32, base: Color32) -> Arc<Galley> {
+/// What the frame's drawing needs to know about sizes.
+struct Metrics {
+    row_h: f32,
+    char_w: f32,
+    font_size: f32,
+    /// Wrap width in points, if wrapping.
+    wrap: Option<f32>,
+}
+
+impl Rows {
+    /// Builds the table if wrapping or folds need one. Without either it stays empty and
+    /// every line is one row.
+    fn update(&mut self, ed: &Editor, m: &Metrics) {
+        let cols = m.wrap.map_or(0, |w| (w / m.char_w).floor().max(8.0) as u32);
+        if self.measured_for != ed.buf.version {
+            self.measured.clear();
+            self.measured_for = ed.buf.version;
+        }
+        let key = (ed.buf.version, cols, ed.folds_gen, m.row_h.to_bits());
+        if self.built_for == Some(key) {
+            return;
+        }
+        self.built_for = Some(key);
+        if cols == 0 && ed.folds.is_empty() {
+            self.tops.clear();
+            return;
+        }
+        let n = ed.buf.line_count();
+        self.tops.clear();
+        self.tops.reserve(n + 1);
+        let mut y = 0.0;
+        let hidden = ed.hidden_lines();
+        let mut h = hidden.iter().peekable();
+        for l in 0..n {
+            self.tops.push(y);
+            while h.peek().is_some_and(|r| r.end() < &l) {
+                h.next();
+            }
+            if h.peek().is_some_and(|r| r.contains(&l)) {
+                continue;
+            }
+            let rows = match self.measured.get(&l) {
+                Some(r) => *r,
+                None if cols > 0 => (ed.buf.rope.line(l).len_chars().saturating_sub(1) as u32 / cols + 1).max(1),
+                None => 1,
+            };
+            y += rows as f32 * m.row_h;
+        }
+        self.tops.push(y);
+    }
+
+    fn top(&self, line: usize, row_h: f32) -> f32 {
+        if self.tops.is_empty() { line as f32 * row_h } else { self.tops.get(line).copied().unwrap_or_else(|| *self.tops.last().unwrap_or(&0.0)) }
+    }
+
+    fn height(&self, line: usize, row_h: f32) -> f32 {
+        if self.tops.is_empty() { row_h } else { self.top(line + 1, row_h) - self.top(line, row_h) }
+    }
+
+    fn total(&self, lines: usize, row_h: f32) -> f32 {
+        if self.tops.is_empty() { lines as f32 * row_h } else { *self.tops.last().unwrap_or(&0.0) }
+    }
+
+    /// The line at a height, skipping folded ones.
+    fn line_at(&self, y: f32, lines: usize, row_h: f32) -> usize {
+        let last = lines.saturating_sub(1);
+        if self.tops.is_empty() {
+            return ((y / row_h).floor().max(0.0) as usize).min(last);
+        }
+        // The last line starting at or above y, of those that take up room.
+        let i = self.tops.partition_point(|t| *t <= y).saturating_sub(1).min(last);
+        let mut l = i;
+        while l > 0 && self.height(l, row_h) <= 0.0 {
+            l -= 1;
+        }
+        l
+    }
+
+    /// A drawn line took this many rows. `true` if that changes the table.
+    fn measured(&mut self, line: usize, rows: u32, estimate: u32) -> bool {
+        if rows == estimate || self.measured.get(&line) == Some(&rows) {
+            return false;
+        }
+        self.measured.insert(line, rows);
+        self.built_for = None;
+        true
+    }
+}
+
+/// Lays out one line as it's drawn, with its colours, wrapped if `wrap` is given.
+fn galley(ui: &Ui, ed: &Editor, line: usize, m: &Metrics, base: Color32) -> Arc<Galley> {
     let text = ed.buf.line(line);
-    let font = mono(font_size);
+    let font = mono(m.font_size);
     let mut job = LayoutJob::default();
-    job.wrap.max_width = f32::INFINITY;
+    job.wrap.max_width = m.wrap.unwrap_or(f32::INFINITY);
+    let fmt = |color: Color32| TextFormat { font_id: font.clone(), color, line_height: Some(m.row_h), valign: egui::Align::Center, ..Default::default() };
     let spans = ed.hl.line(line).map(|s| s.as_slice()).unwrap_or(&[]);
     let mut at = 0;
     for &(a, b, color) in spans {
@@ -96,19 +213,38 @@ fn galley(ui: &Ui, ed: &Editor, line: usize, font_size: f32, base: Color32) -> A
             continue;
         }
         if a > at {
-            job.append(&text[at..a], 0.0, TextFormat { font_id: font.clone(), color: base, ..Default::default() });
+            job.append(&text[at..a], 0.0, fmt(base));
         }
-        job.append(&text[a..b], 0.0, TextFormat { font_id: font.clone(), color, ..Default::default() });
+        job.append(&text[a..b], 0.0, fmt(color));
         at = b;
     }
     if at < text.len() || text.is_empty() {
-        job.append(&text[at..], 0.0, TextFormat { font_id: font, color: base, ..Default::default() });
+        job.append(&text[at..], 0.0, fmt(base));
     }
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
-fn x_of(g: &Galley, col: usize) -> f32 {
-    g.pos_from_cursor(CCursor::new(col)).min.x
+/// Where a caret before char `col` is, relative to the galley.
+fn caret_rect(g: &Galley, col: usize) -> Rect {
+    g.pos_from_cursor(CCursor::new(col))
+}
+
+/// The rectangles covering chars `a..b` of a laid-out line, one per wrapped row.
+fn range_rects(g: &Galley, a: usize, b: usize) -> Vec<Rect> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for row in &g.rows {
+        let n = row.char_count_excluding_newline().0;
+        let end = start + n;
+        let (s, e) = (a.max(start), b.min(end));
+        if s < e {
+            let x0 = row.pos.x + row.x_offset(CharIndex(s - start));
+            let x1 = row.pos.x + row.x_offset(CharIndex(e - start));
+            out.push(Rect::from_min_max(pos2(x0, row.min_y()), pos2(x1, row.max_y())));
+        }
+        start = end;
+    }
+    out
 }
 
 /// Draws the editor in all the room there is and handles its input.
@@ -120,16 +256,23 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
     let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
     let lines = ed.buf.line_count();
     let digits = lines.max(1).ilog10() as f32 + 1.0;
-    let gutter_w = (digits.max(3.0) * char_w + 22.0).round();
+    let gutter_w = (digits.max(3.0) * char_w + 30.0).round();
     let outer = ui.available_rect_before_wrap();
     ui.allocate_rect(outer, Sense::hover());
     let gutter = Rect::from_min_max(outer.min, pos2(outer.min.x + gutter_w, outer.max.y));
-    let text_rect = Rect::from_min_max(pos2(gutter.max.x, outer.min.y), outer.max);
+    let mut text_rect = Rect::from_min_max(pos2(gutter.max.x, outer.min.y), outer.max);
+    let minimap = look.minimap.then(|| {
+        let r = Rect::from_min_max(pos2(text_rect.max.x - MINIMAP_WIDTH, text_rect.min.y), text_rect.max);
+        text_rect.max.x = r.min.x;
+        r
+    });
+    let wrap = look.wrap.then(|| (text_rect.width() - PAD * 2.0 - 14.0).max(char_w * 8.0));
+    let m = Metrics { row_h, char_w, font_size: look.font_size, wrap };
     let mut shown = Shown::default();
-    let focused = ui.memory(|m| m.has_focus(id));
+    let focused = ui.memory(|mem| mem.has_focus(id));
     shown.focused = focused;
     if focused {
-        ui.memory_mut(|m| m.set_focus_lock_filter(id, EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false }));
+        ui.memory_mut(|mem| mem.set_focus_lock_filter(id, EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false }));
     }
     let now = ui.input(|i| i.time);
     let now_ms = (now * 1000.0) as u64;
@@ -138,34 +281,41 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
     let mut origin = text_rect.min;
     let mut visible = 0..0;
     let mut caret_screen: Option<Rect> = None;
+    let mut view_rect = text_rect;
     egui::ScrollArea::both().id_salt(id.with("scroll")).auto_shrink([false, false]).show_viewport(&mut child, |ui, vp| {
         origin = ui.max_rect().min;
+        view_rect = Rect::from_min_size(origin + vp.min.to_vec2(), vp.size());
         let page = (vp.height() / row_h).floor().max(1.0) as isize;
-        // Room to scroll the last line up to the middle, as editors allow.
-        let size = vec2((ed.max_cols as f32 + 4.0) * char_w + PAD * 2.0, lines as f32 * row_h + (vp.height() * 0.5).max(row_h));
-        ui.set_min_size(size);
-        let area = Rect::from_min_size(origin, size.max(vp.size()));
-        // Only what's in view takes the mouse: the whole text can be millions of pixels tall.
-        let shown_area = Rect::from_min_size(origin + vp.min.to_vec2(), vp.size());
-        let resp = ui.interact(shown_area, id, Sense::click_and_drag());
-        let name = format!("Text of {}", ed.path);
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, &name));
-        if resp.hovered() {
-            ui.ctx().set_cursor_icon(CursorIcon::Text);
-        }
 
         // Keys first, so what's drawn is what they did.
         if focused {
             keyboard(ui, ed, page, now_ms, look, &mut shown);
         }
-        mouse(ui, ed, &resp, origin, row_h, look.font_size, p, now);
+        let mut rows = std::mem::take(&mut ed.view.rows);
+        rows.update(ed, &m);
+        ed.view.rows = rows;
+        let width = if wrap.is_some() { vp.width() } else { (ed.max_cols as f32 + 4.0) * char_w + PAD * 2.0 };
+        // Room to scroll the last line up to the middle, as editors allow.
+        let size = vec2(width, ed.view.rows.total(lines, row_h) + (vp.height() * 0.5).max(row_h));
+        ui.set_min_size(size);
+        // Only what's in view takes the mouse: the whole text can be millions of pixels tall.
+        let resp = ui.interact(view_rect, id, Sense::click_and_drag());
+        let name = format!("Text of {}", ed.path);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, &name));
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::Text);
+        }
+        mouse(ui, ed, &resp, origin, &m, p, now);
         if resp.clicked() || resp.drag_started() || resp.secondary_clicked() || std::mem::take(&mut ed.focus) {
             resp.request_focus();
         }
 
-        let first = ((vp.min.y / row_h).floor().max(0.0)) as usize;
-        let last = (((vp.max.y / row_h).ceil()) as usize + 1).min(lines);
-        visible = first..last.max(first);
+        let first = ed.view.rows.line_at(vp.min.y, lines, row_h);
+        let mut last = first;
+        while last < lines && ed.view.rows.top(last, row_h) < vp.max.y {
+            last += 1;
+        }
+        visible = first..last;
         if !ed.hl.ensure(&ed.buf, last + 1, Duration::from_millis(6)) {
             ui.ctx().request_repaint();
         }
@@ -173,52 +323,64 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
             ed.refresh_matches();
         }
         let painter = ui.painter_at(ui.clip_rect());
-        let width = area.width().max(vp.width());
+        let full_w = size.x.max(vp.width());
         let primary = ed.sels.primary();
         let bracket = if primary.is_empty() { brackets::matching(&ed.buf, primary.head) } else { None };
         let unit = ed.indent.unit().replace('\t', "    ").chars().count().max(1);
+        let text_x = origin.x + PAD;
+        let mut remeasure = false;
         for line in visible.clone() {
-            let y = origin.y + line as f32 * row_h;
-            let row = Rect::from_min_size(pos2(origin.x, y), vec2(width, row_h));
-            let g = galley(ui, ed, line, look.font_size, p.text);
-            let text_x = origin.x + PAD;
-            let ty = y + (row_h - g.size().y) / 2.0;
+            let h = ed.view.rows.height(line, row_h);
+            if h <= 0.0 {
+                continue;
+            }
+            let y = origin.y + ed.view.rows.top(line, row_h);
+            let g = galley(ui, ed, line, &m, p.text);
+            if wrap.is_some() {
+                let estimate = (h / row_h).round() as u32;
+                remeasure |= ed.view.rows.measured(line, g.rows.len() as u32, estimate);
+            }
+            let at = |r: Rect| r.translate(vec2(text_x, y));
             let (start, end) = (ed.buf.line_start(line), ed.buf.line_end(line));
             let len = end - start;
             if ed.sels.iter().any(|s| s.is_empty() && ed.buf.line_of(s.head) == line) {
-                painter.rect_filled(row, 0.0, p.hover.gamma_multiply(0.55));
+                painter.rect_filled(Rect::from_min_size(pos2(origin.x, y), vec2(full_w, h)), 0.0, p.hover.gamma_multiply(0.55));
             }
-            // Matches of the find box on this line.
             if ed.find.open {
                 let ms = &ed.find.matches;
-                let from = ms.partition_point(|m| m.1 <= start);
-                for m in ms[from..].iter().take_while(|m| m.0 <= end) {
-                    let (a, b) = (m.0.max(start) - start, m.1.min(end) - start);
-                    let r = Rect::from_min_max(pos2(text_x + x_of(&g, a), y + 1.0), pos2(text_x + x_of(&g, b).max(x_of(&g, a) + 2.0), y + row_h - 1.0));
-                    painter.rect_filled(r, 2.0, p.warn.gamma_multiply(0.28));
+                let from = ms.partition_point(|x| x.1 <= start);
+                for mt in ms[from..].iter().take_while(|x| x.0 <= end) {
+                    for r in range_rects(&g, mt.0.max(start) - start, mt.1.min(end) - start) {
+                        painter.rect_filled(at(r).expand2(vec2(0.0, -1.0)), 2.0, p.warn.gamma_multiply(0.28));
+                    }
                 }
             }
             for s in ed.sels.iter().filter(|s| !s.is_empty() && s.start() <= end + 1 && s.end() >= start) {
-                let a = s.start().max(start) - start;
-                let into_next = s.end() > end;
-                let b = s.end().min(end) - start;
-                let x0 = text_x + x_of(&g, a.min(len));
-                let x1 = text_x + x_of(&g, b.min(len)) + if into_next { char_w * 0.6 } else { 0.0 };
-                if x1 > x0 {
-                    painter.rect_filled(Rect::from_min_max(pos2(x0, y), pos2(x1, y + row_h)), 0.0, p.selection);
+                let (a, b) = (s.start().max(start) - start, s.end().min(end) - start);
+                let mut rects = range_rects(&g, a.min(len), b.min(len));
+                // The line break is selected too: a sliver past the end says so.
+                if s.end() > end {
+                    let c = at(caret_rect(&g, len));
+                    match rects.last_mut() {
+                        Some(r) if (r.max.y - (c.max.y - y)).abs() < 1.0 => r.max.x += char_w * 0.6,
+                        _ => rects.push(Rect::from_min_size(c.min - vec2(text_x, y), vec2(char_w * 0.6, c.height()))),
+                    }
+                }
+                for r in rects {
+                    painter.rect_filled(at(r), 0.0, p.selection);
                 }
             }
             if look.indent_guides {
                 let text = ed.buf.line(line);
                 let lead = text.chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>();
-                if lead < text.len() || text.trim().is_empty() {
+                if lead < text.len() {
                     for k in (unit..lead).step_by(unit) {
                         let x = (text_x + k as f32 * char_w).round() + 0.5;
-                        painter.line_segment([pos2(x, y), pos2(x, y + row_h)], Stroke::new(1.0, p.border.gamma_multiply(0.7)));
+                        painter.line_segment([pos2(x, y), pos2(x, y + h)], Stroke::new(1.0, p.border.gamma_multiply(0.7)));
                     }
                 }
             }
-            painter.galley(pos2(text_x, ty), g.clone(), p.text);
+            painter.galley(pos2(text_x, y), g.clone(), p.text);
             if look.whitespace {
                 for (i, c) in ed.buf.line(line).chars().enumerate() {
                     let mark = match c {
@@ -226,46 +388,60 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
                         '\t' => "→",
                         _ => continue,
                     };
-                    let x = text_x + (x_of(&g, i) + x_of(&g, i + 1)) / 2.0;
-                    painter.text(pos2(x, y + row_h / 2.0), Align2::CENTER_CENTER, mark, mono(look.font_size * 0.9), p.faint);
-                }
-            }
-            if let Some((a, b)) = bracket {
-                for at in [a, b] {
-                    if (start..=end).contains(&at) {
-                        let c = at - start;
-                        let r = Rect::from_min_max(pos2(text_x + x_of(&g, c), y + 1.0), pos2(text_x + x_of(&g, c + 1), y + row_h - 1.0));
-                        painter.rect_stroke(r, 2.0, Stroke::new(1.0, p.dim), egui::StrokeKind::Inside);
+                    if let Some(r) = range_rects(&g, i, i + 1).first() {
+                        painter.text(at(*r).center(), Align2::CENTER_CENTER, mark, mono(look.font_size * 0.9), p.faint);
                     }
                 }
             }
-            if let Some(note) = look.line_note
+            if let Some((a, b)) = bracket {
+                for pos in [a, b] {
+                    if (start..end).contains(&pos) {
+                        for r in range_rects(&g, pos - start, pos - start + 1) {
+                            painter.rect_stroke(at(r).expand2(vec2(0.0, -1.0)), 2.0, Stroke::new(1.0, p.dim), egui::StrokeKind::Inside);
+                        }
+                    }
+                }
+            }
+            let end_of_text = at(caret_rect(&g, len));
+            if let Some(fold) = ed.folds.iter().find(|f| f.0 == line) {
+                let label = format!(" ⋯ {} ", fold.1 - fold.0);
+                let r = painter.text(pos2(end_of_text.max.x + char_w, end_of_text.center().y), Align2::LEFT_CENTER, label, mono(look.font_size * 0.85), p.dim);
+                painter.rect_stroke(r.expand(1.0), 3.0, Stroke::new(1.0, p.border), egui::StrokeKind::Outside);
+            } else if let Some(note) = look.line_note
                 && ed.buf.line_of(primary.head) == line
             {
-                let x = text_x + g.size().x + char_w * 4.0;
-                painter.text(pos2(x, y + row_h / 2.0), Align2::LEFT_CENTER, note, egui::FontId::proportional(look.font_size * 0.92), p.faint);
+                painter.text(pos2(end_of_text.max.x + char_w * 4.0, end_of_text.center().y), Align2::LEFT_CENTER, note, egui::FontId::proportional(look.font_size * 0.92), p.faint);
             }
             for s in ed.sels.iter().filter(|s| ed.buf.line_of(s.head) == line) {
-                let x = text_x + x_of(&g, s.head - start);
-                let r = Rect::from_min_size(pos2(x - 0.5, y + 1.0), vec2(2.0, row_h - 2.0));
+                let c = at(caret_rect(&g, s.head - start));
+                let r = Rect::from_min_size(pos2(c.min.x - 0.5, c.min.y + 1.0), vec2(2.0, c.height() - 2.0));
                 painter.rect_filled(r, 0.0, if focused { p.accent } else { p.dim });
                 if *s == primary {
                     caret_screen = Some(r);
                 }
             }
         }
+        if remeasure {
+            ui.ctx().request_repaint();
+        }
         if ed.reveal {
             ed.reveal = false;
             let (line, col) = ed.buf.point(ed.sels.primary().head);
-            let g = galley(ui, ed, line, look.font_size, p.text);
-            let x = origin.x + PAD + x_of(&g, col);
-            let r = Rect::from_min_size(pos2(x, origin.y + line as f32 * row_h), vec2(2.0, row_h));
-            ui.scroll_to_rect(r.expand2(vec2(char_w * 6.0, row_h * 2.0)), None);
+            let g = galley(ui, ed, line, &m, p.text);
+            let c = caret_rect(&g, col).translate(vec2(origin.x + PAD, origin.y + ed.view.rows.top(line, row_h)));
+            ui.scroll_to_rect(c.expand2(vec2(char_w * 6.0, row_h * 2.0)), None);
+        }
+        if let Some(line) = ed.view.center_on.take() {
+            let y = origin.y + ed.view.rows.top(line, row_h);
+            ui.scroll_to_rect(Rect::from_min_size(pos2(origin.x, y), vec2(1.0, row_h)), Some(egui::Align::Center));
         }
         shown.response = Some(resp);
     });
 
     paint_gutter(ui, ed, look, gutter, origin.y, row_h, visible.clone(), &mut shown, id);
+    if let Some(mm) = minimap {
+        paint_minimap(ui, ed, p, mm, visible.clone(), id);
+    }
 
     if focused && let Some(r) = caret_screen {
         let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
@@ -275,25 +451,39 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paint_gutter(ui: &mut Ui, ed: &Editor, look: &Look, gutter: Rect, top: f32, row_h: f32, visible: std::ops::Range<usize>, shown: &mut Shown, id: Id) {
+fn paint_gutter(ui: &mut Ui, ed: &mut Editor, look: &Look, gutter: Rect, top: f32, row_h: f32, visible: std::ops::Range<usize>, shown: &mut Shown, id: Id) {
     let p = look.pal;
     let painter = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), gutter);
     painter.rect_filled(gutter, 0.0, p.bg);
     let caret_lines: Vec<usize> = ed.sels.iter().map(|s| ed.buf.line_of(s.head)).collect();
     let font = mono(look.font_size * 0.92);
+    let fold_x = gutter.right() - 16.0;
+    let resp = ui.interact(gutter, id.with("gutter"), Sense::click());
+    let hover = resp.hover_pos();
     for line in visible {
-        let y = top + line as f32 * row_h;
+        let h = ed.view.rows.height(line, row_h);
+        if h <= 0.0 {
+            continue;
+        }
+        let y = top + ed.view.rows.top(line, row_h);
         let on = caret_lines.contains(&line);
-        painter.text(pos2(gutter.right() - 12.0, y + row_h / 2.0), Align2::RIGHT_CENTER, (line + 1).to_string(), font.clone(), if on { p.text } else { p.faint });
+        painter.text(pos2(gutter.right() - 24.0, y + row_h / 2.0), Align2::RIGHT_CENTER, (line + 1).to_string(), font.clone(), if on { p.text } else { p.faint });
+        // A fold caret where the next lines are indented deeper: always for a folded one,
+        // otherwise while the pointer is over the gutter, as editors keep it quiet.
+        let folded = ed.folds.iter().any(|f| f.0 == line);
+        if folded || (hover.is_some() && ed.can_fold(line)) {
+            let glyph = if folded { crate::chrome::icon::CARET_RIGHT } else { crate::chrome::icon::CARET_DOWN };
+            painter.text(pos2(fold_x, y + row_h / 2.0), Align2::CENTER_CENTER, glyph, egui::FontId::proportional(look.font_size * 0.85), if folded { p.text } else { p.faint });
+        }
         let mark = look.marks.get(&line).map(|m| (*m, 1.0)).or_else(|| look.staged_marks.get(&line).map(|m| (*m, 0.4)));
         if let Some((m, alpha)) = mark {
             let x = gutter.right() - 6.0;
             match m {
                 Mark::Added => {
-                    painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(3.0, row_h)), 0.0, p.add_fg.gamma_multiply(alpha));
+                    painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(3.0, h)), 0.0, p.add_fg.gamma_multiply(alpha));
                 }
                 Mark::Modified => {
-                    painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(3.0, row_h)), 0.0, p.series[3].gamma_multiply(alpha));
+                    painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(3.0, h)), 0.0, p.series[3].gamma_multiply(alpha));
                 }
                 Mark::Deleted => {
                     let c = p.del_fg.gamma_multiply(alpha);
@@ -302,12 +492,13 @@ fn paint_gutter(ui: &mut Ui, ed: &Editor, look: &Look, gutter: Rect, top: f32, r
             }
         }
     }
-    let resp = ui.interact(gutter, id.with("gutter"), Sense::click());
     if resp.clicked()
         && let Some(pos) = resp.interact_pointer_pos()
     {
-        let line = ((pos.y - top) / row_h).floor().max(0.0) as usize;
-        if line < ed.buf.line_count() {
+        let line = ed.view.rows.line_at(pos.y - top, ed.buf.line_count(), row_h);
+        if (pos.x - fold_x).abs() < 8.0 && (ed.can_fold(line) || ed.folds.iter().any(|f| f.0 == line)) {
+            ed.toggle_fold(line);
+        } else {
             shown.gutter_click = Some(line);
         }
     }
@@ -316,21 +507,74 @@ fn paint_gutter(ui: &mut Ui, ed: &Editor, look: &Look, gutter: Rect, top: f32, r
     }
 }
 
+/// The whole file in miniature, each line a strip of its colours, with the part in view
+/// marked. A click or drag there scrolls to it.
+fn paint_minimap(ui: &mut Ui, ed: &mut Editor, p: &Palette, rect: Rect, visible: std::ops::Range<usize>, id: Id) {
+    let painter = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), rect);
+    painter.rect_filled(rect, 0.0, p.panel);
+    painter.line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, p.border));
+    let lines = ed.buf.line_count();
+    let fits = (rect.height() / MINIMAP_LINE).floor().max(1.0) as usize;
+    // Longer files show the stretch around the view, as it scrolls.
+    let shown_lines = visible.end.saturating_sub(visible.start);
+    let first = if lines <= fits { 0 } else { visible.start.saturating_sub(fits.saturating_sub(shown_lines) / 2).min(lines - fits) };
+    let last = (first + fits).min(lines);
+    if !ed.hl.ensure(&ed.buf, last, Duration::from_millis(3)) {
+        ui.ctx().request_repaint();
+    }
+    let x0 = rect.left() + 6.0;
+    let per_char = 0.9;
+    let max_x = rect.right() - 4.0;
+    for line in first..last {
+        let y = rect.top() + (line - first) as f32 * MINIMAP_LINE;
+        let text = ed.buf.line(line);
+        let span_list = ed.hl.line(line).cloned().unwrap_or_default();
+        let mut runs: Vec<(usize, usize, Color32)> = span_list.into_iter().filter(|s| s.0 < text.len()).collect();
+        if runs.is_empty() && !text.trim().is_empty() {
+            runs.push((0, text.len(), p.dim));
+        }
+        for (a, b, color) in runs {
+            let piece = &text[a.min(text.len())..b.min(text.len())];
+            if piece.trim().is_empty() {
+                continue;
+            }
+            let lead = piece.len() - piece.trim_start().len();
+            let xa = x0 + (a + lead) as f32 * per_char;
+            let xb = (x0 + (a + piece.trim_end().len()) as f32 * per_char).min(max_x);
+            if xa < xb {
+                painter.rect_filled(Rect::from_min_max(pos2(xa, y), pos2(xb, y + MINIMAP_LINE - 0.5)), 0.0, color.gamma_multiply(0.75));
+            }
+        }
+    }
+    let vy0 = rect.top() + visible.start.saturating_sub(first) as f32 * MINIMAP_LINE;
+    let vy1 = rect.top() + visible.end.saturating_sub(first) as f32 * MINIMAP_LINE;
+    painter.rect_filled(Rect::from_min_max(pos2(rect.left() + 1.0, vy0), pos2(rect.right(), vy1.max(vy0 + 4.0))), 0.0, p.hover.gamma_multiply(0.6));
+    let resp = ui.interact(rect, id.with("minimap"), Sense::click_and_drag());
+    if (resp.clicked() || resp.dragged())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let line = first + ((pos.y - rect.top()) / MINIMAP_LINE).max(0.0) as usize;
+        ed.view.center_on = Some(line.min(lines.saturating_sub(1)));
+        ui.ctx().request_repaint();
+    }
+}
+
 /// Where in the text a point on screen is.
-fn hit(ui: &Ui, ed: &Editor, origin: Pos2, row_h: f32, font_size: f32, base: Color32, at: Pos2) -> usize {
-    let line = (((at.y - origin.y) / row_h).floor().max(0.0) as usize).min(ed.buf.line_count().saturating_sub(1));
-    let g = galley(ui, ed, line, font_size, base);
-    let col = g.cursor_from_pos(vec2(at.x - origin.x - PAD, row_h / 2.0)).index.0;
+fn hit(ui: &Ui, ed: &Editor, origin: Pos2, m: &Metrics, base: Color32, at: Pos2) -> usize {
+    let line = ed.view.rows.line_at(at.y - origin.y, ed.buf.line_count(), m.row_h);
+    let g = galley(ui, ed, line, m, base);
+    let top = ed.view.rows.top(line, m.row_h);
+    let col = g.cursor_from_pos(vec2(at.x - origin.x - PAD, (at.y - origin.y - top).max(0.0))).index.0;
     ed.buf.pos(line, col)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn mouse(ui: &Ui, ed: &mut Editor, resp: &Response, origin: Pos2, row_h: f32, font_size: f32, p: &Palette, now: f64) {
+fn mouse(ui: &Ui, ed: &mut Editor, resp: &Response, origin: Pos2, m: &Metrics, p: &Palette, now: f64) {
     let Some(at) = ui.input(|i| i.pointer.interact_pos()) else { return };
     let mods = ui.input(|i| i.modifiers);
     let pressed = resp.hovered() && ui.input(|i| i.pointer.primary_pressed());
     if pressed {
-        let pos = hit(ui, ed, origin, row_h, font_size, p.text, at);
+        let pos = hit(ui, ed, origin, m, p.text, at);
         let count = match ed.view.last_click {
             Some((t, at_pos, n)) if now - t < MULTI_CLICK_SECS && at_pos == pos => n % 3 + 1,
             _ => 1,
@@ -345,8 +589,7 @@ fn mouse(ui: &Ui, ed: &mut Editor, resp: &Response, origin: Pos2, row_h: f32, fo
         let (s, e) = unit_range(ed, pos, unit);
         let column = (mods.alt && mods.shift).then(|| (ed.buf.line_of(pos), at.x));
         if mods.shift && !mods.alt {
-            let p = ed.sels.primary();
-            let anchor = p.anchor;
+            let anchor = ed.sels.primary().anchor;
             ed.sels = SelectionSet::single(Selection::new(anchor, pos));
             ed.view.drag = Some(Drag { origin: (anchor, anchor), unit: Unit::Char, column: None, adding: false, last: Selection::new(anchor, pos) });
         } else {
@@ -364,7 +607,7 @@ fn mouse(ui: &Ui, ed: &mut Editor, resp: &Response, origin: Pos2, row_h: f32, fo
         ed.view.drag = None;
     }
     if resp.secondary_clicked() {
-        let pos = hit(ui, ed, origin, row_h, font_size, p.text, at);
+        let pos = hit(ui, ed, origin, m, p.text, at);
         if !ed.sels.iter().any(|s| s.start() <= pos && pos <= s.end()) {
             ed.sels = SelectionSet::single(Selection::caret(pos));
         }
@@ -375,16 +618,16 @@ fn mouse(ui: &Ui, ed: &mut Editor, resp: &Response, origin: Pos2, row_h: f32, fo
         return;
     }
     let (origin_range, unit, column, adding, last) = (drag.origin, drag.unit, drag.column, drag.adding, drag.last);
-    let pos = hit(ui, ed, origin, row_h, font_size, p.text, at);
+    let pos = hit(ui, ed, origin, m, p.text, at);
     if let Some((line0, x0)) = column {
         // One selection per line, between the two x positions.
         let line1 = ed.buf.line_of(pos);
         let (a, b) = (line0.min(line1), line0.max(line1));
         let mut sels = Vec::new();
         for l in a..=b {
-            let y = origin.y + l as f32 * row_h + row_h / 2.0;
-            let s = hit(ui, ed, origin, row_h, font_size, p.text, pos2(x0, y));
-            let e = hit(ui, ed, origin, row_h, font_size, p.text, pos2(at.x, y));
+            let y = origin.y + ed.view.rows.top(l, m.row_h) + m.row_h / 2.0;
+            let s = hit(ui, ed, origin, m, p.text, pos2(x0, y));
+            let e = hit(ui, ed, origin, m, p.text, pos2(at.x, y));
             sels.push(Selection::new(s, e));
         }
         ed.sels = SelectionSet::from_vec(sels, if line1 >= line0 { b - a } else { 0 });
@@ -405,7 +648,7 @@ fn mouse(ui: &Ui, ed: &mut Editor, resp: &Response, origin: Pos2, row_h: f32, fo
         }
     }
     // Dragging past the edge scrolls.
-    ui.scroll_to_rect(Rect::from_center_size(at, vec2(4.0, row_h)), None);
+    ui.scroll_to_rect(Rect::from_center_size(at, vec2(4.0, m.row_h)), None);
 }
 
 fn unit_range(ed: &Editor, pos: usize, unit: Unit) -> (usize, usize) {
@@ -457,6 +700,7 @@ fn keyboard(ui: &Ui, ed: &mut Editor, page: isize, now_ms: u64, look: &Look, sho
                 }
             }
             Event::Ime(egui::ImeEvent::Commit(t)) if !t.is_empty() => ed.run(Cmd::Type(t), now_ms),
+            Event::Key { key: Key::Z, pressed: true, modifiers, .. } if modifiers.alt && !modifiers.command && !modifiers.shift => shown.toggle_wrap = true,
             Event::Key { key, pressed: true, modifiers, .. } => {
                 if let Some(cmd) = key_command(key, modifiers, page, mac) {
                     ed.run(cmd, now_ms);
@@ -516,6 +760,35 @@ pub fn key_command(key: Key, m: Modifiers, page: isize, mac: bool) -> Option<Cmd
         Key::L if m.command => Cmd::SelectLine,
         Key::J if m.command => Cmd::JoinLines,
         Key::Slash if m.command => Cmd::ToggleComment,
+        Key::OpenBracket if m.command && shift => Cmd::Fold,
+        Key::CloseBracket if m.command && shift => Cmd::Unfold,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_table_skips_folds_and_counts_wrapped_rows() {
+        let text = "fn a() {\n    one\n    two\n}\nshort\nlong line here that wraps\n";
+        let mut ed = Editor::new("a.rs", gitem_text::Buffer::from_text(text), true, gitem_text::indent::Indent::Spaces(4));
+        let m = Metrics { row_h: 10.0, char_w: 1.0, font_size: 10.0, wrap: None };
+        let mut rows = Rows::default();
+        rows.update(&ed, &m);
+        assert!(rows.tops.is_empty(), "one row a line needs no table");
+        assert_eq!(rows.top(4, 10.0), 40.0);
+        ed.toggle_fold(0);
+        rows.update(&ed, &m);
+        assert_eq!(rows.height(1, 10.0), 0.0);
+        assert_eq!(rows.top(4, 10.0), 20.0, "lines 1 and 2 are folded away");
+        assert_eq!(rows.line_at(15.0, ed.buf.line_count(), 10.0), 3);
+        let m = Metrics { wrap: Some(10.0), ..m };
+        rows.update(&ed, &m);
+        assert_eq!(rows.height(5, 10.0), 30.0, "25 chars at 10 a row is 3 rows");
+        assert!(rows.measured(5, 2, 3));
+        rows.update(&ed, &m);
+        assert_eq!(rows.height(5, 10.0), 20.0, "what was drawn wins over the estimate");
+    }
 }

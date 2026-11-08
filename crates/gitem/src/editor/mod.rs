@@ -42,6 +42,24 @@ pub enum Cmd {
     Collapse,
     /// Carets above or below each one, for column editing from the keyboard.
     AddCaret { up: bool },
+    /// Folds the block the caret's line opens, or unfolds the fold it's in.
+    Fold,
+    Unfold,
+    FoldAll,
+    UnfoldAll,
+}
+
+/// What the palette or a menu asks of the editor in front, beyond a plain command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    Run(Cmd),
+    Find,
+    Replace,
+    GoToLine,
+    Save,
+    TrimTrailing,
+    /// Find in files, starting from the word or selection at the caret.
+    FindInFiles,
 }
 
 /// Find and replace, and the matches for the text as it is.
@@ -79,6 +97,10 @@ pub struct Editor {
     pub goto: Option<String>,
     /// Take the keyboard on the next frame, as after the go-to box closes.
     pub focus: bool,
+    /// Folded blocks: the line that stays, and the last line hidden under it.
+    pub folds: Vec<(usize, usize)>,
+    /// Goes up when the folds change, so the view lays rows out again.
+    pub folds_gen: u64,
     /// The comment marker for this kind of file.
     comment: Option<&'static str>,
     view: view::ViewState,
@@ -101,6 +123,8 @@ impl Editor {
             max_cols,
             goto: None,
             focus: false,
+            folds: Vec::new(),
+            folds_gen: 0,
             comment: lines::comment_prefix(path),
             view: view::ViewState::default(),
         }
@@ -114,6 +138,7 @@ impl Editor {
     pub fn go_to_line(&mut self, line: usize) {
         let pos = self.buf.pos(line, 0);
         self.sels = SelectionSet::single(Selection::caret(pos));
+        self.open_folds_at_carets();
         self.reveal = true;
     }
 
@@ -149,7 +174,7 @@ impl Editor {
 
     /// Runs a command. `now_ms` groups typing for undo.
     pub fn run(&mut self, cmd: Cmd, now_ms: u64) {
-        let editing = !matches!(cmd, Cmd::Move(..) | Cmd::SelectAll | Cmd::SelectLine | Cmd::SelectNext | Cmd::SelectAllMatches | Cmd::Collapse | Cmd::AddCaret { .. });
+        let editing = !matches!(cmd, Cmd::Move(..) | Cmd::SelectAll | Cmd::SelectLine | Cmd::SelectNext | Cmd::SelectAllMatches | Cmd::Collapse | Cmd::AddCaret { .. } | Cmd::Fold | Cmd::Unfold | Cmd::FoldAll | Cmd::UnfoldAll);
         if editing && self.read_only {
             return;
         }
@@ -170,8 +195,62 @@ impl Editor {
             }
             Cmd::Move(m, extend) => {
                 self.sels.motion(&self.buf, m, extend);
+                // Up and down step over a folded block; anything else landing in one opens it.
+                let up = matches!(m, Move::Up) || matches!(m, Move::Lines(n) if n < 0);
+                let down = matches!(m, Move::Down) || matches!(m, Move::Lines(n) if n > 0);
+                if (up || down) && !self.folds.is_empty() {
+                    let folds = self.folds.clone();
+                    let b = &self.buf;
+                    self.sels.map(|s| {
+                        let (line, col) = b.point(s.head);
+                        match folds.iter().find(|f| line > f.0 && line <= f.1) {
+                            Some(f) => {
+                                let to = if up { f.0 } else { (f.1 + 1).min(b.line_count() - 1) };
+                                let head = b.pos(to, s.goal.unwrap_or(col));
+                                Selection { anchor: if extend { s.anchor } else { head }, head, goal: s.goal }
+                            }
+                            None => s,
+                        }
+                    });
+                } else {
+                    self.open_folds_at_carets();
+                }
                 self.hist.break_run();
                 self.reveal = true;
+            }
+            Cmd::Fold => {
+                let line = self.buf.line_of(self.sels.primary().head);
+                if !self.folds.iter().any(|f| f.0 == line) {
+                    self.toggle_fold(line);
+                }
+            }
+            Cmd::Unfold => {
+                let line = self.buf.line_of(self.sels.primary().head);
+                let before = self.folds.len();
+                self.folds.retain(|f| !(f.0 <= line && line <= f.1));
+                if self.folds.len() != before {
+                    self.folds_gen += 1;
+                }
+            }
+            Cmd::FoldAll => {
+                // Outermost blocks only: folding what's inside a fold changes nothing seen.
+                self.folds.clear();
+                let mut l = 0;
+                while l < self.buf.line_count() {
+                    match self.fold_end(l) {
+                        Some(end) => {
+                            self.folds.push((l, end));
+                            l = end + 1;
+                        }
+                        None => l += 1,
+                    }
+                }
+                self.folds_gen += 1;
+                self.open_folds_at_carets();
+            }
+            Cmd::UnfoldAll => {
+                self.folds.clear();
+                self.folds_gen += 1;
             }
             Cmd::SelectAll => self.sels = SelectionSet::single(Selection::new(0, self.buf.len_chars())),
             Cmd::SelectLine => {
@@ -274,6 +353,12 @@ impl Editor {
     fn after_edit(&mut self) {
         if let Some(line) = self.buf.take_changed() {
             self.hl.edited(line);
+            // Folds from the change down no longer match their lines.
+            let before = self.folds.len();
+            self.folds.retain(|f| f.1 < line);
+            if self.folds.len() != before {
+                self.folds_gen += 1;
+            }
             let len = self.buf.line(line).chars().count();
             self.max_cols = self.max_cols.max(len);
         }
@@ -570,6 +655,71 @@ impl Editor {
         self.sels = SelectionSet::from_vec(all.iter().map(|&(a, b)| Selection::new(a, b)).collect(), primary);
     }
 
+    fn indent_of(&self, line: usize) -> Option<usize> {
+        let text = self.buf.line(line);
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(text.chars().take_while(|c| *c == ' ' || *c == '\t').map(|c| if c == '\t' { 4 } else { 1 }).sum())
+    }
+
+    /// Whether the line opens a block: the next line with text is indented deeper. Cheap
+    /// enough for every line in view.
+    pub fn can_fold(&self, line: usize) -> bool {
+        let Some(base) = self.indent_of(line) else { return false };
+        (line + 1..self.buf.line_count().min(line + 200)).find_map(|l| self.indent_of(l)).is_some_and(|i| i > base)
+    }
+
+    /// The last line of the block `line` opens, by indent: blank lines inside it go with it,
+    /// those after it don't.
+    fn fold_end(&self, line: usize) -> Option<usize> {
+        let base = self.indent_of(line)?;
+        let mut end = None;
+        for l in line + 1..self.buf.line_count() {
+            match self.indent_of(l) {
+                Some(i) if i > base => end = Some(l),
+                Some(_) => break,
+                None => {}
+            }
+        }
+        end
+    }
+
+    pub fn toggle_fold(&mut self, line: usize) {
+        if let Some(i) = self.folds.iter().position(|f| f.0 == line) {
+            self.folds.remove(i);
+        } else if let Some(end) = self.fold_end(line) {
+            // One inside another goes: the outer one hides it anyway.
+            self.folds.retain(|f| !(f.0 > line && f.1 <= end));
+            self.folds.push((line, end));
+            self.folds.sort_unstable();
+            // A caret inside goes to the line that stays.
+            let b = &self.buf;
+            self.sels.map(|s| {
+                let l = b.line_of(s.head);
+                if l > line && l <= end { Selection::caret(b.line_end(line)) } else { s }
+            });
+        }
+        self.folds_gen += 1;
+    }
+
+    /// The lines hidden under folds, in order.
+    pub fn hidden_lines(&self) -> Vec<std::ops::RangeInclusive<usize>> {
+        let mut out: Vec<std::ops::RangeInclusive<usize>> = self.folds.iter().map(|f| f.0 + 1..=f.1).collect();
+        out.sort_by_key(|r| *r.start());
+        out
+    }
+
+    /// Opens any fold a caret has ended up inside, as after a jump to a line or a match.
+    pub fn open_folds_at_carets(&mut self) {
+        let lines: Vec<usize> = self.sels.iter().map(|s| self.buf.line_of(s.head)).collect();
+        let before = self.folds.len();
+        self.folds.retain(|f| !lines.iter().any(|l| *l > f.0 && *l <= f.1));
+        if self.folds.len() != before {
+            self.folds_gen += 1;
+        }
+    }
+
     /// The matches for the find box, found again only when the text or query changed.
     pub fn refresh_matches(&mut self) {
         let key = (self.buf.version, self.find.query.clone());
@@ -600,6 +750,7 @@ impl Editor {
         let m = if back { search::prev(&self.find.matches, from) } else { search::next(&self.find.matches, from) };
         if let Some((s, e)) = m {
             self.sels = SelectionSet::single(Selection::new(s, e));
+            self.open_folds_at_carets();
             self.reveal = true;
         }
     }
@@ -789,6 +940,27 @@ mod tests {
         typed(&mut e, "x");
         e.run(Cmd::Move(Move::Right, false), 0);
         assert_eq!((e.buf.text().as_str(), e.sels.primary().head), ("abc", 1));
+    }
+
+    #[test]
+    fn folding_by_indent() {
+        let text = "fn a() {\n    one\n\n    two\n}\nfn b() {\n    three\n}\n";
+        let mut e = ed(text, 0);
+        assert!(e.can_fold(0) && !e.can_fold(1) && !e.can_fold(4));
+        e.run(Cmd::Fold, 0);
+        assert_eq!(e.folds, vec![(0, 3)], "the blank line inside goes with it, the closer stays");
+        e.run(Cmd::Move(Move::Down, false), 0);
+        assert_eq!(e.buf.line_of(e.sels.primary().head), 4, "down steps over the fold");
+        e.run(Cmd::Move(Move::Up, false), 0);
+        assert_eq!(e.buf.line_of(e.sels.primary().head), 0);
+        e.run(Cmd::FoldAll, 0);
+        assert_eq!(e.folds, vec![(0, 3), (5, 6)]);
+        e.go_to_line(6);
+        assert_eq!(e.folds, vec![(0, 3)], "going to a hidden line opens its fold");
+        // An edit above a fold leaves its lines wrong, so it opens.
+        e.go_to_line(0);
+        e.run(Cmd::Type("x".into()), 0);
+        assert!(e.folds.is_empty());
     }
 
     #[test]

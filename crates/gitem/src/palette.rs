@@ -59,6 +59,25 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Review Changes" => (icon::LIST_CHECKS, "A checklist and notes for a change", None),
         "IDE Mode: Edit Files from the Files Tree" => (icon::CODE, "Switch IDE mode on or off", Some("Ctrl+Shift+E")),
         "Editor" => (icon::CODE, "Edit files of the working tree", None),
+        "Editor: Save" => (icon::FLOPPY_DISK, "", Some("Ctrl+S")),
+        "Editor: Find…" => (icon::MAGNIFYING_GLASS, "", Some("Ctrl+F")),
+        "Editor: Replace…" => (icon::SWAP, "", Some("Ctrl+H")),
+        "Editor: Go to Line…" => (icon::ARROW_LINE_DOWN, "", Some("Ctrl+G")),
+        "Editor: Toggle Comment" => (icon::CHAT_TEXT, "", Some("Ctrl+/")),
+        "Editor: Duplicate Lines" => (icon::COPY, "", Some("Shift+Alt+Down")),
+        "Editor: Delete Lines" => (icon::BACKSPACE, "", None),
+        "Editor: Join Lines" => (icon::ARROWS_IN_LINE_VERTICAL, "", Some("Ctrl+J")),
+        "Editor: Select All Matches" => (icon::TEXT_AA, "", Some("Ctrl+F2")),
+        "Editor: Fold" => (icon::CARET_RIGHT, "", Some("Ctrl+Shift+[")),
+        "Editor: Unfold" => (icon::CARET_DOWN, "", Some("Ctrl+Shift+]")),
+        "Editor: Fold All" => (icon::ARROWS_IN_SIMPLE, "", None),
+        "Editor: Unfold All" => (icon::ARROWS_OUT_SIMPLE, "", None),
+        "Editor: Trim Trailing Whitespace" => (icon::SCISSORS, "", None),
+        "Editor: Find in Files" => (icon::FILE_SEARCH, "", None),
+        "Editor: Save All" => (icon::FLOPPY_DISK_BACK, "Every file with unsaved edits", None),
+        "Editor: Word Wrap" => (icon::TEXT_INDENT, "Long lines go on over more rows, or scroll", Some("Alt+Z")),
+        "Editor: Minimap" => (icon::SIDEBAR_SIMPLE, "The file in miniature beside the text", None),
+        "Editor: Show Whitespace" => (icon::PARAGRAPH, "Dots for spaces and arrows for tabs", None),
         "Layout: Git" => (icon::GIT_FORK, "Overview, graph and changes in one pane", None),
         "Layout: IDE" => (icon::LAYOUT, "The editor above Changes and the Console, with the Files sidebar", None),
         "Layout: Save Current As…" => (icon::FLOPPY_DISK, "Keep this arrangement under a name", None),
@@ -353,6 +372,25 @@ pub fn commands() -> Vec<Item> {
     v.push(item("App", "Zen Mode (Hide Side Panels)", |cx| cx.out.push(Action::ToggleZen)));
     v.push(item("View", "IDE Mode: Edit Files from the Files Tree", |cx| cx.out.push(Action::Settings(Box::new(|s| s.ide_mode = !s.ide_mode)))));
     v.push(item("View", "Editor", |cx| cx.open(Tab::Editor(Box::default()))));
+    v.push(item("Editor", "Editor: Save", |cx| cx.out.push(Action::Editor(crate::editor::Request::Save))));
+    v.push(item("Editor", "Editor: Find…", |cx| cx.out.push(Action::Editor(crate::editor::Request::Find))));
+    v.push(item("Editor", "Editor: Replace…", |cx| cx.out.push(Action::Editor(crate::editor::Request::Replace))));
+    v.push(item("Editor", "Editor: Go to Line…", |cx| cx.out.push(Action::Editor(crate::editor::Request::GoToLine))));
+    v.push(item("Editor", "Editor: Toggle Comment", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::ToggleComment)))));
+    v.push(item("Editor", "Editor: Duplicate Lines", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::DuplicateLines)))));
+    v.push(item("Editor", "Editor: Delete Lines", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::DeleteLines)))));
+    v.push(item("Editor", "Editor: Join Lines", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::JoinLines)))));
+    v.push(item("Editor", "Editor: Select All Matches", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::SelectAllMatches)))));
+    v.push(item("Editor", "Editor: Fold", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::Fold)))));
+    v.push(item("Editor", "Editor: Unfold", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::Unfold)))));
+    v.push(item("Editor", "Editor: Fold All", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::FoldAll)))));
+    v.push(item("Editor", "Editor: Unfold All", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::UnfoldAll)))));
+    v.push(item("Editor", "Editor: Trim Trailing Whitespace", |cx| cx.out.push(Action::Editor(crate::editor::Request::TrimTrailing))));
+    v.push(item("Editor", "Editor: Find in Files", |cx| cx.out.push(Action::Editor(crate::editor::Request::FindInFiles))));
+    v.push(item("Editor", "Editor: Save All", |cx| cx.out.push(Action::SaveAll)));
+    v.push(item("Editor", "Editor: Word Wrap", |cx| cx.out.push(Action::Settings(Box::new(|s| s.editor_word_wrap = !s.editor_word_wrap)))));
+    v.push(item("Editor", "Editor: Minimap", |cx| cx.out.push(Action::Settings(Box::new(|s| s.editor_minimap = !s.editor_minimap)))));
+    v.push(item("Editor", "Editor: Show Whitespace", |cx| cx.out.push(Action::Settings(Box::new(|s| s.editor_show_whitespace = !s.editor_show_whitespace)))));
     v.push(item("View", "Layout: Git", |cx| cx.out.push(Action::Layout(crate::layouts::Preset::Git))));
     v.push(item("View", "Layout: IDE", |cx| cx.out.push(Action::Layout(crate::layouts::Preset::Ide))));
     v.push(item("View", "Layout: Save Current As…", |cx| {
@@ -516,7 +554,7 @@ const MAX_RESULTS: usize = 200;
 const MAX_RECENT: usize = 6;
 const RECENT: &str = "Recent";
 /// Sections in the order they appear before anything is typed.
-const SECTIONS: [&str; 11] = [RECENT, "Open recent", "View", "Git", "Show", "Remote", "App", "Check out", "Check out remote", "Open file", "Commit"];
+const SECTIONS: [&str; 12] = [RECENT, "Open recent", "View", "Editor", "Git", "Show", "Remote", "App", "Check out", "Check out remote", "Open file", "Commit"];
 
 fn section_title(section: &str) -> &str {
     match section {

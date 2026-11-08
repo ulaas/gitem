@@ -83,7 +83,12 @@ impl GrepView {
             }
         });
         if let Some((path, line)) = open {
-            cx.open(Tab::file(&path, rev, Some(line)));
+            // The working tree's text can be edited; a revision's is history.
+            if cx.settings.ide_mode && rev.is_none() {
+                cx.open(Tab::editor(&path, Some((line as usize).saturating_sub(1)), true));
+            } else {
+                cx.open(Tab::file(&path, rev, Some(line)));
+            }
         }
     }
 }

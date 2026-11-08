@@ -39,6 +39,10 @@ pub enum Action {
     Layout(crate::layouts::Preset),
     /// The layout as it is, kept under a name for any repository.
     SaveLayout(String),
+    /// For the editor in front: the focused pane's tab, or the first editor open.
+    Editor(crate::editor::Request),
+    /// Saves every editor with unsaved edits in this repository.
+    SaveAll,
     /// A file was written by the editor: the repository's status is out of date.
     FileSaved(String),
     /// The working-changes row was clicked, with Details set to show it.

@@ -10,6 +10,7 @@ description = "The text model behind gitem's editor: a rope buffer, selections, 
 ropey = "1.6"
 unicode-segmentation = "1"
 regex = "1"
+encoding_rs = "0.8"
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

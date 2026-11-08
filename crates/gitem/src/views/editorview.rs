@@ -10,7 +10,7 @@ use gitem_core::model::BlameLine;
 use gitem_core::ops;
 use gitem_core::repo::{BlameOpts, DiffSource};
 use gitem_text::indent::Indent;
-use gitem_text::{Buffer, Edit, LineEnding, Transaction, Unsupported};
+use gitem_text::{Buffer, Edit, Encoding, LineEnding, Transaction, Unsupported};
 
 use crate::action::{Action, Cx};
 use crate::editor::view::{self, Look, Mark};
@@ -34,8 +34,8 @@ fn hash(bytes: &[u8]) -> u64 {
 
 enum Opened {
     Text(Buffer, u64),
-    /// Not text that can be written back as it was, with the bytes for showing anyway.
-    Unsupported(Unsupported, Vec<u8>),
+    /// Not text that can be written back as it was.
+    Unsupported(Unsupported),
 }
 
 /// The file as the index and HEAD have it, for the gutter.
@@ -83,6 +83,8 @@ pub struct EditorView {
     picked: Option<LineChange>,
     /// Unsaved edits against the blamed text, for the text's version they were worked out for.
     blame_map: Option<(u64, Vec<LineChange>)>,
+    /// The encoding was changed: the file differs from what's on disk though the text doesn't.
+    recoded: bool,
     /// Blame is out of date: the file was just opened or saved.
     reblame: bool,
     /// The go-to box was showing last frame. It takes the keyboard once, as it opens.
@@ -107,7 +109,7 @@ impl EditorView {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.ed.as_ref().is_some_and(|e| e.is_dirty())
+        self.ed.as_ref().is_some_and(|e| e.is_dirty()) || self.recoded
     }
 
     pub fn unsaved(&self) -> Option<String> {
@@ -145,7 +147,7 @@ impl EditorView {
                     }
                     Opened::Text(b, h)
                 }
-                Err(why) => Opened::Unsupported(why, bytes),
+                Err(why) => Opened::Unsupported(why),
             })
         });
         self.load_bases(ctx, cx);
@@ -194,15 +196,7 @@ impl EditorView {
                 self.reblame = true;
                 self.remember(cx);
             }
-            Opened::Unsupported(Unsupported::Binary, _) => self.problem = Some("This is a binary file, which can't be edited as text.".into()),
-            Opened::Unsupported(Unsupported::NotUtf8, bytes) => {
-                let (text, _) = gitem_core::util::text_for_viewing(&bytes);
-                let mut ed = Editor::new(&self.path, Buffer::from_text(&text), cx.pal.dark, Self::default_indent(cx));
-                ed.read_only = true;
-                self.ed = Some(ed);
-                self.disk = Some(hash(&bytes));
-                self.problem = Some("This file isn't UTF-8. Editing it would change bytes you didn't touch, so it's read-only until converted.".into());
-            }
+            Opened::Unsupported(Unsupported::Binary) => self.problem = Some("This is a binary file, which can't be edited as text.".into()),
         }
         self.dark = cx.pal.dark;
     }
@@ -220,8 +214,9 @@ impl EditorView {
 
     /// Writes the text to disk, unless the file changed there since it was read.
     pub fn save(&mut self, cx: &mut Cx) -> bool {
+        let recoded = self.recoded;
         let Some(ed) = &mut self.ed else { return false };
-        if ed.read_only || !ed.is_dirty() {
+        if ed.read_only || !(ed.is_dirty() || recoded) {
             return false;
         }
         if self.conflict.is_some() {
@@ -232,7 +227,13 @@ impl EditorView {
             let t = gitem_text::lines::trim_trailing(&ed.buf);
             ed.transform(t, 0);
         }
-        let bytes = ed.buf.to_bytes();
+        let bytes = match ed.buf.to_bytes() {
+            Ok(b) => b,
+            Err(why) => {
+                cx.error(format!("{} can't be saved: {why}", self.path));
+                return false;
+            }
+        };
         let abs = cx.repo.root.join(&self.path);
         if let (Ok(now), Some(seen)) = (std::fs::read(&abs), self.disk)
             && hash(&now) != seen
@@ -247,6 +248,7 @@ impl EditorView {
                 }
                 self.disk = Some(hash(&bytes));
                 self.gone = false;
+                self.recoded = false;
                 ed.hist.mark_saved();
                 self.pinned = true;
                 cx.out.push(Action::FileSaved(self.path.clone()));
@@ -442,7 +444,7 @@ impl EditorView {
         let now_ms = (now * 1000.0) as u64;
         self.refresh_marks(now);
         self.toolbar(ui, cx, now_ms);
-        self.banners(ui, cx, now_ms);
+        self.banners(ui, cx);
         let Some(ed) = &self.ed else {
             if self.problem.is_none() {
                 spinner_row(ui, "Opening…", cx.pal);
@@ -467,6 +469,8 @@ impl EditorView {
             pal: cx.pal,
             whitespace: cx.settings.editor_show_whitespace,
             indent_guides: cx.settings.editor_indent_guides,
+            wrap: cx.settings.editor_word_wrap,
+            minimap: cx.settings.editor_minimap,
             marks: &self.marks,
             staged_marks: &self.staged_marks,
             line_note: note.as_deref(),
@@ -482,12 +486,41 @@ impl EditorView {
         if shown.save {
             self.save(cx);
         }
+        if shown.toggle_wrap {
+            cx.out.push(Action::Settings(Box::new(|s| s.editor_word_wrap = !s.editor_word_wrap)));
+        }
         if let Some(line) = shown.gutter_click {
             self.picked = self.change_at(line);
         }
         if let Some(resp) = shown.response {
             resp.context_menu(|ui| self.text_menu(ui, cx, now_ms));
         }
+    }
+
+    /// Carries out a request from the palette for this, the editor in front.
+    pub fn request(&mut self, cx: &mut Cx, r: crate::editor::Request) {
+        use crate::editor::Request;
+        if r == Request::Save {
+            self.save(cx);
+            return;
+        }
+        let Some(ed) = &mut self.ed else { return };
+        match r {
+            Request::Run(cmd) => ed.run(cmd, 0),
+            Request::Find | Request::Replace => {
+                ed.find.open = true;
+                ed.find.replacing = r == Request::Replace;
+                ed.find.focus_query = true;
+            }
+            Request::GoToLine => ed.goto = Some(String::new()),
+            Request::TrimTrailing => {
+                let t = gitem_text::lines::trim_trailing(&ed.buf);
+                ed.transform(t, 0);
+            }
+            Request::FindInFiles => cx.open(Tab::Grep(Box::new(crate::views::grep::GrepView::looking_for(&ed.search_seed(), "")))),
+            Request::Save => {}
+        }
+        ed.focus = true;
     }
 
     fn toolbar(&mut self, ui: &mut Ui, cx: &mut Cx, now_ms: u64) {
@@ -509,7 +542,25 @@ impl EditorView {
             let Some(ed) = &mut self.ed else { return };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The file's encoding, line endings and indent, each a menu to change it.
-                ui.label(RichText::new(ed.buf.encoding.name(ed.buf.bom)).small().color(p.dim));
+                let (enc, bom) = (ed.buf.encoding, ed.buf.bom);
+                let mut to = None;
+                ui.menu_button(RichText::new(enc.name(bom)).small(), |ui| {
+                    ui.label(RichText::new("Save as").small().color(p.dim));
+                    for (e, b) in [(Encoding::Utf8, false), (Encoding::Utf8, true), (Encoding::Utf16Le, true), (Encoding::Windows1252, false)] {
+                        if ui.add_enabled(!ed.read_only, egui::Button::selectable((e, b) == (enc, bom), e.name(b))).on_disabled_hover_text("This file is read-only.").clicked() {
+                            to = Some((e, b));
+                            ui.close();
+                        }
+                    }
+                });
+                if let Some((e, b)) = to
+                    && (e, b) != (enc, bom)
+                {
+                    // Nothing in the text changed, but the file will: it counts as unsaved.
+                    ed.buf.encoding = e;
+                    ed.buf.bom = b;
+                    self.recoded = true;
+                }
                 let eol = ed.buf.eol;
                 ui.menu_button(RichText::new(eol.name()).small(), |ui| {
                     for (to, name) in [(LineEnding::Lf, "Convert to LF"), (LineEnding::CrLf, "Convert to CRLF")] {
@@ -544,23 +595,10 @@ impl EditorView {
         });
     }
 
-    fn banners(&mut self, ui: &mut Ui, cx: &mut Cx, now_ms: u64) {
+    fn banners(&mut self, ui: &mut Ui, cx: &mut Cx) {
         let p = cx.pal;
-        if let Some(why) = self.problem.clone() {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(p.warn, why.as_str());
-                if why.contains("isn't UTF-8")
-                    && let Some(ed) = &mut self.ed
-                    && small_button(ui, "Convert to UTF-8 and edit").clicked()
-                {
-                    // The text as shown becomes the file's, which saving writes as UTF-8.
-                    ed.read_only = false;
-                    let text = ed.buf.text();
-                    let len = ed.buf.len_chars();
-                    ed.transform(Transaction::new(vec![Edit::replace(0, len, text)]), now_ms);
-                    self.problem = None;
-                }
-            });
+        if let Some(why) = &self.problem {
+            ui.colored_label(p.warn, why.as_str());
         }
         if self.gone {
             ui.colored_label(p.warn, "This file was deleted on disk. Saving puts it back.");

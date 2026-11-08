@@ -674,6 +674,10 @@ impl SettingsView {
             g.switch(&mut s.editor_indent_guides, "Indent guides", "A faint line at each level of indent.");
             g.switch(&mut s.editor_show_whitespace, "Show spaces and tabs", "");
         });
+        group(ui, "View", p, |g| {
+            g.switch(&mut s.editor_word_wrap, "Word wrap", "Long lines go on over more rows, rather than scrolling sideways. Alt+Z switches it.");
+            g.switch(&mut s.editor_minimap, "Minimap", "The file in miniature beside the text. A click there goes to that part.");
+        });
         group(ui, "Saving", p, |g| {
             g.switch(&mut s.editor_trim_on_save, "Trim spaces at line ends when saving", "");
         });

@@ -215,3 +215,18 @@ fn the_keyboard_moves_between_panes() {
     settle(&mut h);
     assert_eq!(focused(&h), vec!["home", "graph"]);
 }
+
+#[test]
+fn turning_ide_mode_on_offers_its_layout_once() {
+    let f = Fx::new();
+    let mut h = harness(&f);
+    settle(&mut h);
+    assert!(h.query_by_label("Use the IDE layout").is_none());
+    h.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::E);
+    settle(&mut h);
+    assert!(h.state().settings.ide_mode);
+    h.get_by_label("Use the IDE layout").click();
+    settle(&mut h);
+    assert_eq!(panes(&h).len(), 3);
+    assert!(h.query_by_label("Use the IDE layout").is_none(), "asked once");
+}

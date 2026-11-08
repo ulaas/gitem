@@ -1130,6 +1130,10 @@ pub struct GitemApp {
     dirty_guard: Option<DirtyGuard>,
     /// When Ctrl+K was pressed, for moving to a pane with an arrow after it.
     pane_chord: Option<f64>,
+    /// IDE mode as it was last frame, to notice it being turned on.
+    ide_was: bool,
+    /// IDE mode was just turned on: a bar offers the layout that goes with it.
+    ide_offer: bool,
     /// The next action runs without asking about unsaved edits: the user just answered.
     dirty_answered: bool,
     /// The user has said yes to losing work, so the next close request goes through.
@@ -1213,6 +1217,8 @@ impl GitemApp {
         let git = GitExe::discover((!settings.git_path.is_empty()).then(|| Path::new(&settings.git_path))).map_err(|e| e.to_string());
         let pal = Palette::for_settings(settings.theme, &settings.accent);
         let git_warning = git.as_ref().ok().and_then(GitExe::version_warning);
+        // Already on at start isn't being turned on: no offer.
+        let ide_was = settings.ide_mode;
         Self {
             git_warning,
             git,
@@ -1265,6 +1271,8 @@ impl GitemApp {
             close_guard: None,
             dirty_guard: None,
             pane_chord: None,
+            ide_was,
+            ide_offer: false,
             dirty_answered: false,
             closing: false,
             orphans: Vec::new(),
@@ -2105,6 +2113,47 @@ impl GitemApp {
                         self.settings.dock_layouts.insert(name, j);
                         self.settings_dirty = true;
                     }
+                }
+            }
+            Action::Editor(req) => {
+                let mut out = Vec::new();
+                let mut found = false;
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    let RepoTab { repo, data, dock, .. } = r;
+                    let is_file = |t: &Tab| matches!(t, Tab::Editor(e) if !e.path.is_empty());
+                    let front = dock.focused_leaf().and_then(|p| dock.leaf(p).ok().map(|l| egui_dock::TabPath { surface: p.surface, node: p.node, tab: l.active })).filter(|tp| dock.iter_all_tabs().any(|(x, t)| x == *tp && is_file(t)));
+                    let path = front.or_else(|| dock.iter_all_tabs().find(|(_, t)| is_file(t)).map(|(p, _)| p));
+                    if let Some(path) = path {
+                        let _ = dock.set_active_tab(path);
+                        if let Some((_, Tab::Editor(e))) = dock.iter_all_tabs_mut().find(|(p, _)| *p == path) {
+                            let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, out: &mut out, dialog_open: false, in_front: true };
+                            e.request(&mut cx, req);
+                            found = true;
+                        }
+                    }
+                }
+                if !found {
+                    self.toasts.push(("No file is open in the editor.".to_string(), Instant::now()));
+                }
+                for a in out {
+                    self.apply_action(ctx, a);
+                }
+            }
+            Action::SaveAll => {
+                let mut out = Vec::new();
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    let RepoTab { repo, data, dock, zoom, .. } = r;
+                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, out: &mut out, dialog_open: false, in_front: false };
+                    for (_, t) in dock.iter_all_tabs_mut().chain(zoom.iter_mut().flat_map(|z| z.full.iter_all_tabs_mut())) {
+                        if let Tab::Editor(e) = t
+                            && e.is_dirty()
+                        {
+                            e.save(&mut cx);
+                        }
+                    }
+                }
+                for a in out {
+                    self.apply_action(ctx, a);
                 }
             }
             Action::FileSaved(_) => {
@@ -3640,6 +3689,29 @@ impl GitemApp {
         }
         if !self.repos.is_empty() {
             egui::Panel::top("top-bar").frame(bar_frame).show_separator_line(false).show(ui, |ui| self.toolbar(ui, &mut out));
+        }
+        // Turned on just now, by any of its ways: offer the layout made for it, once.
+        if self.settings.ide_mode && !self.ide_was {
+            self.ide_offer = !self.repos.is_empty();
+        }
+        if !self.settings.ide_mode {
+            self.ide_offer = false;
+        }
+        self.ide_was = self.settings.ide_mode;
+        if self.ide_offer {
+            let pal = self.pal.clone();
+            egui::Panel::top("ide-offer").frame(egui::Frame::new().fill(pal.panel2).inner_margin(egui::Margin::symmetric(10, 4))).show_separator_line(false).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} IDE mode is on: a click in the Files tree opens the file for editing.", chrome::icon::CODE)).color(pal.text));
+                    if crate::widgets::small_button(ui, "Use the IDE layout").on_hover_text("The editor, Changes beside it, the Console below and the Files sidebar. Every open tab is kept").clicked() {
+                        out.push(Action::Layout(crate::layouts::Preset::Ide));
+                        self.ide_offer = false;
+                    }
+                    if crate::widgets::small_button(ui, "Keep this layout").clicked() {
+                        self.ide_offer = false;
+                    }
+                });
+            });
         }
 
         if let Some(tab) = self.repos.get_mut(self.active) {

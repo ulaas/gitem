@@ -55,7 +55,8 @@ impl Buffer {
         self.rope.len_lines() > 1
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// The file's bytes, or why the text can't be written in its encoding.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         encoding::encode(&self.text(), self.encoding, self.bom)
     }
 
@@ -166,7 +167,7 @@ mod tests {
         assert_eq!(b.eol, LineEnding::CrLf);
         let at = b.pos(1, 3);
         b.apply(&Transaction::new(vec![Edit::insert(at, "!")]));
-        assert_eq!(b.to_bytes(), b"one\r\ntwo!\nthree\r\n");
+        assert_eq!(b.to_bytes().unwrap(), b"one\r\ntwo!\nthree\r\n");
     }
 
     #[test]

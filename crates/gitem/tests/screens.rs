@@ -468,6 +468,33 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         quiet(&mut h);
         out.save(&mut h, "zoomed");
     }
+    if wanted("editor") {
+        let code: String = (0..60)
+            .map(|i| match i % 6 {
+                0 => format!("/// Item {i}, with a comment long enough that wrapping has to break it over two rows or more in this pane.\n"),
+                1 => format!("pub fn item_{i}(x: u32) -> u32 {{\n"),
+                2 => "    let y = x * 2; // twice\n".to_string(),
+                3 => "    if y > 10 { return y; }\n".to_string(),
+                4 => "    y + 1\n".to_string(),
+                _ => "}\n".to_string(),
+            })
+            .collect();
+        std::fs::write(f.root.join("code.rs"), code).unwrap();
+        let mut h = f.harness(|s| { set(s); s.ide_mode = true; s.editor_word_wrap = true; s.editor_minimap = true; s.editor_show_whitespace = false; }, vec![]);
+        open(&mut h, Tab::editor("code.rs", None, true));
+        quiet(&mut h);
+        for (_, t) in h.state_mut().repos[0].dock.iter_all_tabs_mut() {
+            if let Tab::Editor(e) = t
+                && let Some(ed) = e.editor_mut()
+            {
+                ed.toggle_fold(7);
+                ed.go_to_line(2);
+            }
+        }
+        quiet(&mut h);
+        out.save(&mut h, "editor-wrap-minimap-fold");
+        std::fs::remove_file(f.root.join("code.rs")).unwrap();
+    }
     if wanted("wrap") {
         let mut h = f.harness(set, vec![]);
         open(&mut h, Tab::diff(DiffSource::Unstaged, Some("a.txt".into())));
