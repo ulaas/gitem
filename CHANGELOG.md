@@ -5,7 +5,6 @@
 Changed:
 
 - Check for updates (off unless you turn it on in Settings) asks GitHub for the latest release, the first one with downloads.
-
 - The rail's Editor icon turns IDE mode on and off, and is lit while it's on, rather than opening an empty editor tab.
 - The file view has Edit, opening the file in the editor at the line you were reading, and the editor has Blame, leading back to it.
 - Fetch, Pull and Push in the toolbar show their action under way, with git's percentage and a bar along the button, and can't be pressed again until it's done, nor can their keys. Waiting behind something else, they say queued. The same goes for the buttons in Tools, Repository Health, Clean up branches and a pull request's Update, and the commit button says Committing… while it does.
