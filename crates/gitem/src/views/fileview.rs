@@ -404,7 +404,7 @@ impl FileView {
             if d.blame_skipped {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("This file is over 10 MB, so blame is off. It can take minutes.").small().color(pal.dim));
-                    if ui.small_button("Blame it anyway").clicked() {
+                    if crate::widgets::small_button(ui, "Blame it anyway").clicked() {
                         self.force_blame = true;
                         self.load(&ui.ctx().clone(), cx);
                     }
@@ -440,7 +440,7 @@ impl FileView {
             let repo = cx.repo.clone();
             let path = self.path.clone();
             let cur = self.rev.clone().unwrap_or_else(|| "HEAD".to_string());
-            if ui.small_button("◀ Older").on_hover_text("Previous revision of this file").clicked() {
+            if crate::widgets::small_button(ui, "◀ Older").on_hover_text("Previous revision of this file").clicked() {
                 let at_worktree = self.rev.is_none();
                 let c = cur.clone();
                 let p = path.clone();
@@ -453,7 +453,7 @@ impl FileView {
                 });
             }
             let repo = cx.repo.clone();
-            if ui.add_enabled(self.rev.is_some(), egui::Button::new("Newer ▶").small()).on_disabled_hover_text("This is the newest: it's the file as it is now.").on_hover_text("Next revision of this file").clicked() {
+            if ui.add_enabled(self.rev.is_some(), egui::Button::new("Newer ▶")).on_disabled_hover_text("This is the newest: it's the file as it is now.").on_hover_text("Next revision of this file").clicked() {
                 if let Some((rev, p)) = self.trail.pop() {
                     self.rev = rev;
                     self.path = p;
@@ -463,7 +463,7 @@ impl FileView {
                     self.nav.spawn(ui.ctx(), move || -> Result<Option<(String, String, bool)>, String> { Ok(repo.next_revision(&p, &c).map(|s| (s, p.clone(), false))) });
                 }
             }
-            if self.rev.is_some() && ui.small_button("Working tree").clicked() {
+            if self.rev.is_some() && crate::widgets::small_button(ui, "Working tree").clicked() {
                 if let Some((_, first_path)) = self.trail.first() {
                     self.path = first_path.clone();
                 }
@@ -471,20 +471,20 @@ impl FileView {
                 self.rev = None;
             }
             ui.separator();
-            if ui.small_button("History").clicked() {
+            if crate::widgets::small_button(ui, "History").clicked() {
                 cx.open(Tab::file_history(&self.path));
             }
-            if ui.small_button("Visual").clicked() {
+            if crate::widgets::small_button(ui, "Visual").clicked() {
                 cx.open(Tab::visual(&self.path));
             }
             if let Some((a, b)) = self.selected_range()
-                && ui.small_button(format!("Line history {}-{}", a + 1, b + 1)).clicked() {
+                && crate::widgets::small_button(ui, format!("Line history {}-{}", a + 1, b + 1)).clicked() {
                     let d = self.data.get();
                     self.open_line_history(cx, a as u32 + 1, b as u32 + 1, d);
                 }
             ui.menu_button("Compare \u{E136}", |ui| self.compare_menu(ui, cx));
             ui.menu_button("More \u{E136}", |ui| menus::file_menu(ui, cx, &self.path, self.rev.as_deref()));
-            if ui.small_button("Find").on_hover_text(crate::keys::context_label(&cx.settings.key_bindings, "find")).clicked() || ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "find")) {
+            if crate::widgets::small_button(ui, "Find").on_hover_text(crate::keys::context_label(&cx.settings.key_bindings, "find")).clicked() || ui.input(|i| crate::keys::context_pressed(i, &cx.settings.key_bindings, "find")) {
                 self.find_open = !self.find_open;
             }
             if self.data.busy() || self.nav.busy() {
@@ -513,7 +513,7 @@ impl FileView {
                     r.request_focus();
                 }
                 ui.label(RichText::new(if self.find_hits.is_empty() { "No matches".to_string() } else { format!("{} of {}", self.find_pos + 1, self.find_hits.len()) }).color(pal.dim));
-                if ui.small_button("\u{E4F6}").clicked() {
+                if crate::widgets::small_button(ui, "\u{E4F6}").clicked() {
                     self.find_open = false;
                 }
             });

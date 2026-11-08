@@ -314,12 +314,12 @@ impl Sidebar {
         }
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            if ui.small_button(format!("Delete {}…", plural(self.picked.len(), "branch", "branches"))).clicked() {
+            if crate::widgets::small_button(ui, format!("Delete {}…", plural(self.picked.len(), "branch", "branches"))).clicked() {
                 let names: Vec<String> = self.picked.iter().cloned().collect();
                 cx.out.push(crate::views::prune::delete_picked(cx.repo.clone(), names, cx.data.base_branch(), cx.settings.confirm_destructive));
                 self.picked.clear();
             }
-            if ui.small_button("Clear").on_hover_text("Stop picking. Nothing is changed.").clicked() {
+            if crate::widgets::small_button(ui, "Clear").on_hover_text("Stop picking. Nothing is changed.").clicked() {
                 self.picked.clear();
             }
         });

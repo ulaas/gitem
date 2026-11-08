@@ -161,7 +161,7 @@ impl RebaseView {
                         }
                     });
                 });
-                if ui.small_button("From first commit").on_hover_text("Rewrite the whole history of this branch").clicked() {
+                if crate::widgets::small_button(ui, "From first commit").on_hover_text("Rewrite the whole history of this branch").clicked() {
                     self.base = None;
                     self.base_edit.clear();
                     self.root = true;
@@ -175,7 +175,7 @@ impl RebaseView {
                 ui.checkbox(&mut self.autostash, "Autostash");
                 ui.checkbox(&mut self.update_refs, "Update dependent branches");
                 let can_check = self.base.is_some() && !self.items.is_empty() && !self.prediction.busy();
-                if ui.add_enabled(can_check, egui::Button::new("Check for conflicts").small()).on_hover_text("Tries the plan out without touching anything").on_disabled_hover_text("Pick a base with commits to replay first.").clicked()
+                if ui.add_enabled(can_check, egui::Button::new("Check for conflicts")).on_hover_text("Tries the plan out without touching anything").on_disabled_hover_text("Pick a base with commits to replay first.").clicked()
                     && let Some(base) = self.base.clone()
                 {
                     let (repo, plan) = (cx.repo.clone(), rebase::render_todo(&self.items));
@@ -190,7 +190,7 @@ impl RebaseView {
             if self.stale {
                 ui.horizontal(|ui| {
                     ui.colored_label(p.warn, "HEAD moved since this plan was made, so it was not started.");
-                    if ui.small_button("Rebuild plan").clicked() {
+                    if crate::widgets::small_button(ui, "Rebuild plan").clicked() {
                         self.load(&ui.ctx().clone(), cx);
                     }
                 });
@@ -225,24 +225,24 @@ impl RebaseView {
             if self.items.is_empty() {
                 ui.disable();
             }
-            if ui.small_button("Squash all into first").clicked() {
+            if crate::widgets::small_button(ui, "Squash all into first").clicked() {
                 rebase::squash_all_into_first(&mut self.items);
             }
-            if ui.small_button("Arrange fixups").on_hover_text("Move fixup! and squash! commits after the commits they target").clicked() {
+            if crate::widgets::small_button(ui, "Arrange fixups").on_hover_text("Move fixup! and squash! commits after the commits they target").clicked() {
                 rebase::arrange_autosquash(&mut self.items);
             }
-            if ui.small_button("Reset to pick").clicked() {
+            if crate::widgets::small_button(ui, "Reset to pick").clicked() {
                 for i in &mut self.items {
                     if matches!(i.action, RebaseAction::Squash | RebaseAction::Fixup | RebaseAction::Drop | RebaseAction::Reword | RebaseAction::Edit) {
                         i.action = RebaseAction::Pick;
                     }
                 }
             }
-            if ui.small_button("+ exec").on_hover_text("Run a shell command after the selected step").clicked() {
+            if crate::widgets::small_button(ui, "+ exec").on_hover_text("Run a shell command after the selected step").clicked() {
                 let at = (self.selected + 1).min(self.items.len());
                 self.items.insert(at, TodoItem { action: RebaseAction::Exec, sha: String::new(), text: String::new() });
             }
-            if ui.small_button("+ break").on_hover_text("Stop after the selected step").clicked() {
+            if crate::widgets::small_button(ui, "+ break").on_hover_text("Stop after the selected step").clicked() {
                 let at = (self.selected + 1).min(self.items.len());
                 self.items.insert(at, TodoItem { action: RebaseAction::Break, sha: String::new(), text: String::new() });
             }
@@ -380,7 +380,7 @@ impl RebaseView {
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if !RebaseAction::CHOICES.contains(&self.items[i].action) && ui.small_button("\u{E4F6}").clicked() {
+                            if !RebaseAction::CHOICES.contains(&self.items[i].action) && crate::widgets::small_button(ui, "\u{E4F6}").clicked() {
                                 remove = Some(i);
                             }
                         });

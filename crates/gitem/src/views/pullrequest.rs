@@ -254,7 +254,7 @@ impl PullRequestView {
                             let number = l.new.or(l.old).map_or(String::new(), |n| format!("{n:>5}"));
                             // A comment goes on the new side, so that's where there's a button.
                             if let Some(n) = l.new {
-                                if ui.small_button(RichText::new(&number).monospace().color(p.faint)).on_hover_text("Comment on this line").clicked() {
+                                if crate::widgets::small_button(ui, RichText::new(&number).monospace().color(p.faint)).on_hover_text("Comment on this line").clicked() {
                                     self.comment_on = Some(n);
                                 }
                             } else {
@@ -354,7 +354,7 @@ impl PullRequestView {
                         ui.add_space(18.0);
                         if self.reply_on.as_ref() != Some(&first.thread) {
                             let label = if group.len() > 1 { format!("Reply to {}'s thread", first.author) } else { format!("Reply to {}", first.author) };
-                            if ui.add_enabled(can_reply, egui::Button::new(label).small()).on_disabled_hover_text(&no_reply_why).clicked() {
+                            if ui.add_enabled(can_reply, egui::Button::new(label)).on_disabled_hover_text(&no_reply_why).clicked() {
                                 self.reply_on = Some(first.thread.clone());
                                 self.reply.clear();
                             }
@@ -401,7 +401,7 @@ impl PullRequestView {
                 }
                 if let (Some(path), line) = (&c.path, c.line) {
                     let where_ = line.map_or(path.clone(), |l| format!("{path}:{l}"));
-                    if ui.small_button(where_).on_hover_text("Show this file").clicked()
+                    if crate::widgets::small_button(ui, where_).on_hover_text("Show this file").clicked()
                         && let Some(i) = d.files.iter().position(|f| f.path == *path)
                     {
                         self.selected_file = i;

@@ -288,17 +288,17 @@ impl ReviewView {
                     }
                     ui.horizontal(|ui| {
                         ui.add(crate::widgets::input(&mut self.replies[i]).hint_text("Reply").id_salt(("reply", i)).desired_width(ui.available_width() - 140.0));
-                        if ui.small_button("Reply").clicked() && !self.replies[i].trim().is_empty() {
+                        if crate::widgets::small_button(ui, "Reply").clicked() && !self.replies[i].trim().is_empty() {
                             let r = std::mem::take(&mut self.replies[i]);
                             self.saved.threads[i].replies.push(r.trim().to_string());
                             changed = true;
                         }
                         if t.dismissed {
-                            if ui.small_button("Restore").clicked() {
+                            if crate::widgets::small_button(ui, "Restore").clicked() {
                                 self.saved.threads[i].dismissed = false;
                                 changed = true;
                             }
-                        } else if ui.small_button("Dismiss").clicked() {
+                        } else if crate::widgets::small_button(ui, "Dismiss").clicked() {
                             self.saved.threads[i].dismissed = true;
                             changed = true;
                         }

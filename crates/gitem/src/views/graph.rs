@@ -333,7 +333,7 @@ impl GraphView {
             }
             if self.matches.busy() {
                 ui.add(spinner(14.0));
-                if ui.small_button("Stop").on_hover_text("Stop this search").clicked() {
+                if crate::widgets::small_button(ui, "Stop").on_hover_text("Stop this search").clicked() {
                     self.matches.stop();
                 }
             }
@@ -407,7 +407,7 @@ impl GraphView {
                                     f.solo = None;
                                     changed = true;
                                 }
-                                if ui.small_button("solo").on_hover_text("Show only this branch").clicked() {
+                                if crate::widgets::small_button(ui, "solo").on_hover_text("Show only this branch").clicked() {
                                     f.solo = Some(b.name.clone());
                                     changed = true;
                                 }

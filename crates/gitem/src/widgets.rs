@@ -252,8 +252,15 @@ pub fn keyed_context_menu(resp: &Response, by_key: bool, add: impl FnOnce(&mut U
 /// text box in the app is made here.
 const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(6, 5);
 
+/// A one-line text box as tall as a button, so it lines up with those beside it.
 pub fn input(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
-    egui::TextEdit::singleline(text).margin(INPUT_MARGIN)
+    egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(6, 2)).min_size(vec2(0.0, crate::theme::CONTROL_HEIGHT)).vertical_align(egui::Align::Center)
+}
+
+/// A button for a row of small actions. egui's own small button drops the usual height, so
+/// it stood shorter than the buttons, menus and boxes beside it.
+pub fn small_button(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> Response {
+    ui.add(egui::Button::new(text).min_size(vec2(0.0, ui.spacing().interact_size.y)))
 }
 
 pub fn text_area(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
@@ -686,7 +693,7 @@ pub fn spinner_row(ui: &mut Ui, text: &str, p: &Palette) {
 
 /// A small button showing a glyph, with a proper name for anyone who can't see that.
 pub fn small_icon_button(ui: &mut Ui, glyph: &str, name: &str, keys: &str) -> Response {
-    let r = ui.small_button(glyph);
+    let r = crate::widgets::small_button(ui, glyph);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
     if keys.is_empty() { r.on_hover_text(name) } else { r.on_hover_text(format!("{name} ({keys})")) }
 }

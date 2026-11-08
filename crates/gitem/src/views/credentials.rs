@@ -215,14 +215,14 @@ impl CredentialsView {
                     if is_rev {
                         if let Some((_, s)) = &self.revealed {
                             ui.label(RichText::new(s).monospace().color(p.warn));
-                            if ui.small_button("Copy").clicked() {
+                            if crate::widgets::small_button(ui, "Copy").clicked() {
                                 cx.copy(s.clone());
                             }
                         }
-                        if ui.small_button("Hide").clicked() {
+                        if crate::widgets::small_button(ui, "Hide").clicked() {
                             self.revealed = None;
                         }
-                    } else if ui.small_button("Reveal").on_hover_text("Shows it for 30 seconds").clicked() {
+                    } else if crate::widgets::small_button(ui, "Reveal").on_hover_text("Shows it for 30 seconds").clicked() {
                         match cred::get(target) {
                             Ok(Some(c)) => {
                                 self.revealed = Some((target.clone(), c.secret));
@@ -231,7 +231,7 @@ impl CredentialsView {
                             _ => cx.error("Could not read this secret."),
                         }
                     }
-                    if ui.small_button("Delete").clicked() {
+                    if crate::widgets::small_button(ui, "Delete").clicked() {
                         if cx.settings.confirm_destructive {
                             self.pending_delete = Some(target.clone());
                         } else {
@@ -304,10 +304,10 @@ impl CredentialsView {
                     ui.label(RichText::new(&k.comment).small().color(p.dim));
                 });
                 ui.horizontal(|ui| {
-                    if ui.small_button("Copy public key").clicked() {
+                    if crate::widgets::small_button(ui, "Copy public key").clicked() {
                         cx.copy(k.public.clone());
                     }
-                    if !k.private_path.is_empty() && ui.small_button("Add to agent").clicked() {
+                    if !k.private_path.is_empty() && crate::widgets::small_button(ui, "Add to agent").clicked() {
                         match cred::ssh_agent_add(&k.private_path) {
                             Ok(m) => {
                                 cx.toast(m.trim().to_string());
@@ -316,7 +316,7 @@ impl CredentialsView {
                             Err(e) => cx.error(e.to_string()),
                         }
                     }
-                    if ui.small_button("Use for signing").clicked() {
+                    if crate::widgets::small_button(ui, "Use for signing").clicked() {
                         cx.run(ops::config_set("gpg.format", "ssh", "global"));
                         cx.run(ops::config_set("user.signingkey", &k.public_path.replace('\\', "/"), "global"));
                     }

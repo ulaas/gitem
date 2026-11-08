@@ -106,20 +106,20 @@ impl TextView {
         let Some(t) = self.text.get().cloned() else {
             spinner_row(ui, "Asking your AI provider...", &p);
             if let Some(s) = &self.stop
-                && ui.small_button("Stop").on_hover_text("Stops before the next git command. A rebase under way stays paused, with the banner to continue or abort it.").clicked()
+                && crate::widgets::small_button(ui, "Stop").on_hover_text("Stops before the next git command. A rebase under way stays paused, with the banner to continue or abort it.").clicked()
             {
                 s.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             return;
         };
         ui.horizontal(|ui| {
-            if ui.small_button("Copy").clicked() {
+            if crate::widgets::small_button(ui, "Copy").clicked() {
                 cx.copy(t.clone());
             }
             if let Some(slot) = &self.undo {
                 let op = slot.lock().ok().and_then(|g| g.clone());
                 if let Some(op) = op
-                    && ui.small_button("Undo…").clicked() {
+                    && crate::widgets::small_button(ui, "Undo…").clicked() {
                         cx.confirm("Undo", "Go back to where the branch was before this started? Uncommitted changes are kept. If they're in a file this has to change, it stops and changes nothing, so stash them first.", "Undo", op);
                     }
             }

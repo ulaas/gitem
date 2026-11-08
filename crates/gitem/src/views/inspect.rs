@@ -154,13 +154,13 @@ impl InspectPanel {
                 cx.copy(c.sha.clone());
             }
             for par in &c.parents {
-                if ui.small_button(RichText::new(format!("\u{E08E} {}", gitem_core::util::prefix(par, 7))).monospace()).on_hover_text("Go to parent").clicked() {
+                if crate::widgets::small_button(ui, RichText::new(format!("\u{E08E} {}", gitem_core::util::prefix(par, 7))).monospace()).on_hover_text("Go to parent").clicked() {
                     cx.inspect(par);
                 }
             }
             if let Some(f) = cx.forge() {
                 let url = f.commit_url(&c.sha);
-                if ui.small_button("Open on remote").clicked() {
+                if crate::widgets::small_button(ui, "Open on remote").clicked() {
                     cx.url(url);
                 }
             }
@@ -179,7 +179,7 @@ impl InspectPanel {
         if let Some(remote) = cx.forge().cloned() {
             let asked = self.prs_for.as_deref() == Some(c.sha.as_str());
             ui.horizontal_wrapped(|ui| {
-                if !asked && ui.small_button("Find pull request").on_hover_text("Asks the host").clicked() {
+                if !asked && crate::widgets::small_button(ui, "Find pull request").on_hover_text("Asks the host").clicked() {
                     self.prs_for = Some(c.sha.clone());
                     let (git, sha) = (cx.repo.git.clone(), c.sha.clone());
                     self.prs.spawn(ui.ctx(), move || -> Result<Vec<gitem_core::forge::details::CommitPr>, String> { crate::views::launchpad::resolve_client(&git, &remote)?.prs_for_commit(&sha).map_err(|e| e.to_string()) });
@@ -244,7 +244,7 @@ impl InspectPanel {
                     let (rect, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
                     paint_badge(ui, rect.min, 18.0, r, &p);
                 }
-                if more > 0 && ui.small_button(if self.all_refs { "Fewer".to_string() } else { format!("+{more}") }).clicked() {
+                if more > 0 && crate::widgets::small_button(ui, if self.all_refs { "Fewer".to_string() } else { format!("+{more}") }).clicked() {
                     self.all_refs = !self.all_refs;
                 }
             });
@@ -296,7 +296,7 @@ impl InspectPanel {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let busy = self.explanation.busy();
-            if ui.add_enabled(!busy, egui::Button::new("Explain with AI").small()).on_disabled_hover_text("Already explaining this commit.").clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("Explain with AI")).on_disabled_hover_text("Already explaining this commit.").clicked() {
                 self.explain(ui.ctx(), cx, c);
             }
             if busy {
@@ -320,7 +320,7 @@ impl InspectPanel {
             ui.label(RichText::new(format!("{} changed", plural(d.files.len(), "file", "files"))).strong());
             ui.label(RichText::new(format!("+{add}")).color(p.add_fg).monospace());
             ui.label(RichText::new(format!("-{del}")).color(p.del_fg).monospace());
-            if ui.small_button("Open all").clicked() {
+            if crate::widgets::small_button(ui, "Open all").clicked() {
                 cx.diff(DiffSource::Commit(c.sha.clone()), None);
             }
         });

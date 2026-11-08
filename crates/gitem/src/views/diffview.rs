@@ -467,11 +467,11 @@ impl DiffView {
                 self.jump(1);
             }
             if let Some(path) = &self.path {
-                if ui.small_button("Blame").clicked() {
+                if crate::widgets::small_button(ui, "Blame").clicked() {
                     let rev = if let DiffSource::Commit(s) = &self.src { Some(s.clone()) } else { None };
                     cx.open(Tab::file(path, rev, None));
                 }
-                if ui.small_button("History").clicked() {
+                if crate::widgets::small_button(ui, "History").clicked() {
                     cx.open(Tab::file_history(path));
                 }
             }
@@ -491,7 +491,7 @@ impl DiffView {
             }
             toggle(ui, &mut self.wrap, "Wrap", "Run long lines on underneath, rather than off to the side");
             if self.embedded {
-                if ui.small_button("Open in tab").on_hover_text("Open this diff in a tab of its own").clicked() {
+                if crate::widgets::small_button(ui, "Open in tab").on_hover_text("Open this diff in a tab of its own").clicked() {
                     cx.diff(self.src.clone(), self.path.as_deref());
                 }
             } else {
@@ -536,7 +536,7 @@ impl DiffView {
             }
             let says = if self.find.is_empty() { String::new() } else if self.find_hits.is_empty() { "No matches".to_string() } else { format!("{} of {}", self.find_pos + 1, self.find_hits.len()) };
             ui.label(RichText::new(says).small().color(cx.pal.dim));
-            if ui.small_button("Close").clicked() {
+            if crate::widgets::small_button(ui, "Close").clicked() {
                 self.find_open = false;
                 self.find_hits.clear();
             }
@@ -653,17 +653,17 @@ impl DiffView {
         }
         match self.src {
             DiffSource::Unstaged => {
-                if ui.small_button("Stage hunk").clicked()
+                if crate::widgets::small_button(ui, "Stage hunk").clicked()
                     && let Some(p) = diff::build_patch(f, hunk, None, PatchMode::Forward) {
                         cx.run(ops::apply_patch("Stage hunk", p, true, false));
                     }
-                if ui.small_button("Discard hunk…").clicked()
+                if crate::widgets::small_button(ui, "Discard hunk…").clicked()
                     && let Some(p) = diff::build_patch(f, hunk, None, PatchMode::Reverse) {
                         cx.confirm("Discard hunk", "Discard this hunk from the working tree? The toolbar's Undo can bring it back straight afterwards.", "Discard", ops::apply_patch("Discard hunk", p, false, true).undoable(gitem_core::undo::UndoPlan::Discard { label: "Undo discard".to_string(), paths: vec![f.new_path.clone()] }));
                     }
             }
             DiffSource::Staged => {
-                if ui.small_button("Unstage hunk").clicked()
+                if crate::widgets::small_button(ui, "Unstage hunk").clicked()
                     && let Some(p) = diff::build_patch(f, hunk, None, PatchMode::Reverse) {
                         cx.run(ops::apply_patch("Unstage hunk", p, true, true));
                     }
@@ -691,10 +691,10 @@ impl DiffView {
             if self.can_stage() && !conflicted {
                 let path = f.display_path().to_string();
                 if self.src == DiffSource::Unstaged {
-                    if ui.small_button("Stage file").clicked() {
+                    if crate::widgets::small_button(ui, "Stage file").clicked() {
                         cx.run(ops::stage_paths(&[path]));
                     }
-                } else if ui.small_button("Unstage file").clicked() {
+                } else if crate::widgets::small_button(ui, "Unstage file").clicked() {
                     // A rename goes back whole, or its old name stays staged as a deletion.
                     let mut names = vec![path];
                     if f.is_rename {

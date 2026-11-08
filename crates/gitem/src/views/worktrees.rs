@@ -109,7 +109,7 @@ impl WorktreesView {
                         });
                         ui.label(RichText::new(&w.path).small().color(p.dim));
                         ui.horizontal(|ui| {
-                            if !w.is_current && w.prunable.is_none() && ui.small_button("Open").clicked() {
+                            if !w.is_current && w.prunable.is_none() && crate::widgets::small_button(ui, "Open").clicked() {
                                 cx.out.push(Action::OpenRepo(w.path.clone().into()));
                             }
                             ui.menu_button("More \u{E136}", |ui| menus::worktree_menu(ui, cx, &w));

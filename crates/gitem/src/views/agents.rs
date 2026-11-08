@@ -64,7 +64,7 @@ impl AgentsView {
             if let Some(s) = selected {
                 let mut close = false;
                 egui::Panel::bottom("agent-activity").resizable(true).default_size(240.0).show(ui, |ui| {
-                    close = ui.small_button("Close activity").clicked();
+                    close = crate::widgets::small_button(ui, "Close activity").clicked();
                     activity(ui, cx, s);
                 });
                 if close {
@@ -97,22 +97,22 @@ impl AgentsView {
             }
             ui.horizontal_wrapped(|ui| {
                 if let Some(command) = s.resume_command()
-                    && ui.small_button("Resume").on_hover_text(&command).clicked()
+                    && crate::widgets::small_button(ui, "Resume").on_hover_text(&command).clicked()
                 {
                     cx.out.push(Action::OpenTerminal(s.cwd.clone().into(), Some(command)));
                 }
-                if ui.small_button("Activity").clicked() {
+                if crate::widgets::small_button(ui, "Activity").clicked() {
                     self.selected = Some(s.id.clone());
                 }
-                if !s.branch.is_empty() && ui.small_button("Graph").clicked() {
+                if !s.branch.is_empty() && crate::widgets::small_button(ui, "Graph").clicked() {
                     cx.out.push(Action::GraphFocus(s.branch.clone()));
                 }
                 if cx.settings.archived_sessions.contains(&s.id) {
-                    if ui.small_button("Unarchive").clicked() {
+                    if crate::widgets::small_button(ui, "Unarchive").clicked() {
                         let id = s.id.clone();
                         cx.out.push(Action::Settings(Box::new(move |st| st.archived_sessions.retain(|x| *x != id))));
                     }
-                } else if ui.small_button("Archive").on_hover_text("Hide it here. The transcript isn't touched.").clicked() {
+                } else if crate::widgets::small_button(ui, "Archive").on_hover_text("Hide it here. The transcript isn't touched.").clicked() {
                     let id = s.id.clone();
                     cx.out.push(Action::Settings(Box::new(move |st| st.archived_sessions.push(id))));
                 }

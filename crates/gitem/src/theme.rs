@@ -383,6 +383,9 @@ pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
     s
 }
 
+/// The one height for buttons, menus, text boxes and icon buttons, so a row of them lines up.
+pub const CONTROL_HEIGHT: f32 = 24.0;
+
 pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32, reduce_motion: bool) {
     let mut v = if p.dark { Visuals::dark() } else { Visuals::light() };
     v.panel_fill = p.panel;
@@ -431,7 +434,9 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32, reduce_motion: bool) 
     style.visuals = v;
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(7.0, 3.0);
-    style.spacing.interact_size.y = 22.0;
+    // Every control in a row has this height: buttons, menus, text boxes and icon buttons
+    // alike. `widgets::small_button` and `widgets::input` keep to it too.
+    style.spacing.interact_size.y = CONTROL_HEIGHT;
     // Small things are fiddly with a mouse. Their targets reach further than they show.
     style.interaction.interact_radius = 6.0;
     if reduce_motion {

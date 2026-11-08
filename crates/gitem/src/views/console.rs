@@ -38,7 +38,7 @@ impl ConsoleView {
             ui.checkbox(&mut self.show_reads, "Show background reads");
             ui.checkbox(&mut self.stick, "Follow");
             ui.add(crate::widgets::input(&mut self.filter).hint_text("Filter").desired_width(200.0));
-            if ui.small_button("Clear").clicked()
+            if crate::widgets::small_button(ui, "Clear").clicked()
                 && let Ok(mut l) = cx.repo.git.log.lock() {
                     l.clear();
                 }
@@ -69,7 +69,7 @@ impl ConsoleView {
         let matching: Vec<&gitem_core::runner::LogEntry> = entries.iter().filter(|e| (self.show_reads || e.is_write) && (q.is_empty() || e.command.to_lowercase().contains(&q))).collect();
         let older = matching.len().saturating_sub(self.shown);
         egui::ScrollArea::vertical().id_salt("console").stick_to_bottom(self.stick).auto_shrink([false, false]).show(ui, |ui| {
-            if older > 0 && ui.small_button(format!("Show {} older", older.min(SHOWN_STEP))).clicked() {
+            if older > 0 && crate::widgets::small_button(ui, format!("Show {} older", older.min(SHOWN_STEP))).clicked() {
                 self.shown += SHOWN_STEP;
             }
             for e in &matching[older..] {

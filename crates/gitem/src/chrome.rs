@@ -67,7 +67,7 @@ fn tooltip(resp: Response, name: &str, tip: &str, p: &Palette) -> Response {
 
 /// A square button showing only an icon. `name` is its tooltip and accessible name.
 pub fn icon_button(ui: &mut Ui, glyph: &str, name: &str, tip: &str, on: bool, p: &Palette) -> Response {
-    let side = ui.spacing().interact_size.y + 4.0;
+    let side = ui.spacing().interact_size.y;
     let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     crate::widgets::focus_ring(ui, &resp, p);
@@ -85,7 +85,7 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, name: &str, tip: &str, on: bool, p:
 
 /// A toolbar button showing only an icon, on the same raised fill as text buttons.
 pub fn tool_button(ui: &mut Ui, glyph: &str, tint: Color32, name: &str, tip: &str, on: bool, p: &Palette) -> Response {
-    let side = ui.spacing().interact_size.y + 4.0;
+    let side = ui.spacing().interact_size.y;
     let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     if ui.is_rect_visible(rect) {

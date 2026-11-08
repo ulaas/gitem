@@ -355,13 +355,13 @@ impl LaunchpadView {
             let hosted = cx.forge().is_some();
             ui.add_enabled_ui(hosted, |ui| ui.selectable_value(&mut self.page, Page::Create, "Create pull request")).inner.on_disabled_hover_text("None of this repository's remotes is on a supported host.");
             ui.separator();
-            if ui.add_enabled(hosted, egui::Button::new("Refresh").small()).on_disabled_hover_text("There's no host to ask.").clicked() {
+            if ui.add_enabled(hosted, egui::Button::new("Refresh")).on_disabled_hover_text("There's no host to ask.").clicked() {
                 self.refresh(&ctx, cx);
             }
             // With none, the page below says so, and what to do about it.
             if let Some(r) = cx.forge().cloned() {
                 chip(ui, &format!("{} · {}", r.kind.label(), r.path), p.series_text(6));
-                if ui.small_button("Connect…").clicked() {
+                if crate::widgets::small_button(ui, "Connect…").clicked() {
                     cx.form(token_form(&r));
                 }
             }
@@ -384,7 +384,7 @@ impl LaunchpadView {
             let asked = ui.selectable_value(&mut self.everywhere, true, "Everything I'm in").on_hover_text("Open pull requests you're involved in, asking each host your recent repositories use that has a saved token. One request per host or more, and only when you ask.");
             // Only ever by a click: it's requests to every host, with a token.
             let first_look = asked.clicked() && self.involved.get().is_none() && !self.involved.busy();
-            let again = self.everywhere && ui.add_enabled(!self.involved.busy(), egui::Button::new("Ask again").small()).on_disabled_hover_text("Still asking.").clicked();
+            let again = self.everywhere && ui.add_enabled(!self.involved.busy(), egui::Button::new("Ask again")).on_disabled_hover_text("Still asking.").clicked();
             if first_look || again {
                 let (git, here, recent, custom) = (cx.repo.git.clone(), cx.forge().cloned(), cx.settings.recent_repos.clone(), cx.settings.custom_hosts.clone());
                 self.involved.spawn(ui.ctx(), move || ask_everywhere(&git, here, &recent, &custom));
@@ -517,17 +517,17 @@ impl LaunchpadView {
                                     if x.pr.draft {
                                         chip(ui, "Draft", p.dim);
                                     }
-                                    if ui.small_button("Open").clicked() {
+                                    if crate::widgets::small_button(ui, "Open").clicked() {
                                         cx.url(x.pr.url.clone());
                                     }
                                     // A folder of that name opened here before. It's only a guess at which
                                     // clone, and opening it is all this does.
                                     if let Some(path) = local_copy(&x.repo, &cx.settings.recent_repos) {
-                                        if ui.small_button("Open repository").on_hover_text(path.clone()).clicked() {
+                                        if crate::widgets::small_button(ui, "Open repository").on_hover_text(path.clone()).clicked() {
                                             cx.out.push(Action::OpenRepo(path.into()));
                                         }
                                     } else if let Some(url) = clone_url_from(&x.pr.url, &x.repo)
-                                        && ui.small_button("Clone…").on_hover_text(url.clone()).clicked()
+                                        && crate::widgets::small_button(ui, "Clone…").on_hover_text(url.clone()).clicked()
                                     {
                                         cx.form(forms::clone_form_for(&url));
                                     }
@@ -596,23 +596,23 @@ impl LaunchpadView {
                     if cur == Some(local.as_str())
                         && let Some(fetch) = &fetch_ref
                     {
-                        if ui.small_button("Update").on_hover_text("Bring in the pull request's new commits").clicked() {
+                        if crate::widgets::small_button(ui, "Update").on_hover_text("Bring in the pull request's new commits").clicked() {
                             cx.run(ops::update_pr_branch(&remote, fetch));
                         }
-                        if ui.small_button("Reset to its tip…").on_hover_text("For when its author has force-pushed and Update refuses").clicked() {
+                        if crate::widgets::small_button(ui, "Reset to its tip…").on_hover_text("For when its author has force-pushed and Update refuses").clicked() {
                             cx.confirm("Reset to the pull request", &format!("Make {local} what the pull request holds now? Uncommitted changes are lost. Commits made here stay in the reflog."), "Reset", ops::reset_pr_branch(&remote, fetch));
                         }
-                        if pr.from_fork && ui.small_button("Push to the fork…").on_hover_text(format!("Send {local} back to {} in the fork", pr.head)).clicked() {
+                        if pr.from_fork && crate::widgets::small_button(ui, "Push to the fork…").on_hover_text(format!("Send {local} back to {} in the fork", pr.head)).clicked() {
                             cx.form(push_to_fork_form(pr, &local, repo.as_ref(), cx.data.remotes()));
                         }
                     }
                 } else if let Some(fetch) = &fetch_ref {
                     let tracks = !pr.from_fork && forge::is_plain_branch_name(&pr.head);
                     let how = FetchPr { remote: remote.clone(), fetch: fetch.clone(), local: local.clone(), head: tracks.then(|| pr.head.clone()) };
-                    if ui.small_button("Check out").on_hover_text(format!("Fetch into {local} and switch to it. Asks first if commits of yours are there")).clicked() {
+                    if crate::widgets::small_button(ui, "Check out").on_hover_text(format!("Fetch into {local} and switch to it. Asks first if commits of yours are there")).clicked() {
                         cx.out.push(how.clone().start(cx.repo, false));
                     }
-                    if ui.small_button("Open in worktree").clicked() {
+                    if crate::widgets::small_button(ui, "Open in worktree").clicked() {
                         cx.out.push(how.start(cx.repo, true));
                     }
                 } else if repo.is_some() {
@@ -622,19 +622,19 @@ impl LaunchpadView {
                 let base = format!("{remote}/{}", pr.base);
                 let fetched = cx.data.refs.get().is_some_and(|r| r.branches.iter().any(|b| b.name == local));
                 let head = if pr.from_fork { local.clone() } else { format!("{remote}/{}", pr.head) };
-                let compare = ui.add_enabled(!pr.from_fork || fetched, egui::Button::new("Compare").small()).on_hover_text("Requires the branches to be fetched").on_disabled_hover_text("This comes from a fork. Check it out first.");
+                let compare = ui.add_enabled(!pr.from_fork || fetched, egui::Button::new("Compare")).on_hover_text("Requires the branches to be fetched").on_disabled_hover_text("This comes from a fork. Check it out first.");
                 if compare.clicked() {
                     cx.open(Tab::compare(&base, &head));
                 }
-                if ui.small_button("Open").clicked() {
+                if crate::widgets::small_button(ui, "Open").clicked() {
                     cx.url(pr.url.clone());
                 }
-                if ui.small_button("Show details").on_hover_text("Its files, checks and conversation, and a review from here").clicked() {
+                if crate::widgets::small_button(ui, "Show details").on_hover_text("Its files, checks and conversation, and a review from here").clicked() {
                     cx.open(Tab::PullRequest(Box::new(crate::views::pullrequest::PullRequestView::new(pr.clone(), me))));
                 }
                 let key = format!("{}#{}", repo.as_ref().map(|f| f.path.as_str()).unwrap_or(""), pr.number);
                 let is_pinned = cx.settings.pinned_prs.contains(&key);
-                if ui.small_button(if is_pinned { "Unpin" } else { "Pin" }).clicked() {
+                if crate::widgets::small_button(ui, if is_pinned { "Unpin" } else { "Pin" }).clicked() {
                     let k = key.clone();
                     cx.out.push(Action::Settings(Box::new(move |s| {
                         if is_pinned {
@@ -654,7 +654,7 @@ impl LaunchpadView {
                     })));
                 };
                 if is_snoozed {
-                    if ui.small_button("Wake").clicked() {
+                    if crate::widgets::small_button(ui, "Wake").clicked() {
                         snooze(cx, key.clone(), 0);
                     }
                 } else {
@@ -667,7 +667,7 @@ impl LaunchpadView {
                         }
                     });
                 }
-                if here && repo.as_ref().is_some_and(|r| r.kind == forge::ForgeKind::GitHub) && ui.small_button("Suggest my changes").on_hover_text("Post your uncommitted edits as suggested changes on this pull request").clicked()
+                if here && repo.as_ref().is_some_and(|r| r.kind == forge::ForgeKind::GitHub) && crate::widgets::small_button(ui, "Suggest my changes").on_hover_text("Post your uncommitted edits as suggested changes on this pull request").clicked()
                     && let Some(r2) = repo.clone() {
                         let (g, rp, n) = (cx.repo.git.clone(), cx.repo.clone(), pr.number);
                         cx.out.push(Action::Background(Box::new(move || {
@@ -686,21 +686,21 @@ impl LaunchpadView {
                 if parent.is_some()
                     && here
                     && let Some(onto) = stack_base(&stack, all)
-                    && ui.small_button("Rebase stack").on_hover_text(format!("Rebase onto {onto}, moving {} with it", stack[..stack.len() - 1].join(", "))).clicked()
+                    && crate::widgets::small_button(ui, "Rebase stack").on_hover_text(format!("Rebase onto {onto}, moving {} with it", stack[..stack.len() - 1].join(", "))).clicked()
                 {
                     cx.form(forms::rebase_stack_form(onto));
                 }
-                if here && stack.len() > 1 && ui.small_button("Push stack…").on_hover_text("Force-with-lease every branch below this one, all or none. For after a rebase moved them").clicked() {
+                if here && stack.len() > 1 && crate::widgets::small_button(ui, "Push stack…").on_hover_text("Force-with-lease every branch below this one, all or none. For after a rebase moved them").clicked() {
                     cx.confirm("Push the stack", &format!("Push {} to {remote} with force-with-lease? It only overwrites what was last fetched from there, and either all of them go or none does.", stack.join(", ")), "Push stack", ops::push_stack(&remote, &stack));
                 }
                 let agent = cx.settings.agent_command.clone();
-                if here && !agent.trim().is_empty() && ui.small_button("Review with agent").on_hover_text(format!("Run {agent} here, in a new terminal")).clicked() {
+                if here && !agent.trim().is_empty() && crate::widgets::small_button(ui, "Review with agent").on_hover_text(format!("Run {agent} here, in a new terminal")).clicked() {
                     cx.out.push(Action::OpenTerminal(cx.repo.root.clone(), Some(agent)));
                 }
                 if let Some(r) = repo {
                     let n = pr.number;
                     // A host refuses your own, and saying so here beats a failed request.
-                    if !pr.is_by(me) && ui.small_button("Approve").clicked() {
+                    if !pr.is_by(me) && crate::widgets::small_button(ui, "Approve").clicked() {
                         let g = cx.repo.git.clone();
                         let r2 = r.clone();
                         self.action.spawn(ui.ctx(), move || -> Result<String, String> {
@@ -708,7 +708,7 @@ impl LaunchpadView {
                             Ok(format!("Approved #{n}"))
                         });
                     }
-                    if ui.small_button("Comment…").clicked() {
+                    if crate::widgets::small_button(ui, "Comment…").clicked() {
                         let g = cx.repo.git.clone();
                         let r2 = r.clone();
                         cx.form(FormDialog::new(format!("Comment on #{n}"), "Post").multiline("body", "Comment", "").on_submit(move |v| {
@@ -721,7 +721,7 @@ impl LaunchpadView {
                         }));
                     }
                     let refusal = pr.merge_refusal();
-                    if ui.add_enabled(refusal.is_none(), egui::Button::new("Merge…").small()).on_disabled_hover_text(refusal.unwrap_or_default()).clicked() {
+                    if ui.add_enabled(refusal.is_none(), egui::Button::new("Merge…")).on_disabled_hover_text(refusal.unwrap_or_default()).clicked() {
                         cx.form(crate::views::pullrequest::merge_form(&cx.repo.git, &r, pr));
                     }
                 }
@@ -770,14 +770,14 @@ impl LaunchpadView {
                         }
                     });
                     ui.horizontal(|ui| {
-                        if ui.small_button("Start work…").on_hover_text("Create a branch or worktree for this issue").clicked() {
+                        if crate::widgets::small_button(ui, "Start work…").on_hover_text("Create a branch or worktree for this issue").clicked() {
                             let base = cx.data.refs.get().and_then(|r| r.default_branch.clone());
                             cx.form(start_work_form_with_agent(cx.repo, i, &cx.settings.start_work_format, base, &cx.settings.agent_command));
                         }
-                        if ui.small_button("Open").clicked() {
+                        if crate::widgets::small_button(ui, "Open").clicked() {
                             cx.url(i.url.clone());
                         }
-                        if ui.small_button("Copy reference").clicked() {
+                        if crate::widgets::small_button(ui, "Copy reference").clicked() {
                             cx.copy(i.id.clone());
                         }
                     });

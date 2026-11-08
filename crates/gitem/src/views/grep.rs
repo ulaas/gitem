@@ -75,7 +75,7 @@ impl GrepView {
         egui::ScrollArea::vertical().id_salt("grep-hits").auto_shrink([false, false]).show_rows(ui, 20.0, shown, |ui, range| {
             for hit in &hits[range] {
                 ui.horizontal(|ui| {
-                    if ui.small_button(format!("{}:{}", hit.path, hit.line)).clicked() {
+                    if crate::widgets::small_button(ui, format!("{}:{}", hit.path, hit.line)).clicked() {
                         open = Some((hit.path.clone(), hit.line));
                     }
                     ui.add(egui::Label::new(RichText::new(gitem_core::util::prefix(hit.text.trim(), 400)).monospace().color(p.dim)).truncate());

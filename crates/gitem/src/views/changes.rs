@@ -550,7 +550,7 @@ impl ChangesView {
             Section::Conflicts => {}
             Section::Staged => {
                 if shown > 0 {
-                    if ui.small_button("Unstage all").clicked() {
+                    if crate::widgets::small_button(ui, "Unstage all").clicked() {
                         if st.op == RepoOp::None {
                             cx.run(ops::unstage_all(!st.head_sha.is_empty()));
                         } else {
@@ -559,17 +559,17 @@ impl ChangesView {
                             cx.run(ops::unstage_during_op(&paths));
                         }
                     }
-                    if ui.small_button("View all").clicked() {
+                    if crate::widgets::small_button(ui, "View all").clicked() {
                         cx.diff(DiffSource::Staged, None);
                     }
                 }
             }
             Section::Unstaged => {
                 if shown > 0 {
-                    if ui.small_button("Stage all").clicked() {
+                    if crate::widgets::small_button(ui, "Stage all").clicked() {
                         cx.run(ops::stage_all());
                     }
-                    if ui.small_button("View all").clicked() {
+                    if crate::widgets::small_button(ui, "View all").clicked() {
                         cx.diff(DiffSource::Unstaged, None);
                     }
                     // The heading is one row of a narrow column, and these are the rare ones.
@@ -742,7 +742,7 @@ impl ChangesView {
                 if busy {
                     ui.add(spinner(13.0));
                 }
-                if ui.small_button("Compose…").on_hover_text("Split the changes into several commits").clicked() {
+                if crate::widgets::small_button(ui, "Compose…").on_hover_text("Split the changes into several commits").clicked() {
                     cx.open(Tab::Composer(Box::default()));
                 }
             });
@@ -840,10 +840,10 @@ impl ChangesView {
         if let Some(offer) = self.ai_offer.clone() {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("The AI's message is ready, and you've typed since asking.").small().color(p.dim)).on_hover_text(offer.as_str());
-                if ui.small_button("Use it").clicked() {
+                if crate::widgets::small_button(ui, "Use it").clicked() {
                     self.message = offer;
                     self.ai_offer = None;
-                } else if ui.small_button("Keep mine").clicked() {
+                } else if crate::widgets::small_button(ui, "Keep mine").clicked() {
                     self.ai_offer = None;
                 }
             });
@@ -910,23 +910,23 @@ impl ChangesView {
         let staged: Vec<String> = st.entries.iter().filter(|e| self.selected.contains(&e.path) && e.is_staged()).flat_map(paths_to_unstage).collect();
         ui.horizontal(|ui| {
             ui.label(format!("{} selected", paths.len()));
-            if ui.small_button("Stage").clicked() {
+            if crate::widgets::small_button(ui, "Stage").clicked() {
                 cx.run(ops::stage_paths(&paths));
                 self.selected.clear();
             }
-            if !staged.is_empty() && ui.small_button("Unstage").clicked() {
+            if !staged.is_empty() && crate::widgets::small_button(ui, "Unstage").clicked() {
                 cx.run(ops::unstage_paths(&staged, !st.head_sha.is_empty()));
                 self.selected.clear();
             }
-            if ui.small_button("Stash…").clicked() {
+            if crate::widgets::small_button(ui, "Stash…").clicked() {
                 cx.form(forms::stash_form(paths.clone()));
                 self.selected.clear();
             }
-            if !tracked.is_empty() && ui.small_button("Discard…").clicked() {
+            if !tracked.is_empty() && crate::widgets::small_button(ui, "Discard…").clicked() {
                 cx.confirm("Discard changes", &format!("Discard unstaged changes in {}? The toolbar's Undo can bring them back straight afterwards.", plural(tracked.len(), "file", "files")), "Discard", ops::discard_paths(&tracked));
                 self.selected.clear();
             }
-            if ui.small_button("Clear").clicked() {
+            if crate::widgets::small_button(ui, "Clear").clicked() {
                 self.selected.clear();
             }
         });

@@ -103,10 +103,10 @@ impl HistoryView {
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.load(&ui.ctx().clone(), cx);
             }
-            if ui.small_button("Open file").clicked() {
+            if crate::widgets::small_button(ui, "Open file").clicked() {
                 cx.open(Tab::file(&self.path, self.rev.clone(), self.lines.map(|x| x.0)));
             }
-            if self.lines.is_none() && ui.small_button("Visual").clicked() {
+            if self.lines.is_none() && crate::widgets::small_button(ui, "Visual").clicked() {
                 cx.open(Tab::visual(&self.path));
             }
             if self.commits.busy() {

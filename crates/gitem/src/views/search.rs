@@ -200,12 +200,12 @@ impl SearchView {
                     gitem_core::ai::complete(&cfg, key.as_deref(), &s, &u).map_err(|e| e.to_string())
                 });
             }
-            let help = ui.small_button(crate::chrome::icon::QUESTION);
+            let help = crate::widgets::small_button(ui, crate::chrome::icon::QUESTION);
             help.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search help"));
             help.on_hover_text(HELP);
             if self.results.busy() {
                 ui.add(spinner(14.0));
-                if ui.small_button("Stop").on_hover_text("Stop this search").clicked() {
+                if crate::widgets::small_button(ui, "Stop").on_hover_text("Stop this search").clicked() {
                     self.results.stop();
                 }
             }
@@ -242,7 +242,7 @@ impl SearchView {
         let refs = cx.data.ref_names();
         ui.horizontal(|ui| {
             ref_picker(ui, "cmp-a", &mut self.a, &refs);
-            if ui.small_button("⇄").on_hover_text("Swap").clicked() {
+            if crate::widgets::small_button(ui, "⇄").on_hover_text("Swap").clicked() {
                 std::mem::swap(&mut self.a, &mut self.b);
                 self.run_compare(&ctx, cx);
             }
@@ -276,16 +276,16 @@ impl SearchView {
             ui.selectable_value(&mut self.compare_tab, 0, format!("Files ({})", res.files.len()));
             ui.selectable_value(&mut self.compare_tab, 1, format!("{} only ({})", short(&b), counted(res.ahead.len(), self.compare_limit)));
             ui.selectable_value(&mut self.compare_tab, 2, format!("{} only ({})", short(&a), counted(res.behind.len(), self.compare_limit)));
-            if ui.small_button("Open all diffs").clicked() {
+            if crate::widgets::small_button(ui, "Open all diffs").clicked() {
                 cx.diff(src.clone(), None);
             }
             if let Some(f) = cx.forge() {
                 let url = f.compare_url(&a, &b);
-                if ui.small_button("Open on remote").clicked() {
+                if crate::widgets::small_button(ui, "Open on remote").clicked() {
                     cx.url(url);
                 }
             }
-            if ui.add_enabled(!self.changelog.busy(), egui::Button::new("Changelog with AI").small()).on_disabled_hover_text("Already writing one.").on_hover_text("Summarise the commits on the right-hand side").clicked() {
+            if ui.add_enabled(!self.changelog.busy(), egui::Button::new("Changelog with AI")).on_disabled_hover_text("Already writing one.").on_hover_text("Summarise the commits on the right-hand side").clicked() {
                 let text: String = res.ahead.iter().map(|c| format!("- {}\n", c.message().replace('\n', " "))).collect();
                 let cfg = cx.settings.ai.clone();
                 self.changelog.spawn(ui.ctx(), move || -> Result<String, String> {
@@ -294,7 +294,7 @@ impl SearchView {
                     gitem_core::ai::complete(&cfg, key.as_deref(), &s, &u).map_err(|e| e.to_string())
                 });
             }
-            if ui.small_button("Save as patch…").clicked() {
+            if crate::widgets::small_button(ui, "Save as patch…").clicked() {
                 cx.open(Tab::Patches(Box::new(crate::views::patches::PatchesView::create_from(src.clone(), &format!("{a} to {b}")))));
             }
         });
@@ -304,7 +304,7 @@ impl SearchView {
             egui::Frame::new().fill(p.panel2).inner_margin(6.0).corner_radius(3.0).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Changelog").strong());
-                    if ui.small_button("Copy").clicked() {
+                    if crate::widgets::small_button(ui, "Copy").clicked() {
                         cx.copy(t.clone());
                     }
                 });

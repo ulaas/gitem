@@ -232,7 +232,7 @@ impl MergeView {
             ui.colored_label(pal.warn, why);
             if self.confirm_restart {
                 ui.colored_label(pal.warn, "Start over? Saving then replaces what's on disk.");
-                if ui.small_button("Start over").clicked() {
+                if crate::widgets::small_button(ui, "Start over").clicked() {
                     loaded.doc = fresh;
                     loaded.fresh = None;
                     self.raw_mode = false;
@@ -240,10 +240,10 @@ impl MergeView {
                     self.expanded.clear();
                     self.confirm_restart = false;
                 }
-                if ui.small_button("Keep the file's state").clicked() {
+                if crate::widgets::small_button(ui, "Keep the file's state").clicked() {
                     self.confirm_restart = false;
                 }
-            } else if ui.small_button("Start over from the three versions…").clicked() {
+            } else if crate::widgets::small_button(ui, "Start over from the three versions…").clicked() {
                 self.confirm_restart = true;
             }
         });
@@ -254,16 +254,16 @@ impl MergeView {
         let Some(mark) = self.pending_save else { return };
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(pal.warn, "The file on disk has changed since this tab read it. Saving would replace that.");
-            if ui.small_button("Replace the file").clicked() {
+            if crate::widgets::small_button(ui, "Replace the file").clicked() {
                 self.pending_save = None;
                 self.disk_seen = std::fs::read(self.target(cx)).ok();
                 self.save(cx, doc, mark);
             }
-            if ui.small_button("Reload from disk").clicked() {
+            if crate::widgets::small_button(ui, "Reload from disk").clicked() {
                 self.pending_save = None;
                 self.reset_for_reload();
             }
-            if ui.small_button("Keep this tab as it is").clicked() {
+            if crate::widgets::small_button(ui, "Keep this tab as it is").clicked() {
                 self.pending_save = None;
             }
         });
@@ -435,10 +435,10 @@ impl MergeView {
             }
             self.file_progress(ui, cx);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if matches!(self.source, MergeSource::Files { .. }) && ui.small_button("Cancel merge").clicked() {
+                if matches!(self.source, MergeSource::Files { .. }) && crate::widgets::small_button(ui, "Cancel merge").clicked() {
                     self.finished = Some(false);
                 }
-                if ui.small_button("Save with markers").on_hover_text("Write the file with conflict markers for what's left, and keep it unresolved, to finish it later or elsewhere").clicked() {
+                if crate::widgets::small_button(ui, "Save with markers").on_hover_text("Write the file with conflict markers for what's left, and keep it unresolved, to finish it later or elsewhere").clicked() {
                     self.save(cx, doc, false);
                 }
                 let done = if self.raw_mode { !has_conflict_markers(&self.raw_text) } else { unresolved == 0 };
@@ -467,10 +467,10 @@ impl MergeView {
                 self.scroll_to = Some(indices[at]);
             }
             ui.separator();
-            if ui.small_button(format!("All {}", self.sides.0)).on_hover_text(format!("Take {} for every conflict still open in this file. Nothing is written until you save.", self.sides.0)).clicked() {
+            if crate::widgets::small_button(ui, format!("All {}", self.sides.0)).on_hover_text(format!("Take {} for every conflict still open in this file. Nothing is written until you save.", self.sides.0)).clicked() {
                 doc.resolve_all(Resolution::Ours);
             }
-            if ui.small_button(format!("All {}", self.sides.1)).on_hover_text(format!("Take {} for every conflict still open in this file. Nothing is written until you save.", self.sides.1)).clicked() {
+            if crate::widgets::small_button(ui, format!("All {}", self.sides.1)).on_hover_text(format!("Take {} for every conflict still open in this file. Nothing is written until you save.", self.sides.1)).clicked() {
                 doc.resolve_all(Resolution::Theirs);
             }
             if self.ai.poll() {
@@ -484,7 +484,7 @@ impl MergeView {
                     cx.error(e);
                 }
             }
-            if ui.add_enabled(!self.ai.busy() && unresolved > 0, egui::Button::new("Resolve with AI").small()).on_disabled_hover_text("No conflicts are left, or an answer is on its way.").on_hover_text("Proposes text for each open conflict. Nothing is saved until you review and save it.").clicked() {
+            if ui.add_enabled(!self.ai.busy() && unresolved > 0, egui::Button::new("Resolve with AI")).on_disabled_hover_text("No conflicts are left, or an answer is on its way.").on_hover_text("Proposes text for each open conflict. Nothing is saved until you review and save it.").clicked() {
                 let cfg = cx.settings.ai.clone();
                 let path = self.title();
                 if cx.repo.ai_ignored(&path) {
@@ -512,7 +512,7 @@ impl MergeView {
             if self.ai.busy() {
                 ui.add(spinner(13.0));
             }
-            if ui.small_button("Whitespace").on_hover_text("Auto-resolve conflicts that differ only in whitespace").clicked() {
+            if crate::widgets::small_button(ui, "Whitespace").on_hover_text("Auto-resolve conflicts that differ only in whitespace").clicked() {
                 let n = doc.resolve_whitespace_only();
                 cx.toast(format!("Resolved {} that differed only in whitespace", plural(n, "conflict", "conflicts")));
             }
@@ -532,7 +532,7 @@ impl MergeView {
         if files.len() > 1 {
             ui.label(RichText::new(format!("File {} of {}", at + 1, files.len())).color(cx.pal.dim));
             let next = files[(at + 1) % files.len()].clone();
-            if ui.small_button("Next file").on_hover_text(next.as_str()).clicked() {
+            if crate::widgets::small_button(ui, "Next file").on_hover_text(next.as_str()).clicked() {
                 cx.open(Tab::merge(&next));
             }
         }
@@ -825,27 +825,27 @@ impl MergeView {
                 c.style_mut().spacing.button_padding = vec2(5.0, 1.0);
                 let mut set = |res: Resolution| *resolution = res;
                 let (a, b) = self.sides;
-                if c.small_button(format!("Take {a}")).clicked() {
+                if crate::widgets::small_button(c, format!("Take {a}")).clicked() {
                     set(Resolution::Ours);
                 }
-                if c.small_button(format!("Take {b}")).clicked() {
+                if crate::widgets::small_button(c, format!("Take {b}")).clicked() {
                     set(Resolution::Theirs);
                 }
                 let cap = |s: &str| -> String { s.chars().take(1).flat_map(char::to_uppercase).chain(s.chars().skip(1)).collect() };
-                if c.small_button(format!("{} + {b}", cap(a))).clicked() {
+                if crate::widgets::small_button(c, format!("{} + {b}", cap(a))).clicked() {
                     set(Resolution::OursThenTheirs);
                 }
-                if c.small_button(format!("{} + {a}", cap(b))).clicked() {
+                if crate::widgets::small_button(c, format!("{} + {a}", cap(b))).clicked() {
                     set(Resolution::TheirsThenOurs);
                 }
-                if c.small_button("Base").clicked() {
+                if crate::widgets::small_button(c, "Base").clicked() {
                     set(Resolution::Base);
                 }
-                if c.small_button("Edit").clicked() {
+                if crate::widgets::small_button(c, "Edit").clicked() {
                     let cur = plain_text(&resolved_lines(base, ours, theirs, resolution));
                     self.editing = Some((i, cur));
                 }
-                if !unresolved && c.small_button("Undo").clicked() {
+                if !unresolved && crate::widgets::small_button(c, "Undo").clicked() {
                     *resolution = Resolution::Unresolved;
                     self.editing = None;
                 }
@@ -860,7 +860,7 @@ impl MergeView {
                         let te = crate::widgets::text_area(text).font(mono(font)).desired_width(rp.width() - 8.0).desired_rows(1).frame(egui::Frame::NONE);
                         child.add(te);
                         child.horizontal(|ui| {
-                            done = ui.small_button("Apply").clicked();
+                            done = crate::widgets::small_button(ui, "Apply").clicked();
                         });
                     }
                     if done

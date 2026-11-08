@@ -240,7 +240,7 @@ impl HomeView {
                     self.summaries_for = None;
                 }
             }
-            if ui.small_button("New workspace…").clicked() {
+            if crate::widgets::small_button(ui, "New workspace…").clicked() {
                 cx.form(new_workspace_form(ws.iter().map(|w| w.name.clone()).collect()));
             }
         });
@@ -280,19 +280,19 @@ impl HomeView {
         ui.horizontal(|ui| {
             let busy = self.sweep.busy();
             let why = "One of these is already going through the repositories.";
-            if ui.add_enabled(!busy, egui::Button::new("Fetch all").small()).on_disabled_hover_text(why).clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("Fetch all")).on_disabled_hover_text(why).clicked() {
                 let prune = cx.settings.prune_on_fetch;
                 self.start_sweep(ui.ctx(), cx, w.repos.clone(), ("Fetched", "fetching"), move || ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() }));
             }
-            if ui.add_enabled(!busy, egui::Button::new("Pull all").small()).on_hover_text("Fast-forward only, so nothing needs resolving. A repository that can't is left as it is and reported").on_disabled_hover_text(why).clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("Pull all")).on_hover_text("Fast-forward only, so nothing needs resolving. A repository that can't is left as it is and reported").on_disabled_hover_text(why).clicked() {
                 self.start_sweep(ui.ctx(), cx, w.repos.clone(), ("Pulled", "pulling"), || ops::pull(ops::PullMode::FfOnly, false));
             }
-            if ui.small_button("Open all").clicked() {
+            if crate::widgets::small_button(ui, "Open all").clicked() {
                 for r in &w.repos {
                     cx.out.push(Action::OpenRepo(r.into()));
                 }
             }
-            if ui.small_button("Add current repository").clicked() {
+            if crate::widgets::small_button(ui, "Add current repository").clicked() {
                 let name = w.name.clone();
                 let path = cx.repo.root.to_string_lossy().replace('\\', "/");
                 cx.out.push(Action::Settings(Box::new(move |s| {
@@ -303,7 +303,7 @@ impl HomeView {
                 })));
                 self.summaries_for = None;
             }
-            if ui.add_enabled(!self.scan_pick.busy(), egui::Button::new("Scan a folder…").small()).on_disabled_hover_text("The folder picker is already open.").clicked() {
+            if ui.add_enabled(!self.scan_pick.busy(), egui::Button::new("Scan a folder…")).on_disabled_hover_text("The folder picker is already open.").clicked() {
                 crate::widgets::pick(&mut self.scan_pick, ui.ctx(), rfd::FileDialog::new(), true);
             }
             if self.scan_pick.poll()
@@ -327,7 +327,7 @@ impl HomeView {
                         ]))
                     })));
                 }
-            if ui.small_button("Delete workspace…").clicked() {
+            if crate::widgets::small_button(ui, "Delete workspace…").clicked() {
                 let name = w.name.clone();
                 cx.form(FormDialog::new("Delete workspace", "Delete").danger().info(format!("Delete the workspace {name} and its list of {}? The repositories themselves aren't touched.", plural(w.repos.len(), "repository", "repositories"))).on_submit(move |_| {
                     let name = name.clone();

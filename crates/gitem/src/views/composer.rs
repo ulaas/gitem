@@ -217,13 +217,13 @@ impl ComposerView {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("Commit {}", i + 1)).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("\u{E4F6}").on_hover_text("Remove this commit from the plan").clicked() {
+                            if crate::widgets::small_button(ui, "\u{E4F6}").on_hover_text("Remove this commit from the plan").clicked() {
                                 remove = Some(i);
                             }
-                            if i + 1 < n && ui.small_button("\u{E136}").clicked() {
+                            if i + 1 < n && crate::widgets::small_button(ui, "\u{E136}").clicked() {
                                 swap = Some((i, i + 1));
                             }
-                            if i > 0 && ui.small_button("\u{E13C}").clicked() {
+                            if i > 0 && crate::widgets::small_button(ui, "\u{E13C}").clicked() {
                                 swap = Some((i, i - 1));
                             }
                         });

@@ -220,7 +220,7 @@ impl BisectView {
                 ui.label(RichText::new("Now testing").small().color(p.faint));
                 ui.label(RichText::new(&c.subject).strong());
                 ui.label(RichText::new(format!("{} · {} · {}", c.short(), c.author_name, time_label(c.commit_time, cx.settings.date_relative))).small().color(p.dim));
-                if ui.small_button("Show details").clicked() {
+                if crate::widgets::small_button(ui, "Show details").clicked() {
                     cx.inspect(&c.sha);
                 }
             });

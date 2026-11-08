@@ -2143,7 +2143,7 @@ impl GitemApp {
             if pull.on_disabled_hover_text(sync_why).clicked() {
                 out.push(Action::Run(ops::pull(pull_mode(&self.settings.pull_mode), self.settings.pull_autostash)));
             }
-            let pull_more = ui.small_button(chrome::icon::CARET_DOWN);
+            let pull_more = crate::widgets::small_button(ui, chrome::icon::CARET_DOWN);
             pull_more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Pull options"));
             if pull_more.on_hover_text("Pull options").clicked() {
                 out.push(Action::Form(forms::pull_form()));
@@ -2162,7 +2162,7 @@ impl GitemApp {
                     out.push(Action::Form(forms::push_form_guarding(branch.clone(), remotes.clone(), false, self.settings.confirm_destructive, tab.data.base_branch())));
                 }
             }
-            let push_more = ui.small_button(chrome::icon::CARET_DOWN);
+            let push_more = crate::widgets::small_button(ui, chrome::icon::CARET_DOWN);
             push_more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Push options"));
             if push_more.on_hover_text("Push options").clicked() {
                 out.push(Action::Form(forms::push_form_guarding(branch.clone(), remotes.clone(), upstream.is_some(), self.settings.confirm_destructive, tab.data.base_branch())));
@@ -2232,7 +2232,7 @@ impl GitemApp {
                         out.push(Action::OpenRepo(r.into()));
                         ui.close();
                     }
-                    if ui.small_button("\u{E4F6}").on_hover_text("Remove from this list. The folder isn't touched.").clicked() {
+                    if crate::widgets::small_button(ui, "\u{E4F6}").on_hover_text("Remove from this list. The folder isn't touched.").clicked() {
                         out.push(forget_recent(r));
                     }
                 });
@@ -2375,7 +2375,7 @@ impl GitemApp {
                     ui.add(spinner(13.0));
                     ui.label(format!("{}: {}", g.title, g.last_line));
                     // Nothing's on screen yet to lose: a clone that's gone wrong just stops.
-                    if ui.small_button("Cancel").clicked() {
+                    if crate::widgets::small_button(ui, "Cancel").clicked() {
                         g.cancel.store(true, Ordering::Relaxed);
                     }
                 });
@@ -2388,22 +2388,22 @@ impl GitemApp {
                 if r.asking_to_stop {
                     // Only a network op leaves nothing half done when it's killed.
                     ui.label(RichText::new("Stop git now? Files it was changing can be left half updated, and a lock left behind.").small().color(p.warn));
-                    if ui.small_button("Stop it").clicked() {
+                    if crate::widgets::small_button(ui, "Stop it").clicked() {
                         r.cancel.store(true, Ordering::Relaxed);
                         r.asking_to_stop = false;
                     }
-                    if ui.small_button("Keep waiting").clicked() {
+                    if crate::widgets::small_button(ui, "Keep waiting").clicked() {
                         r.asking_to_stop = false;
                     }
                 } else {
                     ui.add(egui::Label::new(RichText::new(format!("{}: {}", r.title, r.last_line)).small()).truncate());
                     if r.network {
-                        if ui.small_button("Cancel").clicked() {
+                        if crate::widgets::small_button(ui, "Cancel").clicked() {
                             r.cancel.store(true, Ordering::Relaxed);
                         }
                     } else if r.started.elapsed() >= CANCEL_OFFERED_AFTER {
                         // A hook that never returns would otherwise hold up everything behind it.
-                        if ui.small_button("Cancel…").clicked() {
+                        if crate::widgets::small_button(ui, "Cancel…").clicked() {
                             r.asking_to_stop = true;
                         }
                     } else {
@@ -2424,7 +2424,7 @@ impl GitemApp {
             } else if let Some(g) = &self.global_running {
                 ui.add(spinner(13.0));
                 ui.add(egui::Label::new(RichText::new(format!("{}: {}", g.title, g.last_line)).small()).truncate());
-                if ui.small_button("Cancel").clicked() {
+                if crate::widgets::small_button(ui, "Cancel").clicked() {
                     g.cancel.store(true, Ordering::Relaxed);
                 }
             } else if !tab.data.last_blame.is_empty() && matches!(tab.dock.find_active_focused(), Some((_, Tab::File(_)))) {
@@ -2444,7 +2444,7 @@ impl GitemApp {
                 if tab.data.status.get().is_some() {
                     let n = tab.data.counts();
                     let (st, un, c) = (n.staged, n.unstaged, n.conflicts);
-                    if st + un + c > 0 && ui.small_button(format!("{st} staged, {un} unstaged{}", if c > 0 { format!(", {}", plural(c, "conflict", "conflicts")) } else { String::new() })).clicked() {
+                    if st + un + c > 0 && crate::widgets::small_button(ui, format!("{st} staged, {un} unstaged{}", if c > 0 { format!(", {}", plural(c, "conflict", "conflicts")) } else { String::new() })).clicked() {
                         out.push(Action::OpenTab(Tab::changes()));
                     }
                 }
@@ -2473,7 +2473,7 @@ impl GitemApp {
                     ui.label(RichText::new(format!("{} {}", f.kind.label(), f.path)).small().color(p.faint));
                 }
                 let stale_submodules = tab.data.submodules().iter().filter(|m| m.state == '+').count();
-                if stale_submodules > 0 && ui.small_button(RichText::new(plural(stale_submodules, "submodule to update", "submodules to update")).small()).on_hover_text("They're at other commits than this one expects. This updates them").clicked() {
+                if stale_submodules > 0 && crate::widgets::small_button(ui, RichText::new(plural(stale_submodules, "submodule to update", "submodules to update")).small()).on_hover_text("They're at other commits than this one expects. This updates them").clicked() {
                     out.push(Action::Run(ops::submodule_update(None, true, true, false)));
                 }
                 // Found for one branch, it says nothing about another.
@@ -3299,17 +3299,17 @@ impl GitemApp {
                         ui.colored_label(pal.warn, title);
                         ui.add(egui::Label::new(RichText::new(problem.as_str()).small().monospace().color(pal.dim)).selectable(true));
                         let label = if data.read_failure().is_some() { "Try again" } else { "Stop and try again" };
-                        if ui.small_button(label).clicked() {
+                        if crate::widgets::small_button(ui, label).clicked() {
                             out.push(Action::Retry);
                         }
-                        if ui.small_button("Copy").clicked() {
+                        if crate::widgets::small_button(ui, "Copy").clicked() {
                             out.push(Action::Copy(problem.clone()));
                         }
                         if gone {
-                            if ui.small_button("Locate…").on_hover_text("Find where it went, and open it from there").clicked() {
+                            if crate::widgets::small_button(ui, "Locate…").on_hover_text("Find where it went, and open it from there").clicked() {
                                 out.push(Action::LocateRepo(repo.root.clone()));
                             }
-                            if ui.small_button("Close").on_hover_text("Close this repository's tab. Nothing on disk is touched.").clicked() {
+                            if crate::widgets::small_button(ui, "Close").on_hover_text("Close this repository's tab. Nothing on disk is touched.").clicked() {
                                 out.push(Action::CloseRepo(repo.root.clone()));
                             }
                         }
@@ -3322,7 +3322,7 @@ impl GitemApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.colored_label(pal.warn, "Programs from this repository's config are turned off.");
                         ui.label(RichText::new(RESTRICTED_NOTE).small().color(pal.dim));
-                        if ui.small_button("Review…").clicked() {
+                        if crate::widgets::small_button(ui, "Review…").clicked() {
                             out.push(Action::ReviewTrust);
                         }
                     });
@@ -3354,7 +3354,7 @@ impl GitemApp {
                         let in_a_pane = dock.iter_leaves().any(|(_, l)| l.tabs().get(l.active.0).is_some_and(|t| matches!(t, Tab::Changes(_))));
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Work in progress").strong());
-                            if ui.small_button("Open Changes").clicked() {
+                            if crate::widgets::small_button(ui, "Open Changes").clicked() {
                                 out.push(Action::OpenTab(Tab::changes()));
                             }
                         });

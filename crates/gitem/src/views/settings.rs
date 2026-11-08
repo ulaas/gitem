@@ -542,10 +542,10 @@ impl SettingsView {
             g.stacked("Settings file", "", |ui| {
                 ui.add(egui::Label::new(RichText::new(Settings::path().display().to_string()).monospace().size(11.5).color(p.dim)).wrap());
                 ui.horizontal(|ui| {
-                    if ui.small_button("Export…").on_hover_text("A copy for another machine. Tokens and passwords aren't in it").clicked() {
+                    if crate::widgets::small_button(ui, "Export…").on_hover_text("A copy for another machine. Tokens and passwords aren't in it").clicked() {
                         cx.form(export_settings_form(s.clone()));
                     }
-                    if ui.small_button("Import…").on_hover_text("Takes on another copy's settings, and keeps what's open and recent here").clicked() {
+                    if crate::widgets::small_button(ui, "Import…").on_hover_text("Takes on another copy's settings, and keeps what's open and recent here").clicked() {
                         cx.form(import_settings_form());
                     }
                 });

@@ -78,7 +78,7 @@ impl ContributorsView {
         };
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).strong());
-            if self.selected.is_some() && ui.small_button("Show everyone").clicked() {
+            if self.selected.is_some() && crate::widgets::small_button(ui, "Show everyone").clicked() {
                 self.selected = None;
                 self.load_times(&ctx, cx);
             }

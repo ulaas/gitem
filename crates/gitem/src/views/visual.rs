@@ -118,7 +118,7 @@ impl VisualView {
                 self.limit = VISUAL_PAGE;
             }
             for (label, days) in [("1 month", 30), ("1 year", 365), ("All", 0)] {
-                if ui.small_button(label).clicked() {
+                if crate::widgets::small_button(ui, label).clicked() {
                     self.window = (days > 0).then(|| {
                         let now = util::now_ts();
                         (now - days * 86400, now)

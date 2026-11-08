@@ -127,16 +127,16 @@ impl ToolsView {
                 });
                 ui.label(RichText::new(format!("{} {}  {}", gitem_core::util::prefix(&s.sha, 8), s.describe, s.url)).small().color(p.dim));
                 ui.horizontal(|ui| {
-                    if ui.small_button("Update").clicked() {
+                    if crate::widgets::small_button(ui, "Update").clicked() {
                         cx.run(ops::submodule_update(Some(&s.path), true, true, false));
                     }
-                    if s.state != '-' && ui.small_button("Open").clicked() {
+                    if s.state != '-' && crate::widgets::small_button(ui, "Open").clicked() {
                         cx.out.push(crate::action::Action::OpenRepo(cx.repo.root.join(&s.path)));
                     }
-                    if ui.small_button("Deinit…").clicked() {
+                    if crate::widgets::small_button(ui, "Deinit…").clicked() {
                         cx.confirm("Deinitialise submodule", &format!("Remove the checkout of {} from the working tree?", s.path), "Deinit", ops::submodule_deinit(&s.path, true));
                     }
-                    if ui.small_button("Remove…").clicked() {
+                    if crate::widgets::small_button(ui, "Remove…").clicked() {
                         cx.confirm("Remove submodule", &format!("Remove {} from this repository?", s.path), "Remove", ops::submodule_remove(&s.path));
                     }
                 });
@@ -167,25 +167,25 @@ impl ToolsView {
                         }
                         reload = true;
                     }
-                    if ui.small_button("Show").clicked() {
+                    if crate::widgets::small_button(ui, "Show").clicked() {
                         cx.out.push(crate::action::Action::OpenFile(h.path.clone().into()));
                     }
                     if self.confirm_delete_hook.as_deref() == Some(h.path.as_str()) {
                         ui.colored_label(p.warn, "Delete for good?");
-                        if ui.small_button("Delete it").clicked() {
+                        if crate::widgets::small_button(ui, "Delete it").clicked() {
                             if let Err(e) = std::fs::remove_file(&h.path) {
                                 cx.error(format!("Could not delete the hook: {e}"));
                             }
                             self.confirm_delete_hook = None;
                             reload = true;
                         }
-                        if ui.small_button("Keep it").clicked() {
+                        if crate::widgets::small_button(ui, "Keep it").clicked() {
                             self.confirm_delete_hook = None;
                         }
-                    } else if ui.small_button("Delete…").clicked() {
+                    } else if crate::widgets::small_button(ui, "Delete…").clicked() {
                         self.confirm_delete_hook = Some(h.path.clone());
                     }
-                } else if ui.small_button("Create").clicked() {
+                } else if crate::widgets::small_button(ui, "Create").clicked() {
                     if let Err(e) = create_hook(&h.path) {
                         cx.error(format!("Could not create the hook: {e}"));
                     }
@@ -470,11 +470,11 @@ impl ConfigView {
                             if let Some((_, _, v)) = &mut self.editing {
                                 ui.add(crate::widgets::input(v).desired_width((ui.available_width() - 130.0).max(80.0)));
                             }
-                            if ui.small_button("Save").clicked()
+                            if crate::widgets::small_button(ui, "Save").clicked()
                                 && let Some((s, k, v)) = self.editing.take() {
                                     cx.run(ops::config_set(&k, &v, &s));
                                 }
-                            if ui.small_button("Cancel").clicked() {
+                            if crate::widgets::small_button(ui, "Cancel").clicked() {
                                 self.editing = None;
                             }
                             return;
@@ -482,10 +482,10 @@ impl ConfigView {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Always there, not only on hover, on the row the keyboard's on.
                             if editable && hovered {
-                                if ui.small_button("Unset…").clicked() {
+                                if crate::widgets::small_button(ui, "Unset…").clicked() {
                                     cx.confirm("Unset config value", &format!("Remove {} from {} config?", e.key, e.scope), "Unset", ops::config_unset(&e.key, &e.scope));
                                 }
-                                if ui.small_button("Edit").clicked() {
+                                if crate::widgets::small_button(ui, "Edit").clicked() {
                                     self.editing = Some((e.scope.clone(), e.key.clone(), e.value.clone()));
                                 }
                             }
