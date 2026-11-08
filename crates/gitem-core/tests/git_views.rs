@@ -480,7 +480,8 @@ fn hooks_path_follows_home_as_git_does() {
     let f = Fx::new();
     f.q(&["config", "core.hooksPath", "~/my-hooks"]);
     let hooks = f.repo.hooks();
-    assert!(!hooks[0].path.contains('~'), "{}", hooks[0].path);
+    // Not `~` anywhere: a Windows short name such as RUNNER~1 has one.
+    assert!(!hooks[0].path.starts_with('~') && !hooks[0].path.contains("~/"), "{}", hooks[0].path);
     assert!(hooks[0].path.contains("my-hooks"), "{}", hooks[0].path);
     f.q(&["config", "core.hooksPath", "relative-hooks"]);
     let shown = f.repo.hooks()[0].path.replace('\\', "/");

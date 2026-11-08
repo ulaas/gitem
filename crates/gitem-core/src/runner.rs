@@ -408,6 +408,7 @@ impl GitExe {
         let mut cancelled = false;
         let mut stop_reading_at: Option<Instant> = None;
         let mut stderr_quiet = STDERR_QUIET_OK;
+        let mut timed_out = false;
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(chunk) => {
@@ -431,6 +432,11 @@ impl GitExe {
             }
             if !cancelled && stopped() {
                 cancelled = true;
+                kill_tree(&mut child);
+            }
+            if !cancelled && git_time_limit().is_some_and(|l| start.elapsed() > l) {
+                cancelled = true;
+                timed_out = true;
                 kill_tree(&mut child);
             }
             if stop_reading_at.is_none()
@@ -490,7 +496,7 @@ impl GitExe {
                 output.truncate(end);
             }
             log.push_back(LogEntry {
-                command: display,
+                command: display.clone(),
                 cwd: cwd.map(|c| c.display().to_string()).unwrap_or_default(),
                 code,
                 millis: start.elapsed().as_millis(),
@@ -501,11 +507,22 @@ impl GitExe {
                 log.pop_front();
             }
         }
+        if timed_out {
+            return Err(Error::Other(format!("{display} was still running after {:?}, and was stopped", start.elapsed())));
+        }
         if cancelled {
             return Err(Error::Other("cancelled".into()));
         }
         Ok(GitOutput { stdout, stderr, code })
     }
+}
+
+/// How long one git command may take, when `GITEM_GIT_TIMEOUT_SECS` says. CI sets it, so a
+/// command that never ends fails with its name rather than hanging the run. Unset, there's
+/// no limit: a clone or a big gc can rightly take an hour.
+fn git_time_limit() -> Option<Duration> {
+    static LIMIT: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| std::env::var("GITEM_GIT_TIMEOUT_SECS").ok().and_then(|s| s.trim().parse().ok()).map(Duration::from_secs))
 }
 
 /// The command line after git's own options. Reads never use an external diff: gitem has to

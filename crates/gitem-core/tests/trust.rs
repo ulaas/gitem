@@ -788,7 +788,9 @@ fn hooks_see_the_users_locale_and_no_literal_path_mode() {
     let repo = f.open();
     let plan = vec![ops::ComposedCommit { message: "just the bracket file".to_string(), files: vec!["[id].txt".to_string()], ..Default::default() }];
     ops::compose_commits(&plan).run(&repo.git, Some(&repo.root), None, &mut |_| {}).unwrap();
-    assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "lc=[] literal=[]");
+    // The user's own locale, whatever it is: some machines, as macOS CI runners, set LC_ALL.
+    let own = std::env::var("LC_ALL").unwrap_or_default();
+    assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), format!("lc=[{own}] literal=[]"));
     let committed = q(&f.root, &["show", "--name-only", "--format=", "HEAD"]);
     assert_eq!(committed.trim(), "[id].txt", "the name was still taken literally, not as a glob");
     assert!(q(&f.root, &["status", "--porcelain"]).contains("id.txt"), "the other file stays out of it");

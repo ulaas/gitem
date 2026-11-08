@@ -23,6 +23,8 @@ jobs:
       # so a stuck test's stacks name their functions.
       CARGO_PROFILE_DEV_DEBUG: ${{ matrix.os == 'ubuntu-latest' && '0' || 'line-tables-only' }}
       CARGO_PROFILE_TEST_DEBUG: ${{ matrix.os == 'ubuntu-latest' && '0' || 'line-tables-only' }}
+      # A git command that never ends fails with its name, rather than hanging a test.
+      GITEM_GIT_TIMEOUT_SECS: "120"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

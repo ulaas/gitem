@@ -36,8 +36,10 @@ impl Fx {
         let repo = Repo::open(g.clone(), &root).unwrap();
         Self { dir, root, git: g, repo }
     }
+    /// Next to the repository, in the form git gives its root: the temp folder can be reached
+    /// by another name, as macOS's /var is /private/var and Windows has short names.
     fn beside(&self, name: &str) -> PathBuf {
-        self.dir.path().join(name)
+        self.repo.root.parent().unwrap().join(name)
     }
     fn write(&self, p: &str, s: &str) {
         let f = self.root.join(p);
@@ -496,7 +498,7 @@ fn a_lock_that_stays_fails_the_write_and_stays_put() {
     let e = ops::stage_paths(&["g.txt".to_string()]).run(&f.git, Some(&f.root), None, &mut |_| {}).unwrap_err().to_string();
     assert!(gitem_core::runner::is_lock_failure(&e), "{e}");
     assert_eq!(std::fs::read_to_string(&lock).unwrap(), "held");
-    assert_eq!(f.repo.index_lock(), Some(lock));
+    assert_eq!(f.repo.index_lock(), Some(f.repo.git_dir.join("index.lock")));
 }
 
 /// The commit box used to end the visible operation with commits still to apply.
