@@ -41,6 +41,16 @@ impl History {
             return;
         }
         let undo = buf.apply(&t);
+        self.record(t, undo, before, after, kind, now_ms);
+    }
+
+    /// Remembers a change already made to the buffer, with the transaction that undoes it.
+    /// For callers that need to see the text partway through, as when lines move one block
+    /// at a time.
+    pub fn record(&mut self, t: Transaction, undo: Transaction, before: SelectionSet, after: SelectionSet, kind: Kind, now_ms: u64) {
+        if t.is_empty() {
+            return;
+        }
         self.redo.clear();
         if let Some(top) = self.undo.last_mut()
             && kind == Kind::Typing

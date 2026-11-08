@@ -67,3 +67,21 @@ pub fn highlight(path: &str, lines: &[&str], dark: bool) -> Vec<Spans> {
     }
     out
 }
+
+/// What the editor needs to colour a file a line at a time, keeping the parser's state between
+/// lines so it can start again partway down.
+pub struct Engine {
+    pub set: &'static SyntaxSet,
+    pub syntax: &'static SyntaxReference,
+    pub theme: &'static Theme,
+}
+
+/// The engine for a file, or `None` for plain text, which needs no colouring.
+pub fn engine(path: &str, dark: bool) -> Option<Engine> {
+    let st = sets();
+    let syntax = syntax_for(&st.syntax, path);
+    if syntax.name == "Plain Text" {
+        return None;
+    }
+    Some(Engine { set: &st.syntax, syntax, theme: if dark { &st.dark } else { &st.light } })
+}

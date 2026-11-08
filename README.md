@@ -63,7 +63,8 @@ gitem looks for git in this order:
 | Agents | A board of Claude Code, Codex, Copilot CLI and OpenCode sessions in this repository's worktrees, with resume, archive, and a file activity treemap; start a session in any worktree |
 | Review | Sessions with a file checklist, comment threads, AI findings, a reading-order suggestion, and handing open notes to an agent |
 | Auto-rebase | Rebase with AI conflict resolution that pauses when the model is unsure, with an undo that keeps uncommitted changes, and stops without changing anything if they're in a file it has to change |
-| Files view | A sidebar view of the working tree: folders first, change marks on files and the folders holding them, a filter, and a changed-only mode |
+| Files view | A sidebar view of the working tree: folders first, change marks on files and the folders holding them, a filter, and a changed-only mode. In IDE mode a click opens the file for editing, as a preview the next click replaces, and a double click keeps it |
+| Editor | Files of the working tree open for editing (IDE mode, or Edit in any file's menu): syntax colours, several carets, find and replace, bracket pairs, auto-indent, comment toggling, moving and copying lines, and go to line. Line endings, a byte order mark and UTF-16 are kept as they were. Beside each line, what changed against the index and against HEAD, with Stage and Revert for each change, and the line's blame through unsaved edits. A file changed on disk reloads by itself, or asks first if you've edited it. Saving writes a new copy and swaps it in, and refuses if the file changed under you |
 | Changes | Files, diff and commit message on one screen. A click shows a file's diff beside the list, a double click or `Space` stages it, and `↑ ↓` walk the files. Staged, unstaged and conflicted files as a flat list or a tree, with folders you can close, and stage or unstage as one. In a pane too narrow for both, a click opens the diff in a tab, and any row's menu can too. During a rebase or similar, Continue and Abort take the commit button's place |
 | Themes | Seven dark and five light themes, with nineteen named accent colors or any custom color; named accents are tuned for dark and light, and tests check their contrast in every theme |
 | Command palette | `Ctrl+P`: commands, branches, and files in one search, with recent commands first. Start with `>` for commands, `@` for branches, `/` for files, or `:` for commits. With no repository open it offers what works there: open, clone, scan, recent repositories, settings and credentials |
@@ -113,7 +114,7 @@ This was compared against the GitLens README, Help Center, and changelog through
 
 gitem isn't an editor plugin, so the following differ by design.
 
-- Blame and annotations appear in gitem's read-only file view, not in your editor as you type. Use **Settings > External editor** to jump to your editor.
+- Full blame and annotations appear in gitem's read-only file view. The editor shows the current line's blame and change marks; it has no language server, so no completion or go-to-definition. Use **Settings > External editor** to jump to your own editor for those.
 - Patches and workspaces are stored locally; there's no GitKraken account or cloud sync.
 - Code lens finds symbols with a regex rather than a language server, so it can miss some declarations.
 - Bare repositories can't be opened, because gitem works from a working tree. It says so, and names any linked worktrees to open instead. A linked worktree of a bare repository opens as usual.
@@ -168,6 +169,13 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 | `/` | Find a ref in the graph |
 | `F3` `Shift+F3` | Next and previous search match |
 | `Alt+B` | Toggle blame in a file |
+| `Ctrl+Shift+E` | IDE mode on or off: a click in the Files tree opens the file for editing |
+| `Ctrl+S` | Editor: save |
+| `Ctrl+H`, `Ctrl+G` | Editor: replace, go to line |
+| `Ctrl+D`, `Ctrl+F2` | Editor: select the next match, or all of them, for typing in several places |
+| `Ctrl+Shift+Up`, `Ctrl+Shift+Down` | Editor: add a caret above or below |
+| `Alt+Up`, `Alt+Down` | Editor: move lines, or with Shift copy them |
+| `Ctrl+/`, `Ctrl+L`, `Ctrl+J` | Editor: toggle comments, select the line, join lines |
 | `Ctrl+Shift+Z` | Zen mode |
 | `Ctrl+Alt+Z` | Undo the last action |
 

@@ -34,17 +34,19 @@ pub struct Buffer {
     pub eol: LineEnding,
     pub encoding: Encoding,
     pub bom: bool,
+    /// The first char any change since the last `take_changed` touched. Nothing before it moved.
+    changed_from: Option<usize>,
 }
 
 impl Buffer {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Unsupported> {
         let (text, encoding, bom) = encoding::decode(bytes)?;
         let eol = dominant_eol(&text).unwrap_or(LineEnding::Lf);
-        Ok(Self { rope: Rope::from_str(&text), version: 0, eol, encoding, bom })
+        Ok(Self { rope: Rope::from_str(&text), version: 0, eol, encoding, bom, changed_from: None })
     }
 
     pub fn from_text(text: &str) -> Self {
-        Self { rope: Rope::from_str(text), version: 0, eol: dominant_eol(text).unwrap_or(LineEnding::Lf), encoding: Encoding::Utf8, bom: false }
+        Self { rope: Rope::from_str(text), version: 0, eol: dominant_eol(text).unwrap_or(LineEnding::Lf), encoding: Encoding::Utf8, bom: false, changed_from: None }
     }
 
     /// Whether the text had any line breaks to judge by. An empty or one-line file doesn't,
@@ -114,7 +116,17 @@ impl Buffer {
 
     pub fn apply(&mut self, t: &Transaction) -> Transaction {
         self.version += 1;
+        // Each edit only moves what's at or after its start, in the text as it then is, so
+        // what's before the smallest start is the same as before them all.
+        if let Some(first) = t.edits.iter().map(|e| e.start).min() {
+            self.changed_from = Some(self.changed_from.map_or(first, |c| c.min(first)));
+        }
         t.apply(&mut self.rope)
+    }
+
+    /// The line the changes since the last call start on, if there were any.
+    pub fn take_changed(&mut self) -> Option<usize> {
+        self.changed_from.take().map(|c| self.line_of(c))
     }
 
     /// Every line ending changed to `eol`, as one transaction so it can be undone.

@@ -2727,7 +2727,7 @@ fn the_editor_list_offers_what_was_detected() {
     h.state_mut().repos[0].open_tab(Tab::Settings(Box::default()));
     pump_for_label(&mut h, "Git");
     click(&mut h, "Git");
-    pump_for_label(&mut h, "Editor");
+    pump_for_label(&mut h, "Editor program");
     for _ in 0..3 {
         h.step();
     }

@@ -324,6 +324,23 @@ impl RepoTab {
 
     pub fn open_tab(&mut self, tab: Tab) {
         // Diffs opened from lists reuse one preview tab, unless it's been pinned.
+        // A file clicked in IDE mode is previewed the same way, in one tab, until it's kept.
+        // A preview with edits is never replaced: typing keeps it.
+        if let Tab::Editor(new) = &tab
+            && !new.path.is_empty()
+        {
+            let key = tab.key();
+            let preview = self.dock.iter_all_tabs().find(|(_, t)| matches!(t, Tab::Editor(e) if !e.pinned && !e.is_dirty() && !e.path.is_empty())).map(|(p, _)| p);
+            if self.dock.find_tab_from(|t| t.key() == key).is_none()
+                && let Some(path) = preview
+            {
+                if let Some((_, slot)) = self.dock.iter_all_tabs_mut().find(|(p, _)| *p == path) {
+                    *slot = tab;
+                }
+                let _ = self.dock.set_active_tab(path);
+                return;
+            }
+        }
         if let Tab::Diff(new) = &tab {
             let key = tab.key();
             if let Some(path) = self.dock.find_tab_from(|t| t.key() == key) {
@@ -745,6 +762,7 @@ impl TabViewer for Viewer<'_> {
         // Slanted, as a diff is reused for the next one unless it's been kept.
         match tab {
             Tab::Diff(d) if !d.pinned => RichText::new(tab.title()).italics().into(),
+            Tab::Editor(e) if !e.pinned && !e.path.is_empty() => RichText::new(tab.title()).italics().into(),
             _ => tab.title().into(),
         }
     }
@@ -831,6 +849,14 @@ enum CloseTarget {
     Tab { root: PathBuf, key: String },
     Repo(PathBuf),
     Window,
+}
+
+/// A git command that would rewrite files open with unsaved edits, held until the user says
+/// whether to save them first.
+struct DirtyGuard {
+    root: PathBuf,
+    files: Vec<String>,
+    action: Action,
 }
 
 struct CloseGuard {
@@ -942,6 +968,9 @@ pub struct GitemApp {
     errors_seen: (String, f64),
     errors_settled: bool,
     close_guard: Option<CloseGuard>,
+    dirty_guard: Option<DirtyGuard>,
+    /// The next action runs without asking about unsaved edits: the user just answered.
+    dirty_answered: bool,
     /// The user has said yes to losing work, so the next close request goes through.
     closing: bool,
     orphans: Vec<Orphan>,
@@ -1073,6 +1102,8 @@ impl GitemApp {
             errors_seen: (String::new(), 0.0),
             errors_settled: true,
             close_guard: None,
+            dirty_guard: None,
+            dirty_answered: false,
             closing: false,
             orphans: Vec::new(),
             frame_no: 0,
@@ -1541,6 +1572,62 @@ impl GitemApp {
         }
     }
 
+    /// Asks what to do with unsaved edits before a git command rewrites the files.
+    fn dirty_dialog(&mut self, ctx: &egui::Context) {
+        let Some(g) = &self.dirty_guard else { return };
+        let (mut save, mut go, mut stay) = (false, false, ctx.input(|i| i.key_pressed(egui::Key::Escape)));
+        let title = match &g.action {
+            Action::Run(op) | Action::RunThen(op, _) | Action::RunThenOpen(op, _) => op.title.clone(),
+            _ => String::new(),
+        };
+        dialog_window("Save your edits first?", self.dialogs_settled).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.label(format!("{title} can change files on disk. These have edits that aren't saved:"));
+            for f in &g.files {
+                ui.label(format!("•  {f}"));
+            }
+            ui.label(RichText::new("Without saving, the editor keeps your text and says when the file on disk is different.").small().color(self.pal.dim));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                save = ui.button("Save all and continue").clicked();
+                go = ui.button("Continue without saving").clicked();
+                stay |= ui.button("Cancel").clicked();
+            });
+        });
+        if save {
+            let Some(g) = self.dirty_guard.take() else { return };
+            let mut out = Vec::new();
+            let mut saved = true;
+            if let Some(r) = self.repos.iter_mut().find(|r| r.repo.root == g.root) {
+                let RepoTab { repo, data, dock, .. } = r;
+                let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, out: &mut out, dialog_open: true, in_front: false };
+                for (_, t) in dock.iter_all_tabs_mut() {
+                    if let Tab::Editor(e) = t
+                        && e.is_dirty()
+                    {
+                        saved &= e.save(&mut cx);
+                    }
+                }
+            }
+            for a in out {
+                self.apply_action(ctx, a);
+            }
+            // A file that changed on disk can't be saved over; the command waits for that.
+            if saved {
+                self.dirty_answered = true;
+                self.apply_action(ctx, g.action);
+            } else {
+                self.toasts.push(("Not run: a file couldn't be saved.".to_string(), Instant::now()));
+            }
+        } else if go {
+            let Some(g) = self.dirty_guard.take() else { return };
+            self.dirty_answered = true;
+            self.apply_action(ctx, g.action);
+        } else if stay {
+            self.dirty_guard = None;
+        }
+    }
+
     fn close_dialog(&mut self, ctx: &egui::Context) {
         let Some(g) = &self.close_guard else { return };
         let (mut go, mut stay) = (false, ctx.input(|i| i.key_pressed(egui::Key::Escape)));
@@ -1623,6 +1710,25 @@ impl GitemApp {
     }
 
     pub fn apply_action(&mut self, ctx: &egui::Context, a: Action) {
+        // A command that rewrites files waits while the editor has unsaved edits to them.
+        let op = match &a {
+            Action::Run(op) | Action::RunThen(op, _) | Action::RunThenOpen(op, _) => Some(op),
+            _ => None,
+        };
+        if let Some(op) = op
+            && !std::mem::take(&mut self.dirty_answered)
+            && op.rewrites_worktree()
+            && let Some(r) = self.repos.get(self.active)
+        {
+            let files: Vec<String> = r.dock.iter_all_tabs().filter_map(|(_, t)| match t {
+                Tab::Editor(e) if e.is_dirty() => Some(e.path.clone()),
+                _ => None,
+            }).collect();
+            if !files.is_empty() {
+                self.dirty_guard = Some(DirtyGuard { root: r.repo.root.clone(), files, action: a });
+                return;
+            }
+        }
         match a {
             Action::Run(op) => {
                 let batch = self.frame_no;
@@ -1787,6 +1893,11 @@ impl GitemApp {
             Action::ReloadRepository => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.data.refresh(ctx, &r.repo);
+                }
+            }
+            Action::FileSaved(_) => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    r.data.refresh_status(ctx, &r.repo);
                 }
             }
             Action::Refresh => {
@@ -2441,6 +2552,12 @@ impl GitemApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.settings.ide_mode {
+                    let r = ui.add(egui::Label::new(RichText::new(format!("{} IDE", chrome::icon::CODE)).small().color(p.accent)).sense(Sense::click()));
+                    if r.on_hover_text("IDE mode: a click in the Files tree opens the file for editing. Click to turn it off (Ctrl+Shift+E)").clicked() {
+                        out.push(Action::Settings(Box::new(|s| s.ide_mode = false)));
+                    }
+                }
                 if tab.data.status.get().is_some() {
                     let n = tab.data.counts();
                     let (st, un, c) = (n.staged, n.unstaged, n.conflicts);
@@ -2546,7 +2663,7 @@ impl GitemApp {
     }
 
     fn dialog_open(&self) -> bool {
-        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some() || self.lock_prompt.is_some() || self.link_prompt.is_some() || self.help.is_some() || self.trust_question_open()
+        self.confirm.is_some() || self.form.is_some() || self.palette.is_some() || self.about_open || !self.errors.is_empty() || !self.crash_reports.is_empty() || self.git_warning.is_some() || !self.reopen_failed.is_empty() || self.close_guard.is_some() || self.dirty_guard.is_some() || self.lock_prompt.is_some() || self.link_prompt.is_some() || self.help.is_some() || self.trust_question_open()
     }
 
     /// Old git still does most things, so this warns and lets the user carry on.
@@ -2808,6 +2925,9 @@ impl GitemApp {
         let bound = self.settings.key_bindings.clone();
         let take = |name: &str| crate::keys::chord_for(&bound, name).is_some_and(|(m, k)| ctx.input_mut(|i| i.consume_key(m, k)));
         let (settings, open, close_tab, fetch, pull, push, undo) = (take("settings"), take("open"), take("close_tab"), take("fetch"), take("pull"), take("push"), take("undo_last"));
+        if take("ide_mode") {
+            out.push(Action::Settings(Box::new(|s| s.ide_mode = !s.ide_mode)));
+        }
         let (next, prev) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::Tab), i.consume_key(CS, Key::Tab)));
         if undo {
             out.push(Action::UndoLast);
@@ -3446,6 +3566,7 @@ impl GitemApp {
         self.git_warning_dialog(&ctx);
         self.reopen_dialog(&ctx);
         self.close_dialog(&ctx);
+        self.dirty_dialog(&ctx);
         self.lock_dialog(&ctx);
         self.trust_dialog(&ctx);
         self.link_dialog(&ctx);

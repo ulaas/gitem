@@ -27,6 +27,7 @@ enum Page {
     Appearance,
     Git,
     Workflow,
+    Editor,
     Blame,
     Hosting,
     Trackers,
@@ -35,13 +36,14 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 8] = [Page::Appearance, Page::Git, Page::Workflow, Page::Blame, Page::Hosting, Page::Trackers, Page::Ai, Page::Agents];
+    const ALL: [Page; 9] = [Page::Appearance, Page::Git, Page::Workflow, Page::Editor, Page::Blame, Page::Hosting, Page::Trackers, Page::Ai, Page::Agents];
 
     fn glyph(self) -> &'static str {
         match self {
             Page::Appearance => icon::PALETTE,
             Page::Git => icon::TERMINAL_WINDOW,
             Page::Workflow => icon::GIT_COMMIT,
+            Page::Editor => icon::CODE,
             Page::Blame => icon::USER_FOCUS,
             Page::Hosting => icon::CLOUD,
             Page::Trackers => icon::TICKET,
@@ -55,6 +57,7 @@ impl Page {
             Page::Appearance => "Appearance",
             Page::Git => "Git",
             Page::Workflow => "Workflow",
+            Page::Editor => "Editing",
             Page::Blame => "Blame",
             Page::Hosting => "Hosting",
             Page::Trackers => "Issue trackers",
@@ -68,6 +71,7 @@ impl Page {
             Page::Appearance => "How gitem looks on this computer.",
             Page::Git => "Which git gitem runs, and the editor it opens files in.",
             Page::Workflow => "Defaults for committing, syncing, and starting work.",
+            Page::Editor => "Editing files of the working tree inside gitem.",
             Page::Blame => "Who changed each line, shown as you read code.",
             Page::Hosting => "Self-hosted servers, and links from commit messages to anywhere else.",
             Page::Trackers => "Issues from these services appear in Launchpad.",
@@ -366,6 +370,7 @@ impl SettingsView {
                         Page::Appearance => self.appearance(ui, &mut s, &p),
                         Page::Git => self.git(ui, cx, &mut s, &p),
                         Page::Workflow => self.workflow(ui, &mut s, &p),
+                        Page::Editor => self.editor(ui, &mut s, &p),
                         Page::Blame => self.blame(ui, &mut s, &p),
                         Page::Hosting => self.hosting(ui, &mut s, &p),
                         Page::Trackers => self.trackers(ui, cx, &mut s, &p),
@@ -503,7 +508,7 @@ impl SettingsView {
         }
         let usable = self.editor_check.as_ref().is_none_or(|c| c.1);
         group(ui, "External editor", p, |g| {
-            g.row("Editor", "Where \"Open in external editor\" opens files.", |ui| {
+            g.row("Editor program", "Where \"Open in external editor\" opens files.", |ui| {
                 let selected = if current.is_empty() { REVEAL } else { editors::matching(&current, &found).map_or(CUSTOM, |e| e.name) };
                 egui::ComboBox::from_id_salt("external-editor").selected_text(selected).width(260.0).show_ui(ui, |ui| {
                     if ui.selectable_label(current.is_empty(), REVEAL).clicked() {
@@ -654,6 +659,23 @@ impl SettingsView {
             g.row("Graph page size", "Commits loaded at a time.", |ui| {
                 ui.add(egui::DragValue::new(&mut s.graph_page_size).range(100..=50000).speed(100));
             });
+        });
+    }
+
+    fn editor(&mut self, ui: &mut Ui, s: &mut Settings, p: &Palette) {
+        group(ui, "IDE mode", p, |g| {
+            g.switch(&mut s.ide_mode, "Edit files from the Files tree", "A click opens a file for editing, as a preview the next click replaces; a double click keeps it. Off, a click opens the read-only view with blame. Ctrl+Shift+E switches it.");
+        });
+        group(ui, "Indentation", p, |g| {
+            g.row("Indent size", "For files that don't show their own.", |ui| {
+                ui.add(egui::Slider::new(&mut s.editor_tab_size, 1..=8).suffix(" columns"));
+            });
+            g.switch(&mut s.editor_insert_spaces, "Indent with spaces", "Otherwise tabs. A file that already uses one keeps to it.");
+            g.switch(&mut s.editor_indent_guides, "Indent guides", "A faint line at each level of indent.");
+            g.switch(&mut s.editor_show_whitespace, "Show spaces and tabs", "");
+        });
+        group(ui, "Saving", p, |g| {
+            g.switch(&mut s.editor_trim_on_save, "Trim spaces at line ends when saving", "");
         });
     }
 

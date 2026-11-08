@@ -26,7 +26,7 @@ Links:
   gitem://open?repo=PATH[&commit=SHA][&file=PATH][&line=N]
 
 Visual checks:
-  --shot OUT.png [--tab NAME] [--file PATH] [--size WxH] [--palette QUERY]";
+  --shot OUT.png [--tab NAME] [--file PATH] [--edit PATH] [--size WxH] [--palette QUERY]";
 
 fn tab_by_name(name: &str) -> Option<Tab> {
     Some(match name {
@@ -120,6 +120,11 @@ fn run_app(args: &[String]) -> i32 {
             "--file" => {
                 if let Some(f) = it.next() {
                     tabs.push(Tab::file(f, None, None));
+                }
+            }
+            "--edit" => {
+                if let Some(f) = it.next() {
+                    tabs.push(Tab::editor(f, None, true));
                 }
             }
             "--changes-file" => {

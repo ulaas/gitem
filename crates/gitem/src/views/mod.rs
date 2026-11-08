@@ -12,6 +12,7 @@ pub mod console;
 pub mod contributors;
 pub mod credentials;
 pub mod diffview;
+pub mod editorview;
 pub mod fileview;
 pub mod filetree;
 pub mod graph;
@@ -58,6 +59,7 @@ tabs! {
     Diff(diffview::DiffView),
     Merge(mergeview::MergeView),
     File(fileview::FileView),
+    Editor(editorview::EditorView),
     History(history::HistoryView),
     Visual(visual::VisualView),
     Search(search::SearchView),
@@ -97,6 +99,7 @@ impl Tab {
             (Tab::Patches(a), Tab::Patches(b)) => a.retarget(*b),
             (Tab::Launchpad(a), Tab::Launchpad(b)) => a.retarget(*b),
             (Tab::File(a), Tab::File(b)) => a.retarget(*b),
+            (Tab::Editor(a), Tab::Editor(b)) => a.retarget(*b),
             (Tab::Text(a), Tab::Text(b)) => return a.retarget(*b).map(|t| Tab::Text(Box::new(t))),
             _ => {}
         }
@@ -107,12 +110,13 @@ impl Tab {
     /// Whether a commit picked elsewhere has anything to do with this view. The Details panel
     /// only takes room beside those that do.
     pub fn shows_commits(&self) -> bool {
-        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_) | Tab::Prune(_) | Tab::PullRequest(_) | Tab::Grep(_) | Tab::StashHunks(_))
+        !matches!(self, Tab::Home(_) | Tab::Changes(_) | Tab::Editor(_) | Tab::Settings(_) | Tab::Config(_) | Tab::Credentials(_) | Tab::Console(_) | Tab::Tools(_) | Tab::Health(_) | Tab::Worktrees(_) | Tab::Agents(_) | Tab::Launchpad(_) | Tab::Patches(_) | Tab::Treemap(_) | Tab::Composer(_) | Tab::Prune(_) | Tab::PullRequest(_) | Tab::Grep(_) | Tab::StashHunks(_))
     }
 
     pub fn unsaved(&self) -> Option<String> {
         match self {
             Tab::Merge(v) => v.unsaved(),
+            Tab::Editor(v) => v.unsaved(),
             Tab::Changes(v) => v.unsaved(),
             Tab::Composer(v) => v.unsaved(),
             Tab::Rebase(v) => v.unsaved(),
@@ -150,6 +154,7 @@ impl Tab {
             Tab::Prune(_) => "prune".into(),
             Tab::Grep(_) => "grep".into(),
             Tab::File(v) if v.rev.is_none() => format!("file:{}", v.path),
+            Tab::Editor(v) => format!("edit:{}", v.path),
             _ => return None,
         })
     }
@@ -182,6 +187,9 @@ impl Tab {
                 if let Some(q) = other.strip_prefix("search:") {
                     return Some(Tab::Search(Box::new(search::SearchView::restored_search(q))));
                 }
+                if let Some(path) = other.strip_prefix("edit:") {
+                    return Some(Tab::editor(path, None, true));
+                }
                 if let Some(sides) = other.strip_prefix("compare:") {
                     return Some(Tab::Search(Box::new(search::SearchView::restored_compare(sides))));
                 }
@@ -204,6 +212,11 @@ impl Tab {
     }
     pub fn file(path: &str, rev: Option<String>, line: Option<u32>) -> Self {
         Tab::File(Box::new(fileview::FileView::new(path, rev, line)))
+    }
+    /// A working-tree file open for editing, at a 0-based line. `pinned` keeps it from being
+    /// replaced by the next file clicked.
+    pub fn editor(path: &str, line: Option<usize>, pinned: bool) -> Self {
+        Tab::Editor(Box::new(editorview::EditorView::new(path, line, pinned)))
     }
     pub fn file_history(path: &str) -> Self {
         Tab::History(Box::new(history::HistoryView::for_file(path)))

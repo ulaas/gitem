@@ -610,6 +610,11 @@ impl Repo {
         std::fs::File::open(self.root.join(path)).and_then(|mut f| f.read(&mut head)).is_ok_and(|n| crate::util::is_binary(&head[..n]) && !crate::util::has_utf16_bom(&head[..n]))
     }
 
+    /// Whether the index has this path, so its text there is the file's staged version.
+    pub fn is_tracked(&self, path: &str) -> bool {
+        self.run(&["ls-files", "-z", "--", path]).is_ok_and(|o| !o.stdout.is_empty())
+    }
+
     pub fn tracked_files(&self, rev: Option<&str>) -> Result<Vec<String>> {
         let o = match rev {
             Some(r) => {

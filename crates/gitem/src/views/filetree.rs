@@ -264,12 +264,16 @@ impl FilesView {
                 paint_row(ui, row, rect, is_selected, resp.hovered(), &p);
                 focus_ring(ui, &resp, &p);
                 keep_neighbours_in_view(ui, rect, &resp);
-                if resp.clicked() {
+                if (resp.double_clicked() || resp.triple_clicked()) && row.dir.is_none() && cx.settings.ide_mode {
+                    // A double click keeps the file open, as in other editors. A click just before
+                    // it makes it a triple to egui, which means the same here.
+                    open_file(cx, row, true);
+                } else if resp.clicked() {
                     if row.dir.is_some() {
                         toggled = Some(row.path.clone());
                     } else {
                         picked = Some(row.path.clone());
-                        open_file(cx, row);
+                        open_file(cx, row, false);
                     }
                 }
                 resp.context_menu(|ui| {
@@ -293,10 +297,14 @@ impl FilesView {
     }
 }
 
-fn open_file(cx: &mut Cx, row: &Row) {
+/// Opens a file clicked in the tree. In IDE mode it opens for editing, as a preview that
+/// the next click replaces unless `keep`; a file with conflicts opens where they're resolved.
+fn open_file(cx: &mut Cx, row: &Row, keep: bool) {
     // A deleted file has nothing on disk to show, but its diff does.
     match row.mark {
         Some(Mark { status: FileStatus::Deleted, .. }) => cx.diff(DiffSource::WorkingVsHead, Some(&row.path)),
+        Some(Mark { status: FileStatus::Unmerged, .. }) if cx.settings.ide_mode => cx.open(Tab::merge(&row.path)),
+        _ if cx.settings.ide_mode => cx.open(Tab::editor(&row.path, None, keep)),
         _ => cx.open(Tab::file(&row.path, None, None)),
     }
 }

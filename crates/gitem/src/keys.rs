@@ -35,6 +35,13 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Alt+↑, Alt+↓", "Diff: previous and next change"),
     ("Alt+Up, Alt+Down", "Rebase: move the step"),
     ("Alt+B", "File: show or hide blame"),
+    ("Ctrl+Shift+E", "IDE mode: a click in the Files tree opens the file for editing"),
+    ("Ctrl+S", "Editor: save"),
+    ("Ctrl+H, Ctrl+G", "Editor: replace, go to line"),
+    ("Ctrl+D, Ctrl+F2", "Editor: select the next match, or all of them"),
+    ("Ctrl+Shift+Up, Ctrl+Shift+Down", "Editor: add a caret above or below"),
+    ("Alt+Up, Alt+Down", "Editor: move lines. With Shift, copy them"),
+    ("Ctrl+/, Ctrl+L, Ctrl+J", "Editor: comment, select line, join lines"),
     ("P, R, E, S, F, D", "Rebase: pick, reword, edit, squash, fixup, drop"),
 ];
 
@@ -69,6 +76,7 @@ pub const BINDABLE: &[(&str, &str, &str)] = &[
     ("pull", "Ctrl+Shift+L", "Pull"),
     ("push", "Ctrl+Shift+K", "Push"),
     ("undo_last", "Ctrl+Alt+Z", "Undo the last action"),
+    ("ide_mode", "Ctrl+Shift+E", "IDE mode: edit files from the Files tree"),
 ];
 
 /// A key that means something in one kind of view, which can be changed too.
@@ -92,9 +100,12 @@ pub const CONTEXT: &[ContextKey] = &[
     ck("graph_find_ref", "/", "Graph: find a ref", &["Graph"], true),
     ck("changes_stage", "Space", "Changes: stage or unstage the current file", &["Changes"], true),
     ck("row_menu", "Shift+F10", "Changes and Graph: menu of the current row", &["Changes", "Graph"], true),
-    ck("find", "Ctrl+F", "Find in a file or a diff, or search the graph", &["Graph", "Diff", "File"], false),
-    ck("find_next", "F3", "Next match", &["Graph", "Diff", "File"], false),
-    ck("find_prev", "Shift+F3", "Previous match", &["Graph", "Diff", "File"], false),
+    ck("find", "Ctrl+F", "Find in a file or a diff, or search the graph", &["Graph", "Diff", "File", "Editor"], false),
+    ck("find_next", "F3", "Next match", &["Graph", "Diff", "File", "Editor"], false),
+    ck("find_prev", "Shift+F3", "Previous match", &["Graph", "Diff", "File", "Editor"], false),
+    ck("editor_save", "Ctrl+S", "Editor: save", &["Editor"], false),
+    ck("editor_replace", "Ctrl+H", "Editor: find and replace", &["Editor"], false),
+    ck("editor_goto", "Ctrl+G", "Editor: go to line", &["Editor"], false),
     ck("diff_prev", "Alt+Up", "Diff: previous change", &["Diff"], false),
     ck("diff_next", "Alt+Down", "Diff: next change", &["Diff"], false),
     ck("file_blame", "Alt+B", "File: show or hide blame", &["File"], false),
@@ -119,6 +130,8 @@ const CONTEXT_ROWS: &[(&str, &[&str])] = &[
     ("Alt+↑, Alt+↓", &["diff_prev", "diff_next"]),
     ("Alt+Up, Alt+Down", &["rebase_up", "rebase_down"]),
     ("Alt+B", &["file_blame"]),
+    ("Ctrl+S", &["editor_save"]),
+    ("Ctrl+H, Ctrl+G", &["editor_replace", "editor_goto"]),
     ("P, R, E, S, F, D", &["rebase_pick", "rebase_reword", "rebase_edit", "rebase_squash", "rebase_fixup", "rebase_drop"]),
 ];
 

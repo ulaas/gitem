@@ -57,6 +57,8 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Health" => (icon::HEARTBEAT, "How well this repository is tuned", None),
         "Agent Sessions" => (icon::ROBOT, "Coding agents in these worktrees", None),
         "Review Changes" => (icon::LIST_CHECKS, "A checklist and notes for a change", None),
+        "IDE Mode: Edit Files from the Files Tree" => (icon::CODE, "Switch IDE mode on or off", Some("Ctrl+Shift+E")),
+        "Editor" => (icon::CODE, "Edit files of the working tree", None),
         "About gitem" => (icon::INFO, "Version and build", None),
         "Fetch…" => (icon::CLOUD_ARROW_DOWN, "Download commits from a remote", Some("Ctrl+Shift+F")),
         "Pull…" => (icon::ARROW_LINE_DOWN, "Bring upstream commits into this branch", Some("Ctrl+Shift+L")),
@@ -343,6 +345,8 @@ pub fn commands() -> Vec<Item> {
         }));
     }));
     v.push(item("App", "Zen Mode (Hide Side Panels)", |cx| cx.out.push(Action::ToggleZen)));
+    v.push(item("View", "IDE Mode: Edit Files from the Files Tree", |cx| cx.out.push(Action::Settings(Box::new(|s| s.ide_mode = !s.ide_mode)))));
+    v.push(item("View", "Editor", |cx| cx.open(Tab::Editor(Box::default()))));
     v.push(item("App", "Open Terminal Here", |cx| cx.out.push(Action::OpenTerminal(cx.repo.root.clone(), None))));
     v.push(item("App", "Refresh", |cx| cx.out.push(Action::Refresh)));
     v
@@ -691,7 +695,7 @@ impl PaletteState {
             for f in &self.file_hits {
                 let path = f.clone();
                 let (dir, name) = f.rsplit_once('/').unwrap_or(("", f));
-                let mut it = item("Open file", name, move |cx| cx.open(Tab::file(&path, None, None)));
+                let mut it = item("Open file", name, move |cx| cx.open(if cx.settings.ide_mode { Tab::editor(&path, None, true) } else { Tab::file(&path, None, None) }));
                 (it.glyph, it.detail, it.search, it.record) = (icon::FILE, dir.to_string(), Some(f.clone()), false);
                 items.push(it);
             }

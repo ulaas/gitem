@@ -9,6 +9,7 @@ pub mod crash;
 pub mod logo;
 pub mod notify;
 pub mod data;
+pub mod editor;
 pub mod forms;
 pub mod i18n;
 pub mod keys;

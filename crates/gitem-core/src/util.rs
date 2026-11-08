@@ -153,6 +153,55 @@ pub fn unwrap_paragraphs(text: &str) -> String {
     tidy.trim_end().to_string()
 }
 
+/// Writes a file so that a crash or a full disk partway through never leaves it half
+/// written: the bytes go to a scratch file beside it, which then takes its place. Where
+/// that can't be done (a read-only folder, a file another program holds open on Windows),
+/// it's written in place. Returns whether it had to be.
+pub fn write_file_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<bool> {
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let scratch = dir.join(format!(".{name}.gitem-save-{}", std::process::id()));
+    let swapped = (|| -> std::io::Result<()> {
+        std::fs::write(&scratch, bytes)?;
+        // The new file gets the old one's permissions, as an executable script must stay one.
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            std::fs::set_permissions(&scratch, perms)?;
+        }
+        std::fs::rename(&scratch, path)
+    })();
+    match swapped {
+        Ok(()) => Ok(false),
+        Err(_) => {
+            let _ = std::fs::remove_file(&scratch);
+            std::fs::write(path, bytes)?;
+            Ok(true)
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn an_atomic_write_replaces_the_file_and_leaves_nothing_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("a.txt");
+    std::fs::write(&f, "old").unwrap();
+    assert!(!write_file_atomically(&f, b"new\r\n").unwrap());
+    assert_eq!(std::fs::read(&f).unwrap(), b"new\r\n");
+    assert!(!write_file_atomically(&dir.path().join("fresh.txt"), b"x").unwrap());
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_file_atomically(&f, b"#!/bin/sh").unwrap();
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o755);
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn a_wrapped_paragraph_joins_and_a_list_does_not() {

@@ -10,6 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 gitem-core = { path = "../gitem-core" }
+gitem-text = { path = "../gitem-text" }
+similar = "3"
 eframe = { version = "0.36", features = ["persistence"] }
 egui = "0.36"
 egui-phosphor = "0.14"

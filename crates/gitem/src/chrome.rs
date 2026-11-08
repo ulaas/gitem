@@ -429,10 +429,11 @@ macro_rules! item {
 /// Views grouped by what you're doing, most used first. The separators matter:
 /// 22 unmarked icons would be hard to scan.
 pub fn rail_top() -> [&'static [RailItem]; 4] {
-    static WORK: [RailItem; 5] = [
+    static WORK: [RailItem; 6] = [
         item!(HOUSE, "Home", "Overview and start work", Tab::home, Home),
         item!(GIT_FORK, "Graph", "Commit graph", Tab::graph, Graph),
         item!(NOTE_PENCIL, "Changes", "Stage and commit", Tab::changes, Changes),
+        item!(CODE, "Editor", "Edit files of the working tree", || Tab::Editor(Box::default()), Editor),
         item!(MAGNIFYING_GLASS, "Search", "Search and compare", || Tab::Search(Box::default()), Search),
         item!(ROCKET_LAUNCH, "Launchpad", "Pull requests and issues", || Tab::Launchpad(Box::default()), Launchpad),
     ];
@@ -767,7 +768,7 @@ mod tests {
     fn every_view_has_a_distinct_icon() {
         let mut all: Vec<&RailItem> = rail_top().into_iter().flatten().collect();
         all.extend(rail_bottom());
-        assert_eq!(all.len(), 22);
+        assert_eq!(all.len(), 23);
         let glyphs: std::collections::HashSet<_> = all.iter().map(|i| i.glyph).collect();
         assert_eq!(glyphs.len(), all.len());
         for i in &all {

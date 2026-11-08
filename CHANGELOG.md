@@ -4,6 +4,8 @@
 
 Added:
 
+- IDE mode (`Ctrl+Shift+E`): a click in the Files tree opens the file for editing, as a preview the next click replaces, and a double click keeps it. Edit is in every working-tree file's menu either way. The editor has syntax colours, several carets, find and replace, bracket pairs, auto-indent, comment toggling, moving and copying lines and go to line, and keeps line endings, a byte order mark and UTF-16 as they were. It marks what changed against the index and HEAD beside each line, stages or reverts one change at a time, shows the line's blame through unsaved edits, reloads a file changed on disk or asks first if it's been edited, and asks before a checkout, pull or the like rewrites a file with unsaved edits.
+- Any view in the More list can be pinned to the rail, and any rail icon but Settings taken off it.
 - A Pull Request tab with files, diffs, checks, conversation, a verdict, comments on a line, and a choice of merge method. Everything you're involved in across a host, in Launchpad. A commit's pull request, in Details.
 - Undo in the toolbar for merge, rebase, pull, reset, cherry-pick, revert, branch delete, stash drop, discard and deleting untracked files, with Redo after one that moved HEAD.
 - Clean up branches, and fast-forwarding a branch you aren't on.
@@ -24,6 +26,8 @@ Added:
 
 Changed:
 
+- Buttons, small buttons, menus, text boxes and icon buttons in a row all stand 24 px tall.
+- The Git page's editor setting is now called Editor program, beside gitem's own editor.
 - Launchpad doesn't offer Approve on your own pull request, or Merge on a draft or one with conflicts.
 - A force push of the default branch asks first, even with a lease.
 - Everything I'm in asks every host your recent repositories use that has a saved token, not just this repository's, and only when you click. Each host's failure shows beside what the others found.

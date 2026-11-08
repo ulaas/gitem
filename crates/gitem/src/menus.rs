@@ -606,6 +606,10 @@ pub fn worktree_menu(ui: &mut Ui, cx: &mut Cx, w: &Worktree) {
 }
 
 pub fn file_menu(ui: &mut Ui, cx: &mut Cx, path: &str, rev: Option<&str>) {
+    // Only the working tree's copy can be edited; a revision is history.
+    if rev.is_none() && item(ui, "Edit") {
+        cx.open(Tab::editor(path, None, true));
+    }
     if item(ui, "Open with blame") {
         cx.open(Tab::file(path, rev.map(String::from), None));
     }

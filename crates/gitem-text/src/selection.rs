@@ -96,6 +96,10 @@ impl SelectionSet {
         false
     }
 
+    pub fn primary_index(&self) -> usize {
+        self.primary
+    }
+
     pub fn primary(&self) -> Selection {
         self.sels[self.primary]
     }

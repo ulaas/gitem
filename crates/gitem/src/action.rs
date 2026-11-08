@@ -34,6 +34,8 @@ pub enum Action {
     /// A tab asked to close with work in it. `key` names the tab, `lost` what would go.
     AskCloseTab { key: String, lost: String },
     OpenTab(Tab),
+    /// A file was written by the editor: the repository's status is out of date.
+    FileSaved(String),
     /// The working-changes row was clicked, with Details set to show it.
     ShowWip,
     /// Show a commit in the Inspect panel.

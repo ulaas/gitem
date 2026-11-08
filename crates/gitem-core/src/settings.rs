@@ -134,6 +134,22 @@ pub struct Settings {
     pub accent: String,
     pub ui_scale: f32,
     pub editor_font_size: f32,
+    /// IDE mode: a file clicked in the Files tree opens for editing rather than for reading.
+    pub ide_mode: bool,
+    /// Columns per indent in a file that doesn't show its own.
+    pub editor_tab_size: u8,
+    /// Spaces rather than tabs, in a file that doesn't show which it uses.
+    pub editor_insert_spaces: bool,
+    pub editor_show_whitespace: bool,
+    pub editor_indent_guides: bool,
+    pub editor_word_wrap: bool,
+    pub editor_minimap: bool,
+    /// Spaces and tabs at the ends of lines go when a file is saved.
+    pub editor_trim_on_save: bool,
+    /// Files edited lately, newest first, by repository.
+    pub editor_recent: std::collections::HashMap<String, Vec<String>>,
+    /// Dock layouts saved under a name, for any repository.
+    pub dock_layouts: std::collections::BTreeMap<String, String>,
     pub recent_repos: Vec<String>,
     pub open_repos: Vec<String>,
     pub workspaces: Vec<Workspace>,
@@ -274,6 +290,8 @@ impl Settings {
             palette_recent: c.palette_recent,
             session_tabs: c.session_tabs,
             session_layouts: c.session_layouts,
+            editor_recent: c.editor_recent,
+            dock_layouts: c.dock_layouts,
             unknown: c.unknown,
             ..Self::default()
         }
@@ -296,6 +314,16 @@ impl Default for Settings {
             accent: String::new(),
             ui_scale: 1.0,
             editor_font_size: 13.0,
+            ide_mode: false,
+            editor_tab_size: 4,
+            editor_insert_spaces: true,
+            editor_show_whitespace: false,
+            editor_indent_guides: true,
+            editor_word_wrap: false,
+            editor_minimap: false,
+            editor_trim_on_save: false,
+            editor_recent: std::collections::HashMap::new(),
+            dock_layouts: std::collections::BTreeMap::new(),
             recent_repos: Vec::new(),
             open_repos: Vec::new(),
             workspaces: Vec::new(),
@@ -433,6 +461,7 @@ impl Settings {
         new.open_repos = std::mem::take(&mut self.open_repos);
         new.session_tabs = std::mem::take(&mut self.session_tabs);
         new.session_layouts = std::mem::take(&mut self.session_layouts);
+        new.editor_recent = std::mem::take(&mut self.editor_recent);
         new.git_path = std::mem::take(&mut self.git_path);
         *self = new;
         Ok(())
