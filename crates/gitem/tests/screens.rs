@@ -444,6 +444,30 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
             out.save(&mut h, &format!("focus{presses}"));
         }
     }
+    if wanted("ide") {
+        let mut h = f.harness(|s| { set(s); s.ide_mode = true; }, vec![]);
+        open(&mut h, Tab::editor("a.txt", None, true));
+        let ctx = h.ctx.clone();
+        h.state_mut().apply_action(&ctx, gitem::action::Action::Layout(gitem::layouts::Preset::Ide));
+        quiet(&mut h);
+        out.save(&mut h, "ide-layout");
+        // The tab's menu, from a right-click on its title.
+        let d = &h.state().repos[0].dock;
+        let path = d.find_tab_from(|t| t.key() == "edit:a.txt").expect("the editor tab");
+        let id = gitem::app::dock_tab_id(egui_dock::NodePath { surface: path.surface, node: path.node }, path.tab.0);
+        let at = h.ctx.read_response(id).expect("the tab was drawn").rect.center();
+        h.event(egui::Event::PointerMoved(at));
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        }
+        h.step();
+        h.step();
+        out.save(&mut h, "tab-menu");
+        h.key_press(egui::Key::Escape);
+        h.key_press_modifiers(egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT), egui::Key::M);
+        quiet(&mut h);
+        out.save(&mut h, "zoomed");
+    }
     if wanted("wrap") {
         let mut h = f.harness(set, vec![]);
         open(&mut h, Tab::diff(DiffSource::Unstaged, Some("a.txt".into())));

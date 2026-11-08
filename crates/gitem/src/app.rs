@@ -135,6 +135,8 @@ pub struct RepoTab {
     pub data: RepoData,
     watcher: RepoWatcher,
     pub dock: DockState<Tab>,
+    /// One pane fills the window; the rest of the layout waits here.
+    pub zoom: Option<crate::layouts::Zoom>,
     pub inspect: InspectPanel,
     show_inspect: bool,
     sidebar: Sidebar,
@@ -251,6 +253,7 @@ impl RepoTab {
             data,
             watcher,
             dock,
+            zoom: None,
             inspect: InspectPanel::default(),
             show_inspect: true,
             sidebar: Sidebar::default(),
@@ -286,9 +289,85 @@ impl RepoTab {
         }
     }
 
+    /// Every tab, those hidden while a pane fills the window included.
+    pub fn all_tabs(&self) -> impl Iterator<Item = &Tab> {
+        self.dock.iter_all_tabs().chain(self.zoom.iter().flat_map(|z| z.full.iter_all_tabs())).map(|(_, t)| t)
+    }
+
+    /// Does what a tab's menu or a key asked. Tabs with unsaved work stay open: one asks
+    /// first, as its close button does, and several are left with a note.
+    fn dock_op(&mut self, key: &str, op: crate::layouts::DockOp, guard: &mut Option<CloseGuard>) -> Option<String> {
+        use crate::layouts::DockOp;
+        match op {
+            DockOp::Zoom => {
+                let pane = self.dock.find_tab_from(|t| t.key() == key).map(|p| NodePath { surface: p.surface, node: p.node });
+                self.toggle_zoom(pane);
+            }
+            DockOp::Keep => {
+                for t in self.all_tabs_mut() {
+                    match t {
+                        Tab::Diff(d) if d.key() == key => d.pinned = true,
+                        Tab::Editor(e) if e.key() == key => e.pinned = true,
+                        _ => {}
+                    }
+                }
+            }
+            DockOp::Split(dir) => {
+                crate::layouts::split_off(&mut self.dock, key, dir);
+            }
+            DockOp::Close => {
+                let unsaved = self.dock.iter_all_tabs().find(|(_, t)| t.key() == key).and_then(|(_, t)| t.unsaved());
+                match unsaved {
+                    Some(lost) => *guard = Some(CloseGuard { target: CloseTarget::Tab { root: self.repo.root.clone(), key: key.to_string() }, items: vec![lost] }),
+                    None => self.close_tab_now(key),
+                }
+            }
+            DockOp::CloseMany(which) => {
+                let mut kept = 0;
+                for k in crate::layouts::keys_to_close(&self.dock, key, which) {
+                    if self.dock.iter_all_tabs().any(|(_, t)| t.key() == k && t.unsaved().is_some()) {
+                        kept += 1;
+                    } else {
+                        self.close_tab_now(&k);
+                    }
+                }
+                if kept > 0 {
+                    return Some(format!("{} with unsaved edits left open.", plural(kept, "tab", "tabs")));
+                }
+            }
+        }
+        None
+    }
+
+    /// Closes a tab, unless it's the last: something has to show where things are.
+    fn close_tab_now(&mut self, key: &str) {
+        if self.dock.iter_all_tabs().count() > 1
+            && let Some(path) = self.dock.find_tab_from(|t| t.key() == key)
+        {
+            self.dock.remove_tab(path);
+        }
+    }
+
+    pub fn all_tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.dock.iter_all_tabs_mut().chain(self.zoom.iter_mut().flat_map(|z| z.full.iter_all_tabs_mut())).map(|(_, t)| t)
+    }
+
+    /// One pane fills the window, or the whole layout comes back.
+    pub fn toggle_zoom(&mut self, pane: Option<NodePath>) {
+        match self.zoom.take() {
+            Some(z) => crate::layouts::unzoom(&mut self.dock, z),
+            None => {
+                let pane = pane.or_else(|| self.dock.focused_leaf()).or_else(|| self.dock.iter_leaves().next().map(|(p, _)| p));
+                if let Some(p) = pane {
+                    self.zoom = crate::layouts::zoom(&mut self.dock, p);
+                }
+            }
+        }
+    }
+
     /// What closing this repository's tab would lose, in a list for the user.
     fn at_stake(&self, running_note: &str) -> Vec<String> {
-        let mut items: Vec<String> = self.dock.iter_all_tabs().filter_map(|(_, t)| t.unsaved()).collect();
+        let mut items: Vec<String> = self.all_tabs().filter_map(|t| t.unsaved()).collect();
         if let Some(r) = self.running.as_ref().filter(|r| !r.harmless) {
             items.push(format!("{} is running. {running_note}", r.title));
         }
@@ -323,6 +402,11 @@ impl RepoTab {
     }
 
     pub fn open_tab(&mut self, tab: Tab) {
+        // A tab that's open but hidden behind a zoomed pane brings the layout back.
+        let key = tab.key();
+        if self.zoom.as_ref().is_some_and(|z| z.full.find_tab_from(|t| t.key() == key).is_some()) {
+            self.toggle_zoom(None);
+        }
         // Diffs opened from lists reuse one preview tab, unless it's been pinned.
         // A file clicked in IDE mode is previewed the same way, in one tab, until it's kept.
         // A preview with edits is never replaced: typing keeps it.
@@ -476,7 +560,7 @@ impl RepoTab {
 
     /// What closing an open tab would lose. For tests.
     pub fn open_tab_unsaved(&self, key: &str) -> Option<String> {
-        self.dock.iter_all_tabs().find(|(_, t)| t.key() == key).and_then(|(_, t)| t.unsaved())
+        self.all_tabs().find(|t| t.key() == key).and_then(|t| t.unsaved())
     }
 
     /// The current branch's pull request for the status bar, with Launchpad open or not, once
@@ -747,6 +831,30 @@ struct Viewer<'a> {
     cx: Cx<'a>,
     /// The key of the tab the user is working in.
     front: Option<String>,
+    /// How many tabs share each tab's pane, by key, for what its menu can offer.
+    pane_sizes: std::collections::HashMap<String, usize>,
+    panes: usize,
+    zoomed: bool,
+}
+
+/// A tab's title with the icon of its kind before it. The text takes the dock's colour for
+/// the tab's state; a dot for unsaved edits takes the accent.
+fn tab_title(tab: &Tab, p: &Palette) -> egui::WidgetText {
+    use egui::text::{LayoutJob, TextFormat};
+    let italic = matches!(tab, Tab::Diff(d) if !d.pinned) || matches!(tab, Tab::Editor(e) if !e.pinned && !e.path.is_empty());
+    let font = egui::FontId::proportional(13.0);
+    let mut job = LayoutJob::default();
+    job.append(chrome::tab_glyph(tab), 0.0, TextFormat { font_id: font.clone(), color: p.dim, ..Default::default() });
+    let title = tab.title();
+    let (dot, rest) = match title.strip_prefix("\u{25CF} ") {
+        Some(rest) => (true, rest.to_string()),
+        None => (false, title),
+    };
+    job.append(&rest, 6.0, TextFormat { font_id: font.clone(), color: Color32::PLACEHOLDER, italics: italic, ..Default::default() });
+    if dot {
+        job.append("\u{25CF}", 6.0, TextFormat { font_id: egui::FontId::proportional(10.0), color: p.accent, valign: egui::Align::Center, ..Default::default() });
+    }
+    job.into()
 }
 
 impl TabViewer for Viewer<'_> {
@@ -758,12 +866,57 @@ impl TabViewer for Viewer<'_> {
         egui::Id::new((&self.cx.repo.root, tab.key()))
     }
 
+    /// Slanted for a preview, as a diff or a file clicked in IDE mode is reused for the next
+    /// one unless it's been kept.
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
-        // Slanted, as a diff is reused for the next one unless it's been kept.
-        match tab {
-            Tab::Diff(d) if !d.pinned => RichText::new(tab.title()).italics().into(),
-            Tab::Editor(e) if !e.pinned && !e.path.is_empty() => RichText::new(tab.title()).italics().into(),
-            _ => tab.title().into(),
+        tab_title(tab, self.cx.pal)
+    }
+
+    fn context_menu(&mut self, ui: &mut Ui, tab: &mut Tab, _path: NodePath) {
+        use crate::layouts::{Closing, DockOp};
+        let key = tab.key();
+        let mut op = None;
+        let preview = matches!(tab, Tab::Diff(d) if !d.pinned) || matches!(tab, Tab::Editor(e) if !e.pinned && !e.path.is_empty());
+        if preview && ui.button("Keep open").on_hover_text("Don't reuse this tab for the next one").clicked() {
+            op = Some(DockOp::Keep);
+        }
+        let alone = self.pane_sizes.get(&key).copied().unwrap_or(1) < 2;
+        let why = "It's the only tab in its pane.";
+        if ui.add_enabled(!alone, egui::Button::new("Split right")).on_disabled_hover_text(why).clicked() {
+            op = Some(DockOp::Split(egui_dock::Split::Right));
+        }
+        if ui.add_enabled(!alone, egui::Button::new("Split down")).on_disabled_hover_text(why).clicked() {
+            op = Some(DockOp::Split(egui_dock::Split::Below));
+        }
+        let label = if self.zoomed { "Restore layout" } else { "Fill the window" };
+        if ui.add_enabled(self.zoomed || self.panes > 1, egui::Button::new(label)).on_disabled_hover_text("There's only one pane.").on_hover_text(crate::keys::chord_label(&self.cx.settings.key_bindings, "zoom_pane")).clicked() {
+            op = Some(DockOp::Zoom);
+        }
+        ui.separator();
+        if ui.add_enabled(!alone, egui::Button::new("Close others")).on_disabled_hover_text(why).clicked() {
+            op = Some(DockOp::CloseMany(Closing::Others));
+        }
+        if ui.button("Close to the right").clicked() {
+            op = Some(DockOp::CloseMany(Closing::ToTheRight));
+        }
+        if ui.button("Close all in this pane").clicked() {
+            op = Some(DockOp::CloseMany(Closing::All));
+        }
+        let path = match tab {
+            Tab::Editor(e) if !e.path.is_empty() => Some(e.path.clone()),
+            Tab::File(f) => Some(f.path.clone()),
+            _ => None,
+        };
+        if let Some(path) = path {
+            ui.separator();
+            if ui.button("Copy path").clicked() {
+                self.cx.copy(path);
+                ui.close();
+            }
+        }
+        if let Some(op) = op {
+            self.cx.out.push(Action::Dock { key, op });
+            ui.close();
         }
     }
 
@@ -773,6 +926,12 @@ impl TabViewer for Viewer<'_> {
             self.cx.in_front = self.front.as_deref().is_none_or(|k| k == tab.key());
             tab.ui(ui, &mut self.cx);
         });
+    }
+
+    /// gitem has one window with its own title bar: a tab torn off into a window of its own
+    /// would have neither.
+    fn allowed_in_windows(&self, _tab: &mut Tab) -> bool {
+        false
     }
 
     fn on_add(&mut self, _path: NodePath) {
@@ -969,6 +1128,8 @@ pub struct GitemApp {
     errors_settled: bool,
     close_guard: Option<CloseGuard>,
     dirty_guard: Option<DirtyGuard>,
+    /// When Ctrl+K was pressed, for moving to a pane with an arrow after it.
+    pane_chord: Option<f64>,
     /// The next action runs without asking about unsaved edits: the user just answered.
     dirty_answered: bool,
     /// The user has said yes to losing work, so the next close request goes through.
@@ -1103,6 +1264,7 @@ impl GitemApp {
             errors_settled: true,
             close_guard: None,
             dirty_guard: None,
+            pane_chord: None,
             dirty_answered: false,
             closing: false,
             orphans: Vec::new(),
@@ -1430,10 +1592,13 @@ impl GitemApp {
         }
         self.settings.open_repos = self.session_kept.iter().cloned().chain(self.repos.iter().map(|r| r.repo.root.to_string_lossy().replace('\\', "/"))).collect();
         for r in &self.repos {
-            let tabs: Vec<String> = r.dock.iter_all_tabs().filter_map(|(_, t)| t.spec()).collect();
+            let tabs: Vec<String> = r.all_tabs().filter_map(|t| t.spec()).collect();
             let root = r.repo.root.to_string_lossy().replace('\\', "/");
             self.settings.session_tabs.insert(root.clone(), tabs);
-            if let Some(j) = layout_to_json(&r.dock) {
+            // A zoomed pane is a moment's view: the layout kept is the one from before it.
+            if r.zoom.is_none()
+                && let Some(j) = layout_to_json(&r.dock)
+            {
                 self.settings.session_layouts.insert(root, j);
             }
         }
@@ -1599,9 +1764,9 @@ impl GitemApp {
             let mut out = Vec::new();
             let mut saved = true;
             if let Some(r) = self.repos.iter_mut().find(|r| r.repo.root == g.root) {
-                let RepoTab { repo, data, dock, .. } = r;
+                let RepoTab { repo, data, dock, zoom, .. } = r;
                 let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, out: &mut out, dialog_open: true, in_front: false };
-                for (_, t) in dock.iter_all_tabs_mut() {
+                for (_, t) in dock.iter_all_tabs_mut().chain(zoom.iter_mut().flat_map(|z| z.full.iter_all_tabs_mut())) {
                     if let Tab::Editor(e) = t
                         && e.is_dirty()
                     {
@@ -1720,7 +1885,7 @@ impl GitemApp {
             && op.rewrites_worktree()
             && let Some(r) = self.repos.get(self.active)
         {
-            let files: Vec<String> = r.dock.iter_all_tabs().filter_map(|(_, t)| match t {
+            let files: Vec<String> = r.all_tabs().filter_map(|t| match t {
                 Tab::Editor(e) if e.is_dirty() => Some(e.path.clone()),
                 _ => None,
             }).collect();
@@ -1893,6 +2058,53 @@ impl GitemApp {
             Action::ReloadRepository => {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.data.refresh(ctx, &r.repo);
+                }
+            }
+            Action::Dock { key, op } => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    let toast = r.dock_op(&key, op, &mut self.close_guard);
+                    if let Some(t) = toast {
+                        self.toasts.push((t, Instant::now()));
+                    }
+                }
+            }
+            Action::Layout(preset) => {
+                let saved = match &preset {
+                    crate::layouts::Preset::Saved(name) => self.settings.dock_layouts.get(name).cloned(),
+                    _ => None,
+                };
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    if r.zoom.is_some() {
+                        r.toggle_zoom(None);
+                    }
+                    let into = match &preset {
+                        crate::layouts::Preset::Git => Some(crate::layouts::git_layout()),
+                        crate::layouts::Preset::Ide => Some(crate::layouts::ide_layout(Tab::Editor(Box::default()))),
+                        crate::layouts::Preset::Saved(_) => saved.as_deref().and_then(layout_from_json),
+                    };
+                    match into {
+                        Some(into) => {
+                            let open = crate::layouts::take_all(&mut r.dock);
+                            r.dock = crate::layouts::arrange(into, open);
+                            if preset == crate::layouts::Preset::Ide {
+                                r.show_sidebar = true;
+                                self.settings.sidebar_files = true;
+                                self.settings_dirty = true;
+                            }
+                        }
+                        None => self.toasts.push(("That layout can't be read any more.".to_string(), Instant::now())),
+                    }
+                }
+            }
+            Action::SaveLayout(name) => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    if r.zoom.is_some() {
+                        r.toggle_zoom(None);
+                    }
+                    if let Some(j) = layout_to_json(&r.dock) {
+                        self.settings.dock_layouts.insert(name, j);
+                        self.settings_dirty = true;
+                    }
                 }
             }
             Action::FileSaved(_) => {
@@ -2928,6 +3140,35 @@ impl GitemApp {
         if take("ide_mode") {
             out.push(Action::Settings(Box::new(|s| s.ide_mode = !s.ide_mode)));
         }
+        let (zoom, next_pane, prev_pane) = (take("zoom_pane"), take("next_pane"), take("prev_pane"));
+        // Ctrl+K, then an arrow within a second and a half: the pane that way.
+        let now = ctx.input(|i| i.time);
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
+            self.pane_chord = Some(now);
+        }
+        let mut toward = None;
+        if self.pane_chord.is_some_and(|t| now - t < 1.5) {
+            for (key, dir) in [(Key::ArrowLeft, crate::layouts::Direction::Left), (Key::ArrowRight, crate::layouts::Direction::Right), (Key::ArrowUp, crate::layouts::Direction::Up), (Key::ArrowDown, crate::layouts::Direction::Down)] {
+                if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key)) {
+                    toward = Some(dir);
+                    self.pane_chord = None;
+                }
+            }
+        }
+        if let Some(r) = self.repos.get_mut(self.active) {
+            if zoom {
+                r.toggle_zoom(None);
+            }
+            let to = match (toward, next_pane, prev_pane) {
+                (Some(d), _, _) => crate::layouts::neighbour(&r.dock, d),
+                (None, true, _) => crate::layouts::next_pane(&r.dock, false),
+                (None, _, true) => crate::layouts::next_pane(&r.dock, true),
+                _ => None,
+            };
+            if let Some(p) = to {
+                r.dock.set_focused_node_and_surface(p);
+            }
+        }
         let (next, prev) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::Tab), i.consume_key(CS, Key::Tab)));
         if undo {
             out.push(Action::UndoLast);
@@ -3402,7 +3643,7 @@ impl GitemApp {
         }
 
         if let Some(tab) = self.repos.get_mut(self.active) {
-            let RepoTab { repo, data, dock, inspect, show_inspect, sidebar, show_sidebar, show_rail, squeeze: tab_squeeze, peek, show_wip, .. } = tab;
+            let RepoTab { repo, data, dock, zoom, inspect, show_inspect, sidebar, show_sidebar, show_rail, squeeze: tab_squeeze, peek, show_wip, .. } = tab;
             if let Some(s) = data.status.get()
                 && s.op != RepoOp::None {
                     let frame = egui::Frame::new().fill(pal.banner_fill());
@@ -3494,7 +3735,20 @@ impl GitemApp {
             }
             let style = theme::dock_style(ui.style(), &pal);
             let front = dock.find_active_focused().map(|(_, t)| t.key()).or_else(|| dock.iter_leaves().next().and_then(|(_, l)| l.tabs().get(l.active.0)).map(Tab::key));
-            let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true }, front };
+            let pane_sizes = dock.iter_leaves().flat_map(|(_, l)| l.tabs.iter().map(|t| (t.key(), l.tabs.len())).collect::<Vec<_>>()).collect();
+            let panes = dock.iter_leaves().count();
+            let zoomed = zoom.is_some();
+            if zoomed {
+                egui::Panel::top("zoom-bar").frame(egui::Frame::new().fill(pal.panel2).inner_margin(egui::Margin::symmetric(8, 3))).show_separator_line(false).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{} One pane fills the window. The rest of the layout is kept.", chrome::icon::CORNERS_OUT)).color(pal.dim));
+                        if crate::widgets::small_button(ui, "Restore layout").on_hover_text(crate::keys::chord_label(&self.settings.key_bindings, "zoom_pane")).clicked() {
+                            out.push(Action::Dock { key: String::new(), op: crate::layouts::DockOp::Zoom });
+                        }
+                    });
+                });
+            }
+            let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true }, front, pane_sizes, panes, zoomed };
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 DockArea::new(dock).id(egui::Id::new(DOCK_ID)).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_leaf_close_all_buttons(false).show_inside(ui, &mut viewer);
                 paint_active_tab_markers(ui, dock, &pal);

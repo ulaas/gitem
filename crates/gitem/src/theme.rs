@@ -380,6 +380,23 @@ pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
     s.separator.color_idle = p.border;
     s.separator.color_hovered = p.accent;
     s.separator.color_dragged = p.accent;
+    // A thin line, with room either side to catch the pointer.
+    s.separator.width = 1.0;
+    s.separator.extra_interact_width = 6.0;
+    // Titles shorter than this still leave room to grab the tab, and long ones scroll.
+    s.tab.minimum_width = Some(84.0);
+    s.tab_bar.show_scroll_bar_on_overflow = true;
+    // Where a dragged tab would land: the accent, faint, with the drop buttons on the panel.
+    s.overlay.selection_color = p.accent.gamma_multiply(0.22);
+    s.overlay.selection_stroke_width = 1.5;
+    s.overlay.button_color = p.panel2;
+    s.overlay.button_border_stroke = Stroke::new(1.0, p.accent.gamma_multiply(0.6));
+    s.overlay.hovered_leaf_highlight.color = p.accent.gamma_multiply(0.06);
+    s.overlay.hovered_leaf_highlight.stroke = Stroke::new(1.0, p.accent.gamma_multiply(0.5));
+    s.overlay.hovered_leaf_highlight.corner_radius = CornerRadius::same(4);
+    s.overlay.hovered_leaf_highlight.expansion = -2.0;
+    s.overlay.surface_fade_opacity = 0.12;
+    s.overlay.feel.fade_hold_time = 0.12;
     s
 }
 

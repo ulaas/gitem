@@ -470,6 +470,26 @@ pub fn rail_bottom() -> &'static [RailItem] {
     &BOTTOM
 }
 
+/// The icon of a tab's kind: the rail's for the views on it, and one of their own for files,
+/// diffs and the other views that open from something else.
+pub fn tab_glyph(tab: &Tab) -> &'static str {
+    if let Some(item) = rail_top().into_iter().flatten().chain(rail_bottom()).find(|i| (i.is)(tab)) {
+        return item.glyph;
+    }
+    match tab {
+        Tab::File(_) => icon::FILE_TEXT,
+        Tab::Diff(_) => icon::GIT_DIFF,
+        Tab::Merge(_) => icon::GIT_MERGE,
+        Tab::History(_) => icon::CLOCK,
+        Tab::PullRequest(_) => icon::GIT_PULL_REQUEST,
+        Tab::Tree(_) => icon::FOLDER_OPEN,
+        Tab::Grep(_) => icon::TEXT_AA,
+        Tab::Prune(_) => icon::BROOM,
+        Tab::StashHunks(_) => icon::ARCHIVE,
+        _ => icon::SQUARE,
+    }
+}
+
 /// One hue per rail group, drawn from the palette's fixed order.
 fn group_tint(group: usize, p: &Palette) -> Color32 {
     // These are graphics on the rail's background, which need 3:1.

@@ -59,6 +59,12 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Review Changes" => (icon::LIST_CHECKS, "A checklist and notes for a change", None),
         "IDE Mode: Edit Files from the Files Tree" => (icon::CODE, "Switch IDE mode on or off", Some("Ctrl+Shift+E")),
         "Editor" => (icon::CODE, "Edit files of the working tree", None),
+        "Layout: Git" => (icon::GIT_FORK, "Overview, graph and changes in one pane", None),
+        "Layout: IDE" => (icon::LAYOUT, "The editor above Changes and the Console, with the Files sidebar", None),
+        "Layout: Save Current As…" => (icon::FLOPPY_DISK, "Keep this arrangement under a name", None),
+        "Layout: Open Saved…" => (icon::LAYOUT, "An arrangement saved before", None),
+        "Layout: Delete Saved…" => (icon::TRASH, "", None),
+        "Fill the Window with This Pane" => (icon::CORNERS_OUT, "Or bring the layout back", Some("Ctrl+Shift+M")),
         "About gitem" => (icon::INFO, "Version and build", None),
         "Fetch…" => (icon::CLOUD_ARROW_DOWN, "Download commits from a remote", Some("Ctrl+Shift+F")),
         "Pull…" => (icon::ARROW_LINE_DOWN, "Bring upstream commits into this branch", Some("Ctrl+Shift+L")),
@@ -347,6 +353,39 @@ pub fn commands() -> Vec<Item> {
     v.push(item("App", "Zen Mode (Hide Side Panels)", |cx| cx.out.push(Action::ToggleZen)));
     v.push(item("View", "IDE Mode: Edit Files from the Files Tree", |cx| cx.out.push(Action::Settings(Box::new(|s| s.ide_mode = !s.ide_mode)))));
     v.push(item("View", "Editor", |cx| cx.open(Tab::Editor(Box::default()))));
+    v.push(item("View", "Layout: Git", |cx| cx.out.push(Action::Layout(crate::layouts::Preset::Git))));
+    v.push(item("View", "Layout: IDE", |cx| cx.out.push(Action::Layout(crate::layouts::Preset::Ide))));
+    v.push(item("View", "Layout: Save Current As…", |cx| {
+        cx.form(forms::FormDialog::new("Save this layout", "Save").text("name", "Name", "").on_submit(|v| {
+            let name = v.text("name").trim().to_string();
+            if name.is_empty() {
+                return Err("Give it a name.".into());
+            }
+            Ok(vec![Action::SaveLayout(name)])
+        }));
+    }));
+    v.push(item("View", "Layout: Open Saved…", |cx| {
+        let names: Vec<String> = cx.settings.dock_layouts.keys().cloned().collect();
+        if names.is_empty() {
+            return cx.toast("No layouts are saved yet. Layout: Save Current As… keeps one.");
+        }
+        let first = names[0].clone();
+        cx.form(forms::FormDialog::new("Open a saved layout", "Open").pick("name", "Layout", names, &first).on_submit(|v| Ok(vec![Action::Layout(crate::layouts::Preset::Saved(v.text("name").to_string()))])));
+    }));
+    v.push(item("View", "Layout: Delete Saved…", |cx| {
+        let names: Vec<String> = cx.settings.dock_layouts.keys().cloned().collect();
+        if names.is_empty() {
+            return cx.toast("No layouts are saved.");
+        }
+        let first = names[0].clone();
+        cx.form(forms::FormDialog::new("Delete a saved layout", "Delete").pick("name", "Layout", names, &first).on_submit(|v| {
+            let name = v.text("name").to_string();
+            Ok(vec![Action::Settings(Box::new(move |s| {
+                s.dock_layouts.remove(&name);
+            }))])
+        }));
+    }));
+    v.push(item("View", "Fill the Window with This Pane", |cx| cx.out.push(Action::Dock { key: String::new(), op: crate::layouts::DockOp::Zoom })));
     v.push(item("App", "Open Terminal Here", |cx| cx.out.push(Action::OpenTerminal(cx.repo.root.clone(), None))));
     v.push(item("App", "Refresh", |cx| cx.out.push(Action::Refresh)));
     v

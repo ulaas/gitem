@@ -68,7 +68,7 @@ impl ConsoleView {
         let Ok(entries) = log.lock() else { return };
         let matching: Vec<&gitem_core::runner::LogEntry> = entries.iter().filter(|e| (self.show_reads || e.is_write) && (q.is_empty() || e.command.to_lowercase().contains(&q))).collect();
         let older = matching.len().saturating_sub(self.shown);
-        egui::ScrollArea::vertical().id_salt("console").stick_to_bottom(self.stick).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("console").stick_to_bottom(self.stick).auto_shrink([false, false]).min_scrolled_height(0.0).show(ui, |ui| {
             if older > 0 && crate::widgets::small_button(ui, format!("Show {} older", older.min(SHOWN_STEP))).clicked() {
                 self.shown += SHOWN_STEP;
             }

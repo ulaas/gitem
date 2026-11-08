@@ -5,6 +5,7 @@
 Added:
 
 - IDE mode (`Ctrl+Shift+E`): a click in the Files tree opens the file for editing, as a preview the next click replaces, and a double click keeps it. Edit is in every working-tree file's menu either way. The editor has syntax colours, several carets, find and replace, bracket pairs, auto-indent, comment toggling, moving and copying lines and go to line, and keeps line endings, a byte order mark and UTF-16 as they were. It marks what changed against the index and HEAD beside each line, stages or reverts one change at a time, shows the line's blame through unsaved edits, reloads a file changed on disk or asks first if it's been edited, and asks before a checkout, pull or the like rewrites a file with unsaved edits.
+- Docking: a tab's menu splits it right or down, keeps a preview, closes the others or those to its right, and has its pane fill the window (`Ctrl+Shift+M`). Tab icons and an unsaved dot, a themed drop overlay, two built-in layouts and saved ones that keep every open tab, and `F6` / `Ctrl+K` then an arrow between panes.
 - Any view in the More list can be pinned to the rail, and any rail icon but Settings taken off it.
 - A Pull Request tab with files, diffs, checks, conversation, a verdict, comments on a line, and a choice of merge method. Everything you're involved in across a host, in Launchpad. A commit's pull request, in Details.
 - Undo in the toolbar for merge, rebase, pull, reset, cherry-pick, revert, branch delete, stash drop, discard and deleting untracked files, with Redo after one that moved HEAD.

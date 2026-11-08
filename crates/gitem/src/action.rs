@@ -34,6 +34,11 @@ pub enum Action {
     /// A tab asked to close with work in it. `key` names the tab, `lost` what would go.
     AskCloseTab { key: String, lost: String },
     OpenTab(Tab),
+    /// Something done to the layout, for the tab with this key.
+    Dock { key: String, op: crate::layouts::DockOp },
+    Layout(crate::layouts::Preset),
+    /// The layout as it is, kept under a name for any repository.
+    SaveLayout(String),
     /// A file was written by the editor: the repository's status is out of date.
     FileSaved(String),
     /// The working-changes row was clicked, with Details set to show it.

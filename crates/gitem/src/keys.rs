@@ -36,6 +36,10 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Alt+Up, Alt+Down", "Rebase: move the step"),
     ("Alt+B", "File: show or hide blame"),
     ("Ctrl+Shift+E", "IDE mode: a click in the Files tree opens the file for editing"),
+    ("Ctrl+Shift+M", "Fill the window with this pane, or bring the layout back"),
+    ("F6", "Next pane"),
+    ("Shift+F6", "Previous pane"),
+    ("Ctrl+K, then an arrow", "The pane that way"),
     ("Ctrl+S", "Editor: save"),
     ("Ctrl+H, Ctrl+G", "Editor: replace, go to line"),
     ("Ctrl+D, Ctrl+F2", "Editor: select the next match, or all of them"),
@@ -77,6 +81,9 @@ pub const BINDABLE: &[(&str, &str, &str)] = &[
     ("push", "Ctrl+Shift+K", "Push"),
     ("undo_last", "Ctrl+Alt+Z", "Undo the last action"),
     ("ide_mode", "Ctrl+Shift+E", "IDE mode: edit files from the Files tree"),
+    ("zoom_pane", "Ctrl+Shift+M", "Fill the window with this pane, or bring the layout back"),
+    ("next_pane", "F6", "Next pane"),
+    ("prev_pane", "Shift+F6", "Previous pane"),
 ];
 
 /// A key that means something in one kind of view, which can be changed too.
@@ -241,6 +248,12 @@ fn parse_keys(text: &str) -> Option<(egui::Modifiers, egui::Key)> {
         }
     }
     Some((mods, key?))
+}
+
+/// What a command's keys are, as text for a tooltip.
+pub fn chord_label(bindings: &std::collections::HashMap<String, String>, name: &str) -> String {
+    let default = BINDABLE.iter().find(|b| b.0 == name).map_or("", |b| b.1);
+    bindings.get(name).filter(|t| parse_chord(t).is_some()).map_or(default, |t| t.as_str()).to_string()
 }
 
 /// What a command is bound to now: the user's keys if they read, otherwise its default.

@@ -13,6 +13,7 @@ pub mod editor;
 pub mod forms;
 pub mod i18n;
 pub mod keys;
+pub mod layouts;
 pub mod menus;
 pub mod palette;
 pub mod standalone;

@@ -82,7 +82,7 @@ gitem looks for git in this order:
 - **Visual merge tool:** Ours, Result, Theirs (optionally Base) with synchronised scrolling, per-conflict resolution, inline editing, and auto-resolved regions shown in context. It starts from the file on disk, so hand edits and earlier partial saves are kept, and it asks before saving over a file changed since it was read. Works as git's `mergetool`.
 - **Credential manager:** API tokens and git HTTPS credentials in Windows Credential Manager, a git credential helper, removal of stale Git Credential Manager entries, SSH key generation and agent management, connection tests, commit-signing setup, and dialogs for git's password and passphrase prompts.
 - **Repository tools:** reflog recovery, guided bisect (including automated runs), submodules, hooks, `.gitignore` editing with path testing, clean with preview, Git LFS, sparse checkout, maintenance, and a config editor.
-- **Docking:** drag tabs to split or rearrange the workspace.
+- **Docking:** drag tabs to split or rearrange the workspace, or right-click a tab to split it right or down, keep a preview open, close the others or those to its right, or have its pane fill the window (`Ctrl+Shift+M`) while the rest of the layout waits. Tabs show their kind's icon and a dot for unsaved edits. The palette has two layouts, **Layout: Git** (overview, graph and changes) and **Layout: IDE** (the editor with Changes beside it, the Console below and the Files sidebar), and saves your own under a name for any repository. Choosing a layout keeps every open tab. `F6` and `Shift+F6`, or `Ctrl+K` then an arrow, move between panes.
 - **Your own tools:** a file's menu opens it in your diff tool, by the name git knows or git's own setting, and Settings > Agents and integrations chooses the terminal: cmd, PowerShell, Windows Terminal, Git Bash, or a program of your own.
 - **Cleaning up:** Clean up branches lists those merged or gone from the remote, and a branch you aren't on can be fast-forwarded from its menu.
 - **Undo:** after a merge, rebase, pull, reset, cherry-pick, revert, branch delete, stash drop, discard, or delete of untracked files, the toolbar's Undo says what it will take back, and Redo follows one that moved HEAD. Undoing a rebase also puts back other branches it moved with `--update-refs`, except one that has moved since or is now checked out in another worktree, which stays and is named. Only the last thing done is on offer, and it says so if things have moved since. `Ctrl+Alt+Z` does the same. Clean, and deleting a branch on a remote, can't be undone.
@@ -171,6 +171,9 @@ gitem gitem://open?repo=PATH&commit=SHA      open a link
 | `Alt+B` | Toggle blame in a file |
 | `Ctrl+Shift+E` | IDE mode on or off: a click in the Files tree opens the file for editing |
 | `Ctrl+S` | Editor: save |
+| `Ctrl+Shift+M` | Fill the window with this pane, or bring the layout back |
+| `F6`, `Shift+F6` | Next and previous pane |
+| `Ctrl+K`, then an arrow | Go to the pane that way |
 | `Ctrl+H`, `Ctrl+G` | Editor: replace, go to line |
 | `Ctrl+D`, `Ctrl+F2` | Editor: select the next match, or all of them, for typing in several places |
 | `Ctrl+Shift+Up`, `Ctrl+Shift+Down` | Editor: add a caret above or below |
