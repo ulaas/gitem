@@ -42,7 +42,7 @@ impl Fx {
         f
     }
     fn git(&self, args: &[&str]) -> String {
-        self.git.run(Some(&self.root), args).unwrap_or_else(|e| panic!("git {args:?}: {e}")).text().trim().to_string()
+        patient_run(&self.git, &self.root, args).text().trim().to_string()
     }
     fn write(&self, p: &str, s: &str) {
         let f = self.root.join(p);
@@ -97,6 +97,23 @@ impl Fx {
         );
         settle(&mut h);
         h
+    }
+}
+
+/// A test's own git command, run while the app may be writing. On Windows a read can catch
+/// `.git/config` in the moment git swaps in a new one and be refused ("unable to access",
+/// "Permission denied"); that's tried again, briefly, rather than failing the test.
+fn patient_run(git: &GitExe, root: &std::path::Path, args: &[&str]) -> gitem_core::GitOutput {
+    let mut tries = 0;
+    loop {
+        match git.run(Some(root), args) {
+            Ok(o) => return o,
+            Err(e) if tries < 20 && { let s = e.to_string(); s.contains("unable to access") || s.contains("Permission denied") } => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => panic!("git {args:?}: {e}"),
+        }
     }
 }
 
