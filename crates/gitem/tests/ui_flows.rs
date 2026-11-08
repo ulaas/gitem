@@ -542,6 +542,28 @@ fn failed_ops_show_the_error_and_drop_queued_followups() {
     no_errors(&h);
 }
 
+/// A watcher's thread let go of the folders only some time after the watcher was dropped. On
+/// Windows a folder deleted in that time never finished deleting, and tests hung in CI.
+#[test]
+fn a_dropped_watcher_has_let_go_of_the_repository() {
+    let f = Fx::new();
+    sample_history(&f);
+    let ctx = egui::Context::default();
+    let repo = gitem_core::Repo::open(f.git.clone(), &f.root).unwrap();
+    for _ in 0..5 {
+        let w = gitem::data::RepoWatcher::new(&ctx, &repo);
+        // Changes for it to be busy with as it stops.
+        for i in 0..20 {
+            f.write(&format!("busy/{i}.txt"), "x
+");
+        }
+        let t = Instant::now();
+        drop(w);
+        assert!(t.elapsed() < Duration::from_millis(1500), "it waited out its limit, not for the thread: {:?}", t.elapsed());
+        std::fs::remove_dir_all(f.root.join("busy")).unwrap();
+    }
+}
+
 #[test]
 fn external_edits_refresh_the_status_on_their_own() {
     let f = Fx::new();

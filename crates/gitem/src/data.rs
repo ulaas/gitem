@@ -456,6 +456,9 @@ const IGNORED_EVERY: Duration = Duration::from_secs(30);
 /// Watches the worktree and sets flags the app turns into refreshes, debounced.
 pub struct RepoWatcher {
     _watcher: Arc<Mutex<Option<notify::RecommendedWatcher>>>,
+    /// Disconnects once the watcher's thread has let go of its handler, and so of the folders
+    /// it was watching. See `Drop`.
+    stopped: Mutex<std::sync::mpsc::Receiver<()>>,
     work_dirty: Arc<AtomicBool>,
     git_dirty: Arc<AtomicBool>,
     ignored_dirty: Arc<AtomicBool>,
@@ -463,6 +466,27 @@ pub struct RepoWatcher {
     pub failed: Arc<AtomicBool>,
     last: Instant,
     last_ignored: Instant,
+}
+
+/// Dropping a watcher only asks its thread to stop. On Windows, until that thread closes its
+/// handles, a folder being deleted can't be: files in it stay "delete pending", the deletions
+/// keep the watcher busy, and the two never finish. That hung test runs in CI, deleting a
+/// repository right after closing it. So this waits, briefly, for the thread to be done.
+impl Drop for RepoWatcher {
+    fn drop(&mut self) {
+        let Ok(rx) = self.stopped.lock() else { return };
+        let until = Instant::now() + Duration::from_secs(2);
+        // On Linux the watcher is made on a thread of its own and may land in its slot after
+        // this starts, so it's taken out again until the handler is gone.
+        while Instant::now() < until {
+            let watcher = self._watcher.lock().ok().and_then(|mut w| w.take());
+            drop(watcher);
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                _ => return,
+            }
+        }
+    }
 }
 
 impl RepoWatcher {
@@ -476,7 +500,9 @@ impl RepoWatcher {
         let (root, git_dir, common_dir) = (repo.root.clone(), repo.git_dir.clone(), repo.common_dir.clone());
         let own_prefixes = [format!("{}/", norm(&git_dir)), format!("{}/", norm(&common_dir)), format!("{}/.git/", norm(&root))];
         let mut rules = IgnoreRules::new(&root, &git_dir, repo.git.clone());
+        let (alive, stopped) = std::sync::mpsc::channel::<()>();
         let handler = move |res: notify::Result<notify::Event>| {
+            let _alive = &alive;
             // Lost events, or an overflow: anything may have changed.
             let Ok(ev) = res else {
                 w.store(true, Ordering::Relaxed);
@@ -554,7 +580,7 @@ impl RepoWatcher {
             start();
             work_dirty.store(false, Ordering::Relaxed);
         }
-        Self { _watcher: holder, work_dirty, git_dirty, ignored_dirty, failed, last: Instant::now(), last_ignored: Instant::now() }
+        Self { _watcher: holder, stopped: Mutex::new(stopped), work_dirty, git_dirty, ignored_dirty, failed, last: Instant::now(), last_ignored: Instant::now() }
     }
 
     /// What changed, at most every 400 ms, and for ignored files much less often.
