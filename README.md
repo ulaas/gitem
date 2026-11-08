@@ -101,17 +101,72 @@ gitem --version
 
 ## Keyboard
 
-`Ctrl+P` opens the command palette and `F1` lists every key, which you can change in **Settings > Workflow**. A few to start with:
+`F1` lists every key in the app, with a search box, and **Settings > Workflow** changes them.
 
 | Keys | Action |
 |---|---|
-| `Ctrl+P` | Command palette: commands, branches, files and commits |
-| `Ctrl+Shift+E` | IDE mode on or off |
-| `Ctrl+Shift+M` | Let the focused pane fill the window |
-| `F6` / `Shift+F6` | Next or previous pane |
-| `Ctrl+Enter` | Commit |
-| `Space` | Stage or unstage the selected file in Changes |
+| `F1` | List these shortcuts, with a search box |
+| `Ctrl+P` | Command palette |
+| `Ctrl+Shift+G` | Changes |
+| `Ctrl+Shift+H` | Graph |
+| `Ctrl+B` | Toggle sidebar |
+| `F5` | Refresh |
+| `Ctrl+O` | Open a folder |
+| `Ctrl+,` | Settings |
+| `Ctrl+W` | Close the tab, asking first if that loses something |
+| `Ctrl+Tab` `Ctrl+Shift+Tab` | Next and previous tab in the pane |
+| `Ctrl+1` to `Ctrl+9` | Go to that repository |
+| `Ctrl+Shift+F` `Ctrl+Shift+L` `Ctrl+Shift+K` | Fetch, pull, push |
+| `Enter` | Submit a dialog from a one-line field; answer a question that loses nothing |
+| `Ctrl+Enter` | Submit the open form. With none open, or from the commit box, commit |
+| `Esc` | Close a dialog or menu |
+| `Tab` | Move between controls. What has the keyboard gets an outline |
+| `Shift+F10` | Open the menu of the current row, in Changes and the graph |
+| `↑ ↓` | Move through the files in Changes, or the commits in the graph |
+| `Ctrl+click` | Pick several branches in the sidebar, to delete together |
+| `J` `K` | Next and previous commit in the graph |
+| `Space` | Stage or unstage the current file in Changes |
+| `Alt+↑, Alt+↓` | Previous and next change in a diff |
+| `Alt+Up, Alt+Down` | Move a commit in the rebase editor |
+| `P` `R` `E` `S` `F` `D` | Set the rebase action |
+| `Ctrl+F` | Find in a file or a diff; search in the graph |
+| `/` | Find a ref in the graph |
+| `F3` `Shift+F3` | Next and previous search match |
+| `Alt+B` | Toggle blame in a file |
+| `Ctrl+Shift+E` | IDE mode on or off: a click in the Files tree opens the file for editing |
+| `Ctrl+S` | Editor: save |
+| `Ctrl+Shift+M` | Fill the window with this pane, or bring the layout back |
+| `F6`, `Shift+F6` | Next and previous pane |
+| `Ctrl+K`, then an arrow | Go to the pane that way |
+| `Ctrl+H`, `Ctrl+G` | Editor: replace, go to line |
+| `Ctrl+Shift+O` | Editor: go to a definition in this file |
+| `Ctrl+D`, `Ctrl+F2` | Editor: select the next match, or all of them, for typing in several places |
+| `Ctrl+Shift+Up`, `Ctrl+Shift+Down` | Editor: add a caret above or below |
+| `Alt+Up`, `Alt+Down` | Editor: move lines, or with Shift copy them |
+| `Ctrl+/`, `Ctrl+L`, `Ctrl+J` | Editor: toggle comments, select the line, join lines |
+| `Ctrl+Shift+[`, `Ctrl+Shift+]` | Editor: fold the block at the caret, unfold it. The gutter's carets do the same |
+| `Alt+Z` | Editor: word wrap on or off |
 | `Ctrl+Shift+Z` | Zen mode |
+| `Ctrl+Alt+Z` | Undo the last action |
+
+## Words
+
+The same words are used throughout, and F1 lists them too.
+
+| Word | What it means |
+|---|---|
+| Check out | Make a branch or commit the one you're on. Git's `switch` |
+| Changes | What you've edited and not committed. Unstaged until you stage it |
+| Stage | Add to what the next commit holds |
+| Graph | The history, with its branches drawn as lanes |
+| Details | The panel about the selected commit |
+| Launchpad | Pull requests and issues on the repository's host |
+| Review | Your own notes on a diff. Review with AI adds to them |
+| Compose | Split uncommitted changes into several commits, in the Composer |
+| Recompose | The same for commits you've already made |
+| Rebase | Replay commits on another base, or edit them. Git's `rebase -i` |
+| Upstream | The remote branch a branch follows, for its counts, Pull and Push |
+| Patches | A local library of saved changes |
 
 ## Safety
 
