@@ -410,6 +410,26 @@ pub fn native_window_style(window: &impl raw_window_handle::HasWindowHandle) {
     }
 }
 
+/// The renderer's setup. On Windows, wgpu's OpenGL backend is left out unless `WGPU_BACKEND`
+/// asks for it. Just being there, it starts a thread with a hidden window that never reads its
+/// messages; a keyboard-layout switch sends every window of the process a message and waits for
+/// the answer, so the app hung at the first switch, with every key after it lost. DirectX 12
+/// (with its software adapter where there's no GPU) and Vulkan draw the app as well.
+pub fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    #[allow(unused_mut)]
+    let mut config = eframe::egui_wgpu::WgpuConfiguration::default();
+    #[cfg(windows)]
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(new) = &mut config.wgpu_setup {
+        new.instance_descriptor.backends = windows_backends(eframe::wgpu::Backends::from_env());
+    }
+    config
+}
+
+/// What `WGPU_BACKEND` names, or the primary backends: DirectX 12 and Vulkan on Windows.
+pub fn windows_backends(from_env: Option<eframe::wgpu::Backends>) -> eframe::wgpu::Backends {
+    from_env.unwrap_or(eframe::wgpu::Backends::PRIMARY)
+}
+
 // ---- the rail ----------------------------------------------------------------
 
 pub struct RailItem {
@@ -723,6 +743,16 @@ fn separator(ui: &mut Ui, labels: bool, p: &Palette) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OpenGL's hidden window hung the app at a keyboard-layout switch; it stays out unless asked.
+    #[test]
+    fn windows_leaves_out_opengl_unless_asked() {
+        use eframe::wgpu::Backends;
+        let default = windows_backends(None);
+        assert!(!default.contains(Backends::GL));
+        assert!(default.contains(Backends::DX12) && default.contains(Backends::VULKAN));
+        assert_eq!(windows_backends(Some(Backends::GL)), Backends::GL, "WGPU_BACKEND still decides");
+    }
 
     #[test]
     fn resize_edges_and_corners() {

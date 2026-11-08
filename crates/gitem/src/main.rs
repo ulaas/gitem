@@ -188,7 +188,7 @@ fn run_app(args: &[String]) -> i32 {
         }
     }
     let storage = standalone::eframe_storage("app.ron", is_shot);
-    let options = eframe::NativeOptions { viewport: gitem::chrome::viewport("gitem", size).with_min_inner_size([800.0, 500.0]), persist_window: !is_shot, persistence_path: storage.clone(), ..Default::default() };
+    let options = eframe::NativeOptions { viewport: gitem::chrome::viewport("gitem", size).with_min_inner_size([800.0, 500.0]), persist_window: !is_shot, persistence_path: storage.clone(), wgpu_options: gitem::chrome::wgpu_options(), ..Default::default() };
     let result = eframe::run_native(
         "gitem",
         options,
