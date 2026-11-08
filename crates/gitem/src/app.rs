@@ -872,6 +872,18 @@ impl TabViewer for Viewer<'_> {
         tab_title(tab, self.cx.pal)
     }
 
+    /// A double click on a preview's tab keeps it, as Keep open in its menu does, and as a
+    /// double click in the Files tree does. A click just before it makes it a triple to egui.
+    fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+        if response.double_clicked() || response.triple_clicked() {
+            match tab {
+                Tab::Diff(d) => d.pinned = true,
+                Tab::Editor(e) if !e.path.is_empty() => e.pinned = true,
+                _ => {}
+            }
+        }
+    }
+
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut Tab, _path: NodePath) {
         use crate::layouts::{Closing, DockOp};
         let key = tab.key();

@@ -199,6 +199,34 @@ fn with_ide_mode_on_clicks_preview_and_a_double_click_keeps() {
     assert_eq!(editors(&h).len(), 2, "a kept file stays when another is previewed: {:?}", editors(&h));
 }
 
+/// A preview's tab, double-clicked, is kept, as Keep open in its menu would.
+#[test]
+fn a_double_click_on_a_previews_tab_keeps_it() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    settle(&mut h);
+    files_sidebar(&mut h);
+    tree_row(&mut h, "a.rs");
+    settle(&mut h);
+    assert_eq!(editors(&h), vec![("a.rs".to_string(), false)]);
+    // Where egui_dock drew the tab's button.
+    let d = &h.state().repos[0].dock;
+    let path = d.find_tab_from(|t| t.key() == "edit:a.rs").unwrap();
+    let id = gitem::app::dock_tab_id(egui_dock::NodePath { surface: path.surface, node: path.node }, path.tab.0);
+    let at = h.ctx.read_response(id).expect("the tab was drawn").rect.center();
+    for _ in 0..2 {
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    settle(&mut h);
+    assert_eq!(editors(&h), vec![("a.rs".to_string(), true)]);
+    tree_row(&mut h, "b.txt");
+    settle(&mut h);
+    assert_eq!(editors(&h).len(), 2, "the kept tab stays when another file is previewed: {:?}", editors(&h));
+}
+
 #[test]
 fn typing_and_saving_keeps_line_endings_and_the_byte_order_mark() {
     let f = Fx::new();

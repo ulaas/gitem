@@ -6,6 +6,7 @@ Changed:
 
 - The rail's Editor icon turns IDE mode on and off, and is lit while it's on, rather than opening an empty editor tab.
 - The file view has Edit, opening the file in the editor at the line you were reading, and the editor has Blame, leading back to it.
+- A double click on a preview's tab, a diff or a file opened from the Files tree, keeps it open, as Keep open in its menu does.
 - A changed file in Changes shows small buttons under the pointer: open it in the editor, discard its changes or delete it if it's new (asking first), and stage or unstage it. A folder in the tree has the same for everything in it, discarding only its tracked files. The right-click menu is unchanged.
 
 Fixed:
