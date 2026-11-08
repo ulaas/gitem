@@ -38,12 +38,20 @@ jobs:
       - name: Tests
         if: runner.os != 'Windows'
         run: cargo test --workspace --locked --no-fail-fast
-      # The same on Windows, where a test has hung: a stuck binary's stacks are printed and
-      # it's stopped, rather than holding the runner for hours with nothing to show.
+      # The same on Windows, where a test has hung: a stuck binary is dumped, with its symbols,
+      # and stopped, rather than holding the runner for hours with nothing to show.
       - name: Tests (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/ci-hang-watch.ps1
+      - name: Upload what a stuck test left
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-dumps
+          path: hang-dumps
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked
       # The optional tree-sitter build compiles C grammars, so it's checked on every platform

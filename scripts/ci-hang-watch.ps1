@@ -1,18 +1,31 @@
-# Runs the tests in CI on Windows and, if a test binary stops making progress, prints every
-# thread's stack before stopping it. A hang there used to hold the runner until GitHub's
-# six-hour limit, with nothing in the log to say where it was stuck.
+# Runs the tests in CI on Windows and, if a test binary stops making progress, saves a minidump
+# of it, with the binary and its symbols, before stopping it. A hang there used to hold the
+# runner until GitHub's six-hour limit, with nothing in the log to say where it was stuck. The
+# runner has no debugger, so the dump is uploaded and read elsewhere, with `cdb -z`.
 #
 # A binary is taken for stuck after $Limit minutes: far more than the slowest file takes.
-param([int]$Limit = 15)
+param([int]$Limit = 10, [string]$Out = 'hang-dumps')
 $ErrorActionPreference = 'Stop'
 
-$cdb = @(
-    "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe",
-    "$env:ProgramFiles\Windows Kits\10\Debuggers\x64\cdb.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cdb) { Write-Host 'No cdb here; a stuck test will be stopped without its stacks.' }
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class Dump {
+    [DllImport("dbghelp.dll", SetLastError = true)]
+    static extern bool MiniDumpWriteDump(IntPtr process, uint pid, SafeFileHandle file, uint type, IntPtr e, IntPtr u, IntPtr c);
+    // Normal, with thread info, handle data and the memory that stacks point at: enough for
+    // every thread's stack and what it's waiting on, without the whole heap.
+    public static bool Write(IntPtr process, uint pid, string path) {
+        using (var f = System.IO.File.Create(path)) {
+            return MiniDumpWriteDump(process, pid, f.SafeFileHandle, 0x1000 | 0x0004 | 0x0040, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        }
+    }
+}
+"@
 
-$deps = (Resolve-Path 'target\debug\deps' -ErrorAction SilentlyContinue)
+New-Item -ItemType Directory -Force $Out | Out-Null
+$deps = $null
 $tests = Start-Process -FilePath 'cargo' -ArgumentList @('test', '--workspace', '--locked', '--no-fail-fast') -NoNewWindow -PassThru
 $handle = $tests.Handle  # keeps the exit code readable after it ends
 
@@ -25,10 +38,14 @@ while (-not $tests.HasExited) {
         ((Get-Date) - $_.StartTime).TotalMinutes -gt $Limit
     }
     foreach ($p in $stuck) {
-        Write-Host "::error::$($p.Name) has been running for over $Limit minutes. Its threads:"
-        if ($cdb) {
-            & $cdb -p $p.Id -noio -c '.symfix; .reload; ~*kn 60; qd' 2>&1 | Write-Host
-        }
+        $name = [IO.Path]::GetFileNameWithoutExtension($p.Path)
+        $dump = Join-Path $Out "$name.dmp"
+        $ok = $false
+        try { $ok = [Dump]::Write($p.Handle, [uint32]$p.Id, $dump) } catch { Write-Host "dump failed: $_" }
+        Copy-Item $p.Path $Out -ErrorAction SilentlyContinue
+        # rustc may spell the PDB with underscores for the hyphens.
+        foreach ($pdb in @($name, $name.Replace('-', '_'))) { Copy-Item (Join-Path (Split-Path $p.Path) "$pdb.pdb") $Out -ErrorAction SilentlyContinue }
+        Write-Host "::error::$name has been running for over $Limit minutes; dumped: $ok. It's stopped, and the dump is in the job's artifacts."
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
     }
 }
