@@ -95,13 +95,38 @@ fn the_appimage_icon_is_the_logo() {
     assert_eq!(got.as_raw(), &gitem::logo::rgba(256));
 }
 
+fn release_workflow() -> String {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml")).unwrap().replace("\r\n", "\n")
+}
+
+/// What `release.yml` promises: every system built, nothing released without a tag, and a draft
+/// for a person to publish. Whether GitHub's runners agree is only known from a run.
 #[test]
-fn the_release_workflow_builds_an_appimage_as_a_draft() {
-    let y = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml")).unwrap();
-    let (_, job) = y.split_once("  appimage:\n").or_else(|| y.split_once("  appimage:\r\n")).expect("a job for it");
-    let job = job.split("  unix:").next().unwrap();
-    assert!(job.contains("runs-on: ubuntu-22.04"), "{job}");
-    assert!(job.contains("build-appimage.sh") && job.contains("gitem-*.AppImage") && job.contains("draft: true"), "{job}");
-    assert!(job.contains("/releases/download/13/"), "a pinned release, not `continuous`");
-    assert!(job.contains("APPIMAGE_EXTRACT_AND_RUN"));
+fn the_release_workflow_builds_every_system_and_drafts_a_release_from_a_tag() {
+    let y = release_workflow();
+    for artefact in ["windows-${{ matrix.arch }}", "-setup.exe", "linux-${{ matrix.arch }}.AppImage", "macos-universal", "SHA256SUMS"] {
+        assert!(y.contains(artefact), "{artefact}");
+    }
+    for runner in ["windows-latest", "windows-11-arm", "ubuntu-22.04", "ubuntu-22.04-arm", "macos-latest"] {
+        assert!(y.contains(&format!("runner: {runner}")) || y.contains(&format!("runs-on: {runner}")), "{runner}");
+    }
+    assert!(y.contains("lipo -create"), "one binary for Apple silicon and Intel");
+    assert!(y.contains("--draft") && y.contains("if: github.ref_type == 'tag'"), "a draft, and only for a tag");
+    assert!(y.contains("doesn't match Cargo.toml's version"), "the tag has to be the version");
+    assert!(y.contains("build-appimage.sh") && y.contains("APPIMAGE_EXTRACT_AND_RUN"));
+}
+
+/// The one thing it downloads and runs is pinned by version and checksum, and only the job that
+/// creates the release can write.
+#[test]
+fn the_release_workflow_runs_only_what_it_checked_and_writes_only_where_it_must() {
+    let y = release_workflow();
+    assert!(y.contains("APPIMAGETOOL_VERSION: \"1.9.1\"") && !y.contains("continuous"), "a pinned release");
+    assert!(y.contains("sha256sum -c -"), "checked before it's run");
+    assert!(y.contains("permissions:\n  contents: read"), "read-only by default");
+    assert_eq!(y.matches("contents: write").count(), 1, "only the release job writes");
+    for line in y.lines().filter(|l| l.trim_start().starts_with("- uses:") || l.trim_start().starts_with("uses:")) {
+        let at = line.split('@').nth(1).unwrap_or("");
+        assert!(at.len() >= 40 && at[..40].chars().all(|c| c.is_ascii_hexdigit()), "pinned to a commit: {line}");
+    }
 }

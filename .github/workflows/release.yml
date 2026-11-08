@@ -1,80 +1,202 @@
 name: Release
 
-# On a version tag: tests, then a Windows installer and plain archives for each system, attached to
-# a draft release for a person to read and publish. Nothing here signs anything: that needs the
-# owner's certificate, as a secret this workflow doesn't have. It has never run.
+# On a version tag: builds for every system, then a draft release with all of them, checksums,
+# and the changelog's section for that version, for a person to read and publish.
+# Run by hand (Actions > Release > Run workflow), it builds everything and keeps the files as
+# the run's artifacts, without releasing anything: a dry run.
+#
+# Nothing is signed: that needs certificates this workflow doesn't have. Windows SmartScreen and
+# macOS Gatekeeper warn about unsigned programs.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
-# Read-only by default; each job that attaches files to the draft release gets write for that.
+# Read-only by default; only the release job writes, and only to create the draft.
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # appimagetool by its release number and checksum, so what's run can't change without someone asking.
+  APPIMAGETOOL_VERSION: "1.9.1"
+  APPIMAGETOOL_SHA256_X86_64: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+  APPIMAGETOOL_SHA256_AARCH64: f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
+
 jobs:
-  windows:
-    runs-on: windows-latest
-    permissions:
-      contents: write
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
-        with:
-          toolchain: stable
-      - run: cargo test --workspace
-      - run: choco install innosetup --no-progress
-      - run: packaging\windows\build.ps1
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          draft: true
-          files: target/dist/gitem-*-setup.exe
-  appimage:
-    # The oldest supported runner: an AppImage only starts on this glibc or newer.
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
-        with:
-          toolchain: stable
-      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
-      # By its release number, so a later one can't change what's built without someone asking.
-      # Unpacks itself rather than using FUSE, which runners don't have.
-      - name: Get appimagetool
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: v
+        name: The version, and on a tag, that it's the tag's
+        shell: bash
         run: |
-          curl -fsSL -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
-      - run: bash packaging/linux/build-appimage.sh
-        env:
-          APPIMAGETOOL: ${{ github.workspace }}/appimagetool
-          APPIMAGE_EXTRACT_AND_RUN: 1
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          draft: true
-          files: target/dist/gitem-*.AppImage
-  unix:
+          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          [ -n "$version" ] || { echo "::error::No version in Cargo.toml"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            name: linux-x64
-          - os: macos-latest
-            name: macos-arm64
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
+          - runner: windows-latest
+            arch: x64
+            installer: true
+          - runner: windows-11-arm
+            arch: arm64
+            installer: false
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
         with:
           toolchain: stable
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
-      - run: cargo build --profile dist -p gitem
-      - run: tar -czf gitem-${{ matrix.name }}.tar.gz -C target/dist gitem
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - name: Build
+        run: cargo build --locked --profile dist -p gitem
+      - name: Zip
+        shell: pwsh
+        run: |
+          $name = "gitem-$env:VERSION-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force out, $name | Out-Null
+          Copy-Item target\dist\gitem.exe, README.md, LICENSE, THIRD-PARTY-NOTICES.md $name
+          Compress-Archive -Path $name -DestinationPath "out\$name.zip"
+      - name: Installer
+        if: matrix.installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          packaging\windows\build.ps1 -SkipBuild
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Move-Item "target\dist\gitem-$env:VERSION-setup.exe" "out\gitem-$env:VERSION-windows-${{ matrix.arch }}-setup.exe"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          draft: true
-          files: gitem-${{ matrix.name }}.tar.gz
+          name: windows-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  linux:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported runners: what's built here starts on this glibc or newer.
+          - runner: ubuntu-22.04
+            arch: x64
+            appimage_arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+            appimage_arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - name: Libraries
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: Build
+        run: cargo build --locked --profile dist -p gitem
+      - name: Archive
+        run: |
+          name="gitem-$VERSION-linux-${{ matrix.arch }}"
+          mkdir -p out "$name"
+          cp target/dist/gitem README.md LICENSE THIRD-PARTY-NOTICES.md "$name/"
+          tar -czf "out/$name.tar.gz" "$name"
+      - name: Get appimagetool
+        run: |
+          arch=${{ matrix.appimage_arch }}
+          curl -fsSL --retry 3 -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$arch.AppImage"
+          want=$([ "$arch" = x86_64 ] && echo "$APPIMAGETOOL_SHA256_X86_64" || echo "$APPIMAGETOOL_SHA256_AARCH64")
+          echo "$want  appimagetool" | sha256sum -c -
+          chmod +x appimagetool
+      - name: AppImage
+        run: |
+          bash packaging/linux/build-appimage.sh --skip-build
+          mv target/dist/gitem-*.AppImage "out/gitem-$VERSION-linux-${{ matrix.arch }}.AppImage"
+        env:
+          APPIMAGETOOL: ${{ github.workspace }}/appimagetool
+          ARCH: ${{ matrix.appimage_arch }}
+          # Runners have no FUSE; the tool unpacks itself instead.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Build for Apple silicon and Intel
+        run: |
+          cargo build --locked --profile dist -p gitem --target aarch64-apple-darwin
+          cargo build --locked --profile dist -p gitem --target x86_64-apple-darwin
+      - name: One universal binary
+        run: |
+          name="gitem-$VERSION-macos-universal"
+          mkdir -p out "$name"
+          lipo -create -output "$name/gitem" target/aarch64-apple-darwin/dist/gitem target/x86_64-apple-darwin/dist/gitem
+          lipo -info "$name/gitem"
+          cp README.md LICENSE THIRD-PARTY-NOTICES.md "$name/"
+          tar -czf "out/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-universal
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    # Only for a tag. A run by hand stops at the artifacts above.
+    if: github.ref_type == 'tag'
+    needs: [version, windows, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Notes from the changelog
+        run: |
+          # This version's section of CHANGELOG.md, without its heading.
+          awk -v v="$VERSION" '
+            /^## / { if (found) exit; if (index($0, "## " v " ") == 1 || $0 == "## " v) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
+          printf '\n---\nUnsigned builds: Windows SmartScreen and macOS Gatekeeper will warn before the first run. Check downloads against SHA256SUMS.\n' >> notes.md
+      - name: Draft release
+        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "gitem $VERSION" --notes-file notes.md
