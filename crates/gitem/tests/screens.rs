@@ -520,6 +520,21 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         out.save(&mut h, "editor-wrap-minimap-fold");
         std::fs::remove_file(f.root.join("code.rs")).unwrap();
     }
+    if wanted("rowrail") {
+        // The buttons a changed file shows under the pointer, in the tree.
+        std::fs::write(f.root.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(f.root.join("src/new.rs"), "// new\n").unwrap();
+        let mut h = f.harness(|s| { set(s); s.changes_tree = true; }, vec![]);
+        open(&mut h, Tab::changes());
+        quiet(&mut h);
+        let row = h.get_all_by_label("src/lib.rs").max_by(|a, b| a.rect().width().total_cmp(&b.rect().width())).unwrap().rect().center();
+        h.event(egui::Event::PointerMoved(row));
+        h.step();
+        h.step();
+        out.save(&mut h, "changes-row-buttons");
+        run(&f.git, &f.root, &["checkout", "--", "src/lib.rs"]);
+        std::fs::remove_file(f.root.join("src/new.rs")).unwrap();
+    }
     if wanted("fileview") {
         // Edit first in the toolbar, and the rail's Editor not lit with IDE mode off.
         let mut h = f.harness(set, vec![]);

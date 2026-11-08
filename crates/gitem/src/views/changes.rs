@@ -705,6 +705,7 @@ impl ChangesView {
             }
             RowKind::Dir { open, count } => {
                 let resp = folder_row(ui, r, open, count, cx.pal);
+                folder_buttons(ui, cx, st, &resp, section, rows, at, count, filtering);
                 if resp.clicked() {
                     if !self.collapsed[i].remove(&r.path) {
                         self.collapsed[i].insert(r.path.clone());
@@ -1000,6 +1001,46 @@ fn folder_row(ui: &mut Ui, r: &Row, open: bool, count: usize, p: &crate::theme::
     resp
 }
 
+/// The folder's own hover buttons: everything in it staged or unstaged, and the changes to its
+/// tracked files discarded, after asking. New files in it are deleted one by one, from their rows.
+#[allow(clippy::too_many_arguments)]
+fn folder_buttons(ui: &mut Ui, cx: &mut Cx, st: &RepoStatus, resp: &egui::Response, section: Section, rows: &[Row], at: usize, count: usize, filtering: bool) {
+    if section == Section::Conflicts || !ui.rect_contains_pointer(resp.rect) {
+        return;
+    }
+    let p = cx.pal.clone();
+    let folder = rows[at].path.clone();
+    let files: Vec<&StatusEntry> = changes_tree::files_in(rows, at).into_iter().filter_map(|i| st.entries.get(i)).collect();
+    let n = plural(count, "file", "files");
+    if section == Section::Staged {
+        let name = format!("Unstage {n} in {folder}");
+        if crate::widgets::row_buttons(ui, resp, &[(icon::MINUS, name.as_str())], false, &p) == Some(0) {
+            let mut names: Vec<String> = if filtering { files.iter().map(|e| e.path.clone()).collect() } else { vec![folder.clone()] };
+            // A rename into this folder from elsewhere goes back whole.
+            names.extend(files.iter().filter_map(|e| e.orig_path.clone()));
+            cx.run(ops::unstage_paths(&names, !st.head_sha.is_empty()));
+        }
+        return;
+    }
+    let tracked: Vec<String> = files.iter().filter(|e| e.worktree != FileStatus::Untracked).map(|e| e.path.clone()).collect();
+    let stage = format!("Stage {n} in {folder}");
+    let discard = format!("Discard changes to {} in {folder}…", plural(tracked.len(), "tracked file", "tracked files"));
+    let mut buttons = vec![(icon::PLUS, stage.as_str())];
+    if !tracked.is_empty() {
+        buttons.push((icon::ARROW_COUNTER_CLOCKWISE, discard.as_str()));
+    }
+    match crate::widgets::row_buttons(ui, resp, &buttons, false, &p) {
+        Some(0) => cx.run(ops::stage_paths(&if filtering { files.iter().map(|e| e.path.clone()).collect() } else { vec![folder] })),
+        Some(1) => cx.confirm(
+            "Discard changes",
+            &format!("Discard unstaged changes in {} in {folder}? New files in it stay. The toolbar's Undo can bring them back straight afterwards.", plural(tracked.len(), "file", "files")),
+            "Discard",
+            ops::discard_paths(&tracked),
+        ),
+        _ => {}
+    }
+}
+
 /// `rows[at]` is the folder. Git takes the folder itself where it can, which also keeps
 /// the command short for a folder of thousands of files. A filter narrows the list to
 /// fewer files than the folder holds, so then the action names exactly those.
@@ -1156,8 +1197,18 @@ fn staged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, st: &RepoStatus, state:
     let is_current = state.is_current(Section::Staged, &e.path);
     let is_selected = state.selected.contains(&e.path) || is_current;
     let resp = changed_file_row(ui, &ch, is_selected, leaf, &p);
-    if row_button(ui, &resp, crate::chrome::icon::MINUS, &format!("Unstage {}", e.path), is_selected, &p) {
-        cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty()));
+    if ui.rect_contains_pointer(resp.rect) {
+        let (unstage, open) = (format!("Unstage {}", e.path), format!("Open {} in the editor", e.path));
+        let mut buttons = vec![(icon::MINUS, unstage.as_str())];
+        let can_open = cx.repo.root.join(&e.path).is_file();
+        if can_open {
+            buttons.push((icon::PENCIL_SIMPLE, open.as_str()));
+        }
+        match crate::widgets::row_buttons(ui, &resp, &buttons, is_selected, &p) {
+            Some(0) => cx.run(ops::unstage_paths(&paths_to_unstage(e), !st.head_sha.is_empty())),
+            Some(1) => cx.open(Tab::editor(&e.path, None, true)),
+            _ => {}
+        }
     }
     if select_click(ui, &resp, &e.path, state.selected) {
     } else if resp.clicked() {
@@ -1187,8 +1238,21 @@ fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, state: &mut RowState,
     let is_current = state.is_current(Section::Unstaged, &e.path);
     let is_selected = state.selected.contains(&e.path) || is_current;
     let resp = changed_file_row(ui, &ch, is_selected, leaf, &p);
-    if row_button(ui, &resp, crate::chrome::icon::PLUS, &format!("Stage {}", e.path), is_selected, &p) {
-        cx.run(ops::stage_paths(std::slice::from_ref(&e.path)));
+    if ui.rect_contains_pointer(resp.rect) {
+        let stage = format!("Stage {}", e.path);
+        let throw = if untracked { format!("Delete {}…", e.path) } else { format!("Discard changes in {}…", e.path) };
+        let open = format!("Open {} in the editor", e.path);
+        let mut buttons = vec![(icon::PLUS, stage.as_str()), (if untracked { icon::TRASH } else { icon::ARROW_COUNTER_CLOCKWISE }, throw.as_str())];
+        if cx.repo.root.join(&e.path).is_file() {
+            buttons.push((icon::PENCIL_SIMPLE, open.as_str()));
+        }
+        match crate::widgets::row_buttons(ui, &resp, &buttons, is_selected, &p) {
+            Some(0) => cx.run(ops::stage_paths(std::slice::from_ref(&e.path))),
+            Some(1) if untracked => delete_untracked(cx, &e.path),
+            Some(1) => discard_file(cx, &e.path),
+            Some(2) => cx.open(Tab::editor(&e.path, None, true)),
+            _ => {}
+        }
     }
     let src = if untracked { DiffSource::Untracked } else { DiffSource::Unstaged };
     if select_click(ui, &resp, &e.path, state.selected) {
@@ -1224,21 +1288,31 @@ fn unstaged_row(ui: &mut Ui, cx: &mut Cx, e: &StatusEntry, state: &mut RowState,
                 ui.close();
             }
             if ui.button("Delete file…").clicked() {
-                if cx.repo.is_nested_repo(&e.path) {
-                    // `git clean` would leave it alone and report success.
-                    cx.error(format!("{} is a Git repository of its own, with its own history. gitem won't delete that: remove the folder by hand if you're sure.", e.path));
-                } else {
-                    cx.confirm("Delete file", &format!("Delete the untracked file {}? The toolbar's Undo can bring it back straight afterwards.", e.path), "Delete", ops::delete_untracked(std::slice::from_ref(&e.path)));
-                }
+                delete_untracked(cx, &e.path);
                 ui.close();
             }
         } else if ui.button("Discard changes…").clicked() {
-            cx.confirm("Discard changes", &format!("Discard all unstaged changes in {}? The toolbar's Undo can bring them back straight afterwards.", e.path), "Discard", ops::discard_paths(std::slice::from_ref(&e.path)));
+            discard_file(cx, &e.path);
             ui.close();
         }
         ui.separator();
         menus::file_menu(ui, cx, &e.path, None);
     });
+}
+
+/// Asks first; the toolbar's Undo brings them back.
+fn discard_file(cx: &mut Cx, path: &str) {
+    cx.confirm("Discard changes", &format!("Discard all unstaged changes in {path}? The toolbar's Undo can bring them back straight afterwards."), "Discard", ops::discard_paths(&[path.to_string()]));
+}
+
+/// Asks first, and never for a repository of its own inside this one.
+fn delete_untracked(cx: &mut Cx, path: &str) {
+    if cx.repo.is_nested_repo(path) {
+        // `git clean` would leave it alone and report success.
+        cx.error(format!("{path} is a Git repository of its own, with its own history. gitem won't delete that: remove the folder by hand if you're sure."));
+    } else {
+        cx.confirm("Delete file", &format!("Delete the untracked file {path}? The toolbar's Undo can bring it back straight afterwards."), "Delete", ops::delete_untracked(&[path.to_string()]));
+    }
 }
 
 /// A rule matching exactly this path. The leading slash ties it to the top of the repository,

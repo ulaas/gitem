@@ -3707,6 +3707,62 @@ fn stage_and_unstage_with_row_buttons(tree: bool) {
     no_errors(&h);
 }
 
+/// The widest of that name: the row, not a tab of the same title.
+fn hover(h: &mut Harness<GitemApp>, label: &str) {
+    pump_for_label(h, label);
+    h.get_all_by_label(label).max_by(|a, b| a.rect().width().total_cmp(&b.rect().width())).unwrap().hover();
+    h.step();
+    h.step();
+}
+
+/// The buttons a changed file shows under the pointer: open it, throw its changes away (asking
+/// first, as the menu does), and for a folder the same for everything in it.
+#[test]
+fn hovered_rows_open_and_discard_without_the_menu() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.write("dir/x.txt", "x\n");
+    f.commit("dir");
+    f.write("b.txt", "changed\n");
+    f.write("dir/x.txt", "x changed\n");
+    f.write("dir/new.txt", "new\n");
+    let mut h = harness(&f);
+    h.state_mut().settings.changes_tree = true;
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::changes());
+
+    // Discard asks, and only then discards.
+    hover(&mut h, "b.txt");
+    click(&mut h, "Discard changes in b.txt…");
+    pump_for_label(&mut h, "Discard");
+    assert!(f.git(&["status", "--short"]).contains(" M b.txt"), "not before the answer");
+    confirm_discard(&mut h);
+    wait_for(&mut h, "b.txt to be discarded", || !f.git(&["status", "--short"]).contains("b.txt"));
+    wait_until_quiet(&mut h);
+
+    // A new file is deleted rather than discarded, and a folder discards only what's tracked.
+    hover(&mut h, "dir");
+    assert!(h.query_by_label("Stage 2 files in dir").is_some());
+    click(&mut h, "Discard changes to 1 tracked file in dir…");
+    confirm_discard(&mut h);
+    wait_for(&mut h, "dir/x.txt to be discarded", || !f.git(&["status", "--short"]).contains("dir/x.txt"));
+    assert!(f.root.join("dir/new.txt").exists(), "the new file stays");
+    wait_until_quiet(&mut h);
+    hover(&mut h, "dir/new.txt");
+    assert!(h.query_by_label("Delete dir/new.txt…").is_some());
+    hover(&mut h, "dir");
+    click(&mut h, "Stage 1 file in dir");
+    wait_for(&mut h, "dir/new.txt to be staged", || f.git(&["status", "--short"]).contains("A  dir/new.txt"));
+    wait_until_quiet(&mut h);
+
+    // A staged file opens in the editor too.
+    hover(&mut h, "dir/new.txt");
+    click(&mut h, "Open dir/new.txt in the editor");
+    wait_until_quiet(&mut h);
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Editor(e) if e.path == "dir/new.txt")));
+    no_errors(&h);
+}
+
 #[test]
 fn rows_have_a_stage_button_in_the_flat_list() {
     stage_and_unstage_with_row_buttons(false);

@@ -421,19 +421,37 @@ fn file_row_body(ui: &mut Ui, rect: Rect, resp: Response, change: &FileChange, p
 /// A small action at the right end of a row, there while the pointer is over the row.
 /// The row's click doesn't fire with it, since this is on top of the row.
 pub fn row_button(ui: &mut Ui, row: &Response, glyph: &str, name: &str, selected: bool, p: &Palette) -> bool {
-    if !ui.rect_contains_pointer(row.rect) {
-        return false;
+    row_buttons(ui, row, &[(glyph, name)], selected, p) == Some(0)
+}
+
+/// Icon buttons at a row's right end, there only while the pointer is over the row: the
+/// first of `buttons` is rightmost, where a single one would be. Each is `(glyph, name)`,
+/// the name its tooltip and what a screen reader says. Which was clicked, if one was.
+pub fn row_buttons(ui: &mut Ui, row: &Response, buttons: &[(&str, &str)], selected: bool, p: &Palette) -> Option<usize> {
+    if buttons.is_empty() || !ui.rect_contains_pointer(row.rect) {
+        return None;
     }
-    let rect = Rect::from_center_size(pos2(row.rect.right() - 14.0, row.rect.center().y), vec2(22.0, row.rect.height() - 2.0));
-    let resp = ui.interact(rect, row.id.with("row-button"), Sense::click()).on_hover_text(name);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
-    // Opaque, as the file name may run underneath.
-    ui.painter().rect_filled(rect, 3.0, if selected { p.selection } else { p.hover });
-    if resp.hovered() {
-        ui.painter().rect(rect, 3.0, p.button, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    const W: f32 = 22.0;
+    const STEP: f32 = 24.0;
+    let h = row.rect.height() - 2.0;
+    let right = row.rect.right() - 3.0;
+    // One opaque strip under them all, as the file name may run underneath.
+    let strip = Rect::from_min_max(pos2(right - W - STEP * (buttons.len() - 1) as f32 - 2.0, row.rect.center().y - h / 2.0), pos2(right, row.rect.center().y + h / 2.0));
+    ui.painter().rect_filled(strip, 3.0, if selected { p.selection } else { p.hover });
+    let mut clicked = None;
+    for (i, (glyph, name)) in buttons.iter().enumerate() {
+        let rect = Rect::from_center_size(pos2(right - W / 2.0 - STEP * i as f32, row.rect.center().y), vec2(W, h));
+        let resp = ui.interact(rect, row.id.with(("row-button", i)), Sense::click()).on_hover_text(*name);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, *name));
+        if resp.hovered() {
+            ui.painter().rect(rect, 3.0, p.button, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+        }
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, *glyph, prop(13.0), if resp.hovered() { p.text } else { p.dim });
+        if resp.clicked() {
+            clicked = Some(i);
+        }
     }
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, prop(13.0), p.text);
-    resp.clicked()
+    clicked
 }
 
 /// Rows of one height inside a longer scrolling list, where `show_rows` can't help because
