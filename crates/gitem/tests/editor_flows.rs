@@ -137,6 +137,46 @@ fn with_ide_mode_off_a_click_in_the_files_tree_opens_the_read_only_view() {
     assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(v) if v.path == "a.rs")));
 }
 
+/// The read-only view leads to the editor, and the editor back to it, each at the line in view.
+#[test]
+fn the_file_view_has_edit_and_the_editor_has_blame() {
+    let f = Fx::new();
+    let mut h = harness(&f, false);
+    settle(&mut h);
+    files_sidebar(&mut h);
+    tree_row(&mut h, "a.rs");
+    settle(&mut h);
+    let edit = format!("{} Edit", gitem::chrome::icon::PENCIL_SIMPLE);
+    wait_for(&mut h, "the Edit button", |h| h.query_by_label(&edit).is_some());
+    h.get_by_label(&edit).click();
+    settle(&mut h);
+    assert_eq!(editors(&h), vec![("a.rs".to_string(), true)], "kept, not a preview");
+    wait_for(&mut h, "the file to load", |h| editor_text(h, "a.rs").is_some());
+
+    h.get_by_label("Blame").click();
+    settle(&mut h);
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(v) if v.path == "a.rs")));
+}
+
+/// The rail's Editor is IDE mode's switch: it opens no tab of its own, and is lit while on.
+#[test]
+fn the_rails_editor_turns_ide_mode_on_and_off() {
+    let f = Fx::new();
+    let mut h = harness(&f, false);
+    settle(&mut h);
+    h.get_by_label("Editor").click();
+    settle(&mut h);
+    assert!(h.state().settings.ide_mode);
+    assert!(editors(&h).is_empty(), "no empty editor tab");
+    files_sidebar(&mut h);
+    tree_row(&mut h, "a.rs");
+    settle(&mut h);
+    assert_eq!(editors(&h).len(), 1, "the tree opens files for editing now");
+    h.get_by_label("Editor").click();
+    settle(&mut h);
+    assert!(!h.state().settings.ide_mode);
+}
+
 #[test]
 fn with_ide_mode_on_clicks_preview_and_a_double_click_keeps() {
     let f = Fx::new();

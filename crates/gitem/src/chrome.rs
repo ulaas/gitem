@@ -433,7 +433,7 @@ pub fn rail_top() -> [&'static [RailItem]; 4] {
         item!(HOUSE, "Home", "Overview and start work", Tab::home, Home),
         item!(GIT_FORK, "Graph", "Commit graph", Tab::graph, Graph),
         item!(NOTE_PENCIL, "Changes", "Stage and commit", Tab::changes, Changes),
-        item!(CODE, "Editor", "Edit files of the working tree", || Tab::Editor(Box::default()), Editor),
+        item!(CODE, "Editor", "IDE mode: a click in the Files tree opens the file for editing. Click to turn it on or off (Ctrl+Shift+E).", || Tab::Editor(Box::default()), Editor),
         item!(MAGNIFYING_GLASS, "Search", "Search and compare", || Tab::Search(Box::default()), Search),
         item!(ROCKET_LAUNCH, "Launchpad", "Pull requests and issues", || Tab::Launchpad(Box::default()), Launchpad),
     ];
@@ -576,6 +576,16 @@ pub enum RailEvent {
     Open(Tab, bool),
     /// Put this view on the rail, or take it off.
     Place(&'static str, bool),
+    /// The Editor item: IDE mode on or off. Editing is a way of working rather than a view,
+    /// and an empty editor tab said nothing about how to open a file in it.
+    IdeMode,
+}
+
+/// The rail item that switches IDE mode rather than opening a view.
+pub const IDE_ITEM: &str = "Editor";
+
+fn click_event(item: &RailItem, from_more: bool) -> RailEvent {
+    if item.name == IDE_ITEM { RailEvent::IdeMode } else { RailEvent::Open((item.make)(), from_more) }
 }
 
 /// The views that sit behind the More button, grouped as on the rail, each with a pin.
@@ -594,7 +604,7 @@ fn more_list(ui: &mut Ui, places: &RailPlaces, is_focused: &dyn Fn(&RailItem) ->
                 }
             });
             if r.clicked() {
-                event = Some(RailEvent::Open((item.make)(), true));
+                event = Some(click_event(item, true));
                 ui.close();
             }
             let b = ui.add(egui::Button::new(RichText::new(icon::PUSH_PIN).color(p.dim)).frame_when_inactive(false));
@@ -648,7 +658,7 @@ fn rail_entry(ui: &mut Ui, item: &'static RailItem, tint: Color32, is_focused: &
     let resp = rail_button(ui, item, tint, is_focused(item), labels, p);
     rail_menu(&resp, item, event);
     if resp.clicked() {
-        *event = Some(RailEvent::Open((item.make)(), false));
+        *event = Some(click_event(item, false));
     }
 }
 

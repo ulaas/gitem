@@ -419,6 +419,15 @@ impl FileView {
         let pal = cx.pal.clone();
         // Wraps, or what's at the end runs under the Details panel.
         ui.horizontal_wrapped(|ui| {
+            // The file as it is now can be edited, whether or not IDE mode is on. At the line
+            // in view, so the editor opens where you were reading.
+            if self.rev.is_none() && cx.repo.root.join(&self.path).is_file() {
+                let edit = format!("{} Edit", crate::chrome::icon::PENCIL_SIMPLE);
+                if crate::widgets::small_button(ui, edit).on_hover_text("Open this file in the editor").clicked() {
+                    cx.open(Tab::editor(&self.path, self.current, true));
+                }
+                ui.separator();
+            }
             ui.selectable_value(&mut self.annot, Annot::Blame, "Blame");
             ui.selectable_value(&mut self.annot, Annot::Heatmap, "Heatmap");
             ui.selectable_value(&mut self.annot, Annot::Changes, "Changes");

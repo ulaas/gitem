@@ -3687,7 +3687,11 @@ impl GitemApp {
             };
             egui::Panel::left("rail").frame(egui::Frame::new().fill(pal.bg)).resizable(false).exact_size(chrome::rail_width(self.settings.rail_labels)).show(ui, |ui| {
                 let places = chrome::RailPlaces { full: self.settings.rail_full, pinned: &self.settings.rail_pinned, hidden: &self.settings.rail_hidden };
-                match chrome::rail(ui, &|i| focused == Some(i.name), &places, self.settings.rail_labels, &pal) {
+                let ide = self.settings.ide_mode;
+                // The Editor item is lit while IDE mode is on, as the switch it is.
+                let lit = |i: &chrome::RailItem| if i.name == chrome::IDE_ITEM { ide } else { focused == Some(i.name) };
+                match chrome::rail(ui, &lit, &places, self.settings.rail_labels, &pal) {
+                    Some(chrome::RailEvent::IdeMode) => out.push(Action::Settings(Box::new(|s| s.ide_mode = !s.ide_mode))),
                     Some(chrome::RailEvent::Open(t, true)) => out.push(Action::OpenFromMore(t)),
                     Some(chrome::RailEvent::Open(t, false)) => out.push(Action::OpenTab(t)),
                     Some(chrome::RailEvent::Place(name, on)) => out.push(Action::Settings(Box::new(move |s| {

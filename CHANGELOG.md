@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Changed:
+
+- The rail's Editor icon turns IDE mode on and off, and is lit while it's on, rather than opening an empty editor tab.
+- The file view has Edit, opening the file in the editor at the line you were reading, and the editor has Blame, leading back to it.
+
 ## 0.6.0 (2026-11-08)
 
 Added:

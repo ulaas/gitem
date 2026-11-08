@@ -588,7 +588,11 @@ impl EditorView {
             if small_button(ui, "Diff").on_hover_text("This file's uncommitted changes").clicked() {
                 cx.diff(DiffSource::WorkingVsHead, Some(&self.path));
             }
-            if small_button(ui, "History").clicked() {
+            if small_button(ui, "Blame").on_hover_text("This file with who changed each line, and when").clicked() {
+                let line = self.ed.as_ref().map(|e| e.buf.point(e.sels.primary().head).0 as u32 + 1);
+                cx.open(Tab::file(&self.path, None, line));
+            }
+            if small_button(ui, "History").on_hover_text("The commits that changed this file").clicked() {
                 cx.open(Tab::file_history(&self.path));
             }
             let path = self.path.clone();

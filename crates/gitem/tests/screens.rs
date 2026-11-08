@@ -520,6 +520,13 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         out.save(&mut h, "editor-wrap-minimap-fold");
         std::fs::remove_file(f.root.join("code.rs")).unwrap();
     }
+    if wanted("fileview") {
+        // Edit first in the toolbar, and the rail's Editor not lit with IDE mode off.
+        let mut h = f.harness(set, vec![]);
+        open(&mut h, Tab::file("src/lib.rs", None, None));
+        quiet(&mut h);
+        out.save(&mut h, "fileview-edit");
+    }
     if wanted("wrap") {
         let mut h = f.harness(set, vec![]);
         open(&mut h, Tab::diff(DiffSource::Unstaged, Some("a.txt".into())));
