@@ -3,6 +3,8 @@ name = "gitem-text"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "The text model behind gitem's editor: a rope buffer, selections, edits and undo. No UI, no git."
 

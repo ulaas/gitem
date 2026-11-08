@@ -1,7 +1,7 @@
 ﻿# The editor in a real window, with real Windows input: a click, Unicode text, Enter, paste
 # from and copy to the system clipboard, and Ctrl+S, checking the file and clipboard after.
 # Run it against a scratch repository whose note.txt is "first line\r\nsecond line\r\n",
-# with scratch settings and git config, as IDE-PLAN.md's rules say. It changes the clipboard.
+# with scratch settings and git config, never your own. It changes the clipboard.
 # Every input goes only after checking the foreground window is the one this script started.
 param([string]$Exe, [string]$Repo, [string]$Cfg, [string]$GitCfg)
 $ErrorActionPreference = 'Stop'

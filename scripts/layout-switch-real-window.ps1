@@ -4,7 +4,7 @@
 # process to answer. gitem now leaves that backend out on Windows (chrome::wgpu_options).
 #
 # Run it against a scratch repository whose note.txt is "first line\n", with scratch settings and
-# git config, as IDE-PLAN.md's rules say. It switches to Turkish Q, a layout every Windows has,
+# git config, never your own. It switches to Turkish Q, a layout every Windows has,
 # then back to US English: Windows applies a switch to the whole session, so don't type meanwhile.
 # Every input goes only after checking the foreground window is the one this script started.
 param([string]$Exe, [string]$Repo, [string]$Cfg, [string]$GitCfg)

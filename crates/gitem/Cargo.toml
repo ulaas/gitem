@@ -3,6 +3,9 @@ name = "gitem"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A fast desktop Git client with a repo-aware editor, its own diff and merge tools, and a commit graph."
 
 [[bin]]
 name = "gitem"

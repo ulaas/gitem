@@ -1,0 +1,22 @@
+# Weekly update pull requests. Actions are pinned to commit hashes; Dependabot keeps
+# those current too, with the version in the comment beside each.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # egui and its family move together; one pull request for all of them.
+      egui:
+        patterns: ["egui*", "eframe", "epaint*", "emath", "ecolor"]
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

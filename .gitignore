@@ -1,2 +1,10 @@
 /target
 *.log
+
+# Notes kept locally, not part of the project
+/CLAUDE.md
+/PLAN.md
+/IDE-PLAN.md
+/REVIEW-NOTES.md
+/review-notes/
+/.claude/

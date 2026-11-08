@@ -6,6 +6,8 @@ members = ["crates/gitem-core", "crates/gitem-text", "crates/gitem"]
 version = "0.6.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/ulaas/gitem"
+homepage = "https://ulaas.github.io/gitem/"
 
 [profile.dev]
 opt-level = 1
