@@ -81,6 +81,11 @@ impl GitOp {
     pub fn new(title: impl Into<String>) -> Self {
         Self { title: title.into(), ..Default::default() }
     }
+    /// The git commands it runs, such as `fetch` or `push`, in order: what a button that starts
+    /// one looks for, to show it's under way. Titles change with options; the command doesn't.
+    pub fn commands(&self) -> Vec<String> {
+        self.steps.iter().filter_map(|s| s.args.first().cloned()).collect()
+    }
     pub fn lossless(mut self) -> Self {
         self.lossless = true;
         self

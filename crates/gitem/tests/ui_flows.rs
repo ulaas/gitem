@@ -3780,6 +3780,56 @@ fn hovered_rows_open_and_discard_without_the_menu() {
     no_errors(&h);
 }
 
+/// A fetch under way shows on its button, which can't start a second one meanwhile, nor can its
+/// key; and the button is back when it's done.
+#[test]
+fn the_toolbars_fetch_shows_its_progress_and_cant_be_started_twice() {
+    let r = with_remote();
+    let mut h = harness(&r.f);
+    settle(&mut h);
+    pump_for_label(&mut h, "Fetch");
+    // A real fetch, held up for a moment where git starts the remote's side.
+    let slow = ops::GitOp::new("Fetch").step(&["fetch", "--upload-pack=sleep 3; git-upload-pack", "origin"]).net();
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(slow));
+    pump(&mut h, |a| a.repos[0].data.ops_now.state("fetch").is_some(), "the fetch to start");
+    pump(&mut h, |_| true, "a frame");
+    assert!(h.query_by_label_contains("Fetching").is_some(), "the button says it's fetching");
+    assert!(h.query_by_label("Fetch").is_none(), "and isn't there to press again");
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::F);
+    h.step();
+    h.step();
+    assert!(h.state().repos[0].data.ops_now.queued.is_empty(), "the key didn't queue another fetch");
+    pump(&mut h, |a| a.ops_idle(), "the fetch to finish");
+    pump_for_label(&mut h, "Fetch");
+    no_errors(&h);
+}
+
+/// A button that starts one op shows that op under way, waiting or running, and only that one.
+#[test]
+fn a_tools_button_shows_its_own_op_queued_and_no_other() {
+    let f = Fx::new();
+    sample_history(&f);
+    let hook = f.root.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    write_hook(&hook, "#!/bin/sh\nsleep 3\n");
+    let mut h = harness(&f);
+    settle(&mut h);
+    h.state_mut().repos[0].open_tab(Tab::Tools(Box::default()));
+    click(&mut h, "Maintenance");
+    pump_for_label(&mut h, "Garbage collect");
+    // Something slow ahead of it in the queue.
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, Action::Run(ops::commit(&ops::CommitOpts { message: "slow".into(), allow_empty: true, ..Default::default() })));
+    pump(&mut h, |a| a.repos[0].data.ops_now.running.is_some(), "the commit to start");
+    click(&mut h, "Garbage collect");
+    pump_for_label(&mut h, "Garbage collect (queued)");
+    assert!(h.query_by_label("Aggressive GC").is_some(), "the same command with other options is still on offer");
+    pump(&mut h, |a| a.ops_idle(), "both to finish");
+    pump_for_label(&mut h, "Garbage collect");
+    no_errors(&h);
+}
+
 #[test]
 fn rows_have_a_stage_button_in_the_flat_list() {
     stage_and_unstage_with_row_buttons(false);

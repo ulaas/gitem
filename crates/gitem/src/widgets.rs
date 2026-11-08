@@ -259,6 +259,43 @@ pub fn input(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
 
 /// A button for a row of small actions. egui's own small button drops the usual height, so
 /// it stood shorter than the buttons, menus and boxes beside it.
+/// A button that starts `op`. While that op runs, or waits its turn, it's off and says so: a
+/// spinner, `label…` or git's percentage, and a bar along its foot; or "queued". So a second
+/// press can't start it again. Hovering it says what git last said.
+pub fn op_button(ui: &mut Ui, now: &crate::data::OpsNow, label: &str, op: &gitem_core::ops::GitOp) -> Response {
+    use crate::data::Busy;
+    let Some(busy) = now.state_of(op) else {
+        return small_button(ui, label);
+    };
+    let (text, percent) = match &busy {
+        Busy::Running(Some(p)) => (format!("{label} {}%", p.percent), Some(p.percent)),
+        Busy::Running(None) => (format!("{label}…"), None),
+        Busy::Queued => (format!("{label} (queued)"), None),
+    };
+    let running = matches!(busy, Busy::Running(_));
+    // Room at the start for the spinner.
+    let shown = if running { format!("     {text}") } else { text.clone() };
+    let why = match (&busy, now.line()) {
+        (Busy::Queued, _) => format!("{label} waits for what's running ahead of it."),
+        (_, Some(l)) if running => format!("{label}: {l}"),
+        _ => format!("{label}…"),
+    };
+    let resp = ui.add_enabled(false, egui::Button::new(shown).min_size(vec2(0.0, ui.spacing().interact_size.y))).on_disabled_hover_text(why);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, false, &text));
+    let tint = ui.visuals().selection.bg_fill;
+    if running {
+        let side = 12.0;
+        let at = Rect::from_center_size(pos2(resp.rect.left() + ui.spacing().button_padding.x + side / 2.0, resp.rect.center().y), vec2(side, side));
+        egui::Spinner::new().size(side).paint_at(ui, at);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    if let Some(pct) = percent {
+        let r = resp.rect.shrink2(vec2(3.0, 0.0));
+        ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.bottom() - 3.0), pos2(r.left() + r.width() * f32::from(pct) / 100.0, r.bottom() - 1.0)), 1.0, tint);
+    }
+    resp
+}
+
 pub fn small_button(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> Response {
     ui.add(egui::Button::new(text).min_size(vec2(0.0, ui.spacing().interact_size.y)))
 }

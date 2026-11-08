@@ -596,8 +596,9 @@ impl LaunchpadView {
                     if cur == Some(local.as_str())
                         && let Some(fetch) = &fetch_ref
                     {
-                        if crate::widgets::small_button(ui, "Update").on_hover_text("Bring in the pull request's new commits").clicked() {
-                            cx.run(ops::update_pr_branch(&remote, fetch));
+                        let op = ops::update_pr_branch(&remote, fetch);
+                        if crate::widgets::op_button(ui, &cx.data.ops_now, "Update", &op).on_hover_text("Bring in the pull request's new commits").clicked() {
+                            cx.run(op);
                         }
                         if crate::widgets::small_button(ui, "Reset to its tip…").on_hover_text("For when its author has force-pushed and Update refuses").clicked() {
                             cx.confirm("Reset to the pull request", &format!("Make {local} what the pull request holds now? Uncommitted changes are lost. Commits made here stay in the reflog."), "Reset", ops::reset_pr_branch(&remote, fetch));

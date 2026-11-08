@@ -98,14 +98,17 @@ impl ToolsView {
             if ui.button("Add…").clicked() {
                 cx.form(forms::add_submodule());
             }
-            if ui.button("Update all").on_hover_text("Init, then check out the recorded commits").clicked() {
-                cx.run(ops::submodule_update(None, true, true, false));
+            let op = ops::submodule_update(None, true, true, false);
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Update all", &op).on_hover_text("Init, then check out the recorded commits").clicked() {
+                cx.run(op);
             }
-            if ui.button("Update to latest").on_hover_text("Use each submodule's remote branch").clicked() {
-                cx.run(ops::submodule_update(None, true, true, true));
+            let op = ops::submodule_update(None, true, true, true);
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Update to latest", &op).on_hover_text("Use each submodule's remote branch").clicked() {
+                cx.run(op);
             }
-            if ui.button("Sync URLs").clicked() {
-                cx.run(ops::submodule_sync());
+            let op = ops::submodule_sync();
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Sync URLs", &op).clicked() {
+                cx.run(op);
             }
         });
         ui.add_space(4.0);
@@ -300,11 +303,13 @@ impl ToolsView {
             if ui.button("Unlock a file…").clicked() {
                 cx.form(forms::lfs_unlock_form());
             }
-            if ui.button("Pull objects").clicked() {
-                cx.run(ops::lfs_pull());
+            let op = ops::lfs_pull();
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Pull objects", &op).clicked() {
+                cx.run(op);
             }
-            if ui.button("Prune old objects").clicked() {
-                cx.run(ops::lfs_prune());
+            let op = ops::lfs_prune();
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Prune old objects", &op).clicked() {
+                cx.run(op);
             }
             if ui.button("Refresh").clicked() {
                 self.lfs_started = false;
@@ -373,20 +378,24 @@ impl ToolsView {
             self.objects.spawn(ui.ctx(), move || r.count_objects());
         }
         ui.horizontal(|ui| {
-            if ui.button("Garbage collect").clicked() {
-                cx.run(ops::gc(false, false));
+            let op = ops::gc(false, false);
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Garbage collect", &op).clicked() {
+                cx.run(op);
             }
-            if ui.button("Aggressive GC").on_hover_text("Slow; recompresses everything").clicked() {
-                cx.run(ops::gc(true, false));
+            let op = ops::gc(true, false);
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Aggressive GC", &op).on_hover_text("Slow; recompresses everything").clicked() {
+                cx.run(op);
             }
             if ui.button("Prune unreachable now…").clicked() {
                 cx.confirm("Prune unreachable objects", "Delete all unreachable objects right now? Commits recoverable through the reflog's expired entries will be lost.", "Prune", ops::gc(false, true));
             }
-            if ui.button("Run maintenance").clicked() {
-                cx.run(ops::maintenance_run());
+            let op = ops::maintenance_run();
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Run maintenance", &op).clicked() {
+                cx.run(op);
             }
-            if ui.button("Verify (fsck)").clicked() {
-                cx.run(ops::fsck());
+            let op = ops::fsck();
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Verify (fsck)", &op).clicked() {
+                cx.run(op);
             }
         });
         ui.add_space(6.0);

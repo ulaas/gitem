@@ -53,8 +53,9 @@ impl HealthView {
         ui.add_space(4.0);
         ui.label(RichText::new(format!("{} tracked files, {} commits, {} loose objects, {} in packs", h.tracked_files, h.commits, h.loose_objects, h.pack_size)).small().color(p.faint));
         ui.add_space(6.0);
-        if ui.button("Run maintenance now").on_hover_text("Git's safe housekeeping: packs objects and refreshes caches").clicked() {
-            cx.run(ops::GitOp::new("Run maintenance").step(&["maintenance", "run"]));
+        let op = ops::GitOp::new("Run maintenance").step(&["maintenance", "run"]);
+        if crate::widgets::op_button(ui, &cx.data.ops_now, "Run maintenance now", &op).on_hover_text("Git's safe housekeeping: packs objects and refreshes caches").clicked() {
+            cx.run(op);
         }
         section(ui, "Optimizations", &p);
         egui::ScrollArea::vertical().id_salt("health").auto_shrink([false, false]).show(ui, |ui| {

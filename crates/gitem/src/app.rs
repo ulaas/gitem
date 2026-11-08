@@ -37,6 +37,10 @@ enum OpMsg {
 
 struct Running {
     title: String,
+    /// Its git commands, such as `fetch`, and its [`crate::data::op_signature`]: what the button
+    /// that started it looks for.
+    commands: Vec<String>,
+    signature: String,
     rx: Receiver<OpMsg>,
     cancel: Arc<AtomicBool>,
     last_line: String,
@@ -73,7 +77,7 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
     let cancel = Arc::new(AtomicBool::new(false));
     let c2 = cancel.clone();
     let ctx2 = ctx.clone();
-    let (title, network, harmless) = (op.title.clone(), op.network, is_harmless(&op));
+    let (title, network, harmless, commands, signature) = (op.title.clone(), op.network, is_harmless(&op), op.commands(), crate::data::op_signature(&op));
     std::thread::spawn(move || {
         let tx2 = tx.clone();
         let ctx3 = ctx2.clone();
@@ -98,7 +102,7 @@ fn spawn_op(ctx: &egui::Context, git: GitExe, cwd: Option<PathBuf>, op: GitOp, o
         let _ = tx.send(OpMsg::Done(res));
         ctx2.request_repaint();
     });
-    Running { title, rx, cancel, last_line: String::new(), network, open_after, harmless, is_commit, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false, undo: None, then: None }
+    Running { title, commands, signature, rx, cancel, last_line: String::new(), network, open_after, harmless, is_commit, own_config, is_clone, batch: 0, started: Instant::now(), asking_to_stop: false, undo: None, then: None }
 }
 
 /// A write waiting its turn. `batch` tells what was asked for together: the steps of one
@@ -2523,12 +2527,17 @@ impl GitemApp {
             let prune = self.settings.prune_on_fetch;
             let remotes: Vec<String> = tab.data.remotes().iter().map(|r| r.name.clone()).collect();
             let can_fetch = !no_remote;
-            let fetch = ui.add_enabled_ui(can_fetch, |ui| chrome::icon_text_button(ui, chrome::icon::CLOUD_ARROW_DOWN, p.accent, "Fetch", "Fetch all remotes (Ctrl+Shift+F)", false, &p)).inner;
+            // Each shows its own action under way, with git's progress, and can't start it twice.
+            let now = &tab.data.ops_now;
+            let line = now.line();
+            let fetch_busy = now.state("fetch");
+            let fetch = ui.add_enabled_ui(can_fetch, |ui| chrome::action_button(ui, chrome::icon::CLOUD_ARROW_DOWN, p.accent, "Fetch", "Fetching", "Fetch all remotes (Ctrl+Shift+F)", false, fetch_busy.as_ref(), line, &p)).inner;
             if fetch.on_disabled_hover_text(sync_why).clicked() {
                 out.push(Action::Run(ops::fetch(&ops::FetchOpts { all: true, prune, ..Default::default() })));
             }
             let pull_label = if behind > 0 { format!("Pull {behind}") } else { "Pull".to_string() };
-            let pull = ui.add_enabled_ui(!sync_off, |ui| chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_DOWN, p.incoming(), &pull_label, "Bring in the upstream's commits (Ctrl+Shift+L)", behind > 0, &p)).inner;
+            let pull_busy = now.state("pull");
+            let pull = ui.add_enabled_ui(!sync_off, |ui| chrome::action_button(ui, chrome::icon::ARROW_LINE_DOWN, p.incoming(), &pull_label, "Pulling", "Bring in the upstream's commits (Ctrl+Shift+L)", behind > 0, pull_busy.as_ref(), line, &p)).inner;
             if pull.on_disabled_hover_text(sync_why).clicked() {
                 out.push(Action::Run(ops::pull(pull_mode(&self.settings.pull_mode), self.settings.pull_autostash)));
             }
@@ -2540,7 +2549,9 @@ impl GitemApp {
             let push_label = if upstream.is_none() && branch.is_some() { "Publish".to_string() } else if ahead > 0 { format!("Push {ahead}") } else { "Push".to_string() };
             // Publishing with no remote leads to adding one, so only an operation stops it.
             let push_off = if upstream.is_none() && branch.is_some() { in_op } else { sync_off };
-            let push = ui.add_enabled_ui(!push_off, |ui| chrome::icon_text_button(ui, chrome::icon::ARROW_LINE_UP, p.outgoing(), &push_label, "Send this branch's commits to its remote (Ctrl+Shift+K)", ahead > 0, &p)).inner;
+            let push_busy = now.state("push");
+            let pushing = if upstream.is_none() && branch.is_some() { "Publishing" } else { "Pushing" };
+            let push = ui.add_enabled_ui(!push_off, |ui| chrome::action_button(ui, chrome::icon::ARROW_LINE_UP, p.outgoing(), &push_label, pushing, "Send this branch's commits to its remote (Ctrl+Shift+K)", ahead > 0, push_busy.as_ref(), line, &p)).inner;
             if push.on_disabled_hover_text(sync_why).clicked() {
                 if no_remote {
                     out.push(Action::Form(forms::add_remote()));
@@ -3280,6 +3291,8 @@ impl GitemApp {
             }
         }
         let st = r.data.status.get();
+        // As with the toolbar's buttons: nothing a second time while the first is under way.
+        let (fetch, pull, push) = (fetch && r.data.ops_now.state("fetch").is_none(), pull && r.data.ops_now.state("pull").is_none(), push && r.data.ops_now.state("push").is_none());
         if fetch && !r.data.remotes().is_empty() {
             out.push(Action::Run(ops::fetch(&ops::FetchOpts { all: true, prune: self.settings.prune_on_fetch, ..Default::default() })));
         }
@@ -3604,6 +3617,11 @@ impl GitemApp {
             }
             let job_running = r.data.jobs.load(Ordering::Relaxed) > 0;
             r.data.ops_busy = r.running.is_some() || !r.queue.is_empty() || job_running;
+            r.data.ops_now = crate::data::OpsNow {
+                running: r.running.as_ref().map(|x| (x.commands.clone(), x.signature.clone(), x.last_line.clone())),
+                queued: r.queue.iter().map(|q| (q.op.commands(), crate::data::op_signature(&q.op))).collect(),
+                background_fetch: r.quiet.as_ref().is_some_and(|q| q.is_fetch),
+            };
             let seen = r.watcher.take();
             let polling = r.watcher.failed.load(Ordering::Relaxed) && r.last_poll.elapsed() >= POLL_WITHOUT_WATCHER;
             if polling {

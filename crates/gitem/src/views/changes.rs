@@ -867,8 +867,12 @@ impl ChangesView {
             return;
         }
         let can = !cx.data.ops_busy && self.submitted.is_none() && !self.message.trim().is_empty() && counts.conflicts == 0 && (staged_n > 0 || self.amend || st.op == RepoOp::Merge || unstaged_n > 0);
+        // A commit under way says so, beside a spinner, rather than only looking unavailable.
+        let committing = matches!(cx.data.ops_now.state("commit"), Some(crate::data::Busy::Running(_)));
         ui.horizontal(|ui| {
-            let label = if self.amend {
+            let label = if committing {
+                if self.amend { "Amending…".to_string() } else { "Committing…".to_string() }
+            } else if self.amend {
                 "Amend commit".to_string()
             } else if staged_n > 0 {
                 format!("Commit {}", plural(staged_n, "file", "files"))
@@ -894,6 +898,9 @@ impl ChangesView {
             };
             if ui.add_enabled(can, b).on_disabled_hover_text(why).clicked() || shortcut {
                 self.commit(cx, staged_n == 0 && !self.amend && st.op != RepoOp::Merge);
+            }
+            if committing {
+                ui.add(crate::widgets::spinner(14.0));
             }
         });
         // What's below the message box, for the next frame to leave room for: it wraps.

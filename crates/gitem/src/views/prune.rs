@@ -106,8 +106,9 @@ impl PruneView {
         let list = candidates(cx.data.branches(), merged, &base);
         ui.label(RichText::new(format!("Local branches already merged into {base}, or whose branch on the remote has gone. Commits on a branch that isn't merged are reachable only through the reflog afterwards.")).color(p.dim));
         ui.horizontal(|ui| {
-            if ui.button("Fetch and prune first").on_hover_text("Find out which branches have gone from the remote").clicked() {
-                cx.run(ops::fetch(&ops::FetchOpts { all: true, prune: true, ..Default::default() }));
+            let op = ops::fetch(&ops::FetchOpts { all: true, prune: true, ..Default::default() });
+            if crate::widgets::op_button(ui, &cx.data.ops_now, "Fetch and prune first", &op).on_hover_text("Find out which branches have gone from the remote").clicked() {
+                cx.run(op);
             }
             let chosen: Vec<&Candidate> = list.iter().filter(|c| self.is_ticked(c)).collect();
             let label = format!("Delete {}", plural(chosen.len(), "branch", "branches"));

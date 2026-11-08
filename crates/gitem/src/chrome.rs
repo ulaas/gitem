@@ -118,6 +118,44 @@ pub fn icon_text_button(ui: &mut Ui, glyph: &str, tint: Color32, text: &str, tip
     if tip.is_empty() { resp } else { tooltip(resp, text, tip, p) }
 }
 
+/// An [`icon_text_button`] for an action that can be under way, such as Fetch. While it is, the
+/// button is off and says so: a spinner for the icon and `doing` with git's percentage, with a bar
+/// along its foot for how far along it is; or an hourglass and "queued" while it waits its turn.
+/// Hovering it says what git last said. Pressing it again can't start a second one.
+#[allow(clippy::too_many_arguments)]
+pub fn action_button(ui: &mut Ui, glyph: &str, tint: Color32, text: &str, doing: &str, tip: &str, primary: bool, busy: Option<&crate::data::Busy>, line: Option<&str>, p: &Palette) -> Response {
+    use crate::data::Busy;
+    let Some(busy) = busy else {
+        return icon_text_button(ui, glyph, tint, text, tip, primary, p);
+    };
+    let (label, percent) = match busy {
+        Busy::Running(Some(pr)) => (format!("{doing} {}%", pr.percent), Some(pr.percent)),
+        Busy::Running(None) => (format!("{doing}…"), None),
+        Busy::Queued => (format!("{text} queued"), None),
+    };
+    // Room for the spinner where the icon goes, so the text doesn't move when it ends.
+    let icon = if matches!(busy, Busy::Queued) { RichText::new(icon::HOURGLASS_MEDIUM).color(p.dim) } else { RichText::new(icon::CIRCLE).color(Color32::TRANSPARENT) };
+    let why = match (busy, line) {
+        (Busy::Queued, _) => format!("{text} waits for what's running ahead of it."),
+        (_, Some(l)) => format!("{doing}: {l}"),
+        (_, None) => format!("{doing}…"),
+    };
+    let resp = ui.add_enabled(false, egui::Button::new((icon, RichText::new(&label)))).on_disabled_hover_text(why);
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, false, &label));
+    if matches!(busy, Busy::Running(_)) {
+        let side = 12.0;
+        let at = Rect::from_center_size(egui::pos2(resp.rect.left() + ui.spacing().button_padding.x + side / 2.0 + 1.0, resp.rect.center().y), egui::vec2(side, side));
+        egui::Spinner::new().size(side).color(tint).paint_at(ui, at);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    if let Some(pct) = percent {
+        let r = resp.rect.shrink2(egui::vec2(3.0, 0.0));
+        let bar = Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 3.0), egui::pos2(r.left() + r.width() * f32::from(pct) / 100.0, r.bottom() - 1.0));
+        ui.painter().rect_filled(bar, 1.0, tint);
+    }
+    resp
+}
+
 // ---- titlebar ----------------------------------------------------------------
 
 /// Everything in the bar that isn't a widget moves the window. Call this first, so

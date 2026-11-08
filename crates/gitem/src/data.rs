@@ -98,6 +98,89 @@ pub struct StatusCounts {
     pub conflicts: usize,
 }
 
+/// What the repository's op queue is doing this frame. A button that starts an action asks
+/// [`OpsNow::state`] with that action's git command, and shows it under way rather than offering
+/// to start it again.
+#[derive(Clone, Debug, Default)]
+pub struct OpsNow {
+    /// The op running: the git commands it runs, its [`op_signature`], and git's last line.
+    pub running: Option<(Vec<String>, String, String)>,
+    /// Each op waiting its turn: its git commands and its [`op_signature`].
+    pub queued: Vec<(Vec<String>, String)>,
+    /// A scheduled fetch is running beside the queue.
+    pub background_fetch: bool,
+}
+
+/// An action that's under way, as a button shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Busy {
+    /// Running now, with how far along git says it is, when it says.
+    Running(Option<Progress>),
+    /// Waiting for what's ahead of it.
+    Queued,
+}
+
+/// A step of git's own progress: `Receiving objects:  45% (450/1000)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Progress {
+    /// What git is doing, such as "Receiving objects".
+    pub phase: String,
+    pub percent: u8,
+}
+
+impl OpsNow {
+    /// Whether an op running `command` (such as `"fetch"`) is under way.
+    pub fn state(&self, command: &str) -> Option<Busy> {
+        if let Some((commands, _, line)) = &self.running
+            && commands.iter().any(|c| c == command)
+        {
+            return Some(Busy::Running(git_progress(line)));
+        }
+        if command == "fetch" && self.background_fetch {
+            return Some(Busy::Running(None));
+        }
+        self.queued.iter().any(|(q, _)| q.iter().any(|c| c == command)).then_some(Busy::Queued)
+    }
+    /// Whether this very op, by its title and every argument, is under way: for a button whose
+    /// action isn't simply a fetch or a push, such as Update on a pull request, or one of two
+    /// buttons running the same command with different options.
+    pub fn state_of(&self, op: &gitem_core::ops::GitOp) -> Option<Busy> {
+        let sig = op_signature(op);
+        if let Some((_, s, line)) = &self.running
+            && *s == sig
+        {
+            return Some(Busy::Running(git_progress(line)));
+        }
+        self.queued.iter().any(|(_, s)| *s == sig).then_some(Busy::Queued)
+    }
+    /// Git's last line for what's running, for a tooltip.
+    pub fn line(&self) -> Option<&str> {
+        self.running.as_ref().map(|(_, _, l)| l.as_str()).filter(|l| !l.is_empty())
+    }
+}
+
+/// An op's title and every argument of every step: what tells one request from another.
+pub fn op_signature(op: &gitem_core::ops::GitOp) -> String {
+    let mut s = op.title.clone();
+    for step in &op.steps {
+        s.push('\n');
+        s.push_str(&step.args.join("\u{1f}"));
+    }
+    s
+}
+
+/// Git's progress line, as a phase and a percentage. Lines from the remote side come with
+/// `remote: ` in front. Anything else, such as `Enumerating objects: 5, done.`, isn't progress.
+pub fn git_progress(line: &str) -> Option<Progress> {
+    let line = line.trim();
+    let line = line.strip_prefix("remote:").map_or(line, str::trim_start);
+    let (phase, rest) = line.split_once(':')?;
+    let pct = rest.trim_start().split('%').next()?.trim();
+    let percent: u8 = pct.parse().ok().filter(|p| *p <= 100)?;
+    let phase = phase.trim();
+    (!phase.is_empty()).then(|| Progress { phase: phase.to_string(), percent })
+}
+
 #[derive(Default)]
 pub struct RepoData {
     pub status: Task<Arc<RepoStatus>>,
@@ -120,6 +203,8 @@ pub struct RepoData {
     pub last_blame: String,
     /// Writes are queued or running on this repository.
     pub ops_busy: bool,
+    /// What's running and waiting, for a button to show its own action under way.
+    pub ops_now: OpsNow,
     /// Long jobs running outside the op queue, such as an auto-rebase. They count as busy.
     pub jobs: Arc<AtomicUsize>,
     /// Which branch, its pull request's number, and its link.
@@ -598,6 +683,44 @@ impl RepoWatcher {
             seen.ignored = true;
         }
         seen
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn git_progress_lines_are_read() {
+        assert_eq!(git_progress("Receiving objects:  45% (450/1000), 1.20 MiB | 2.00 MiB/s"), Some(Progress { phase: "Receiving objects".into(), percent: 45 }));
+        assert_eq!(git_progress("remote: Compressing objects: 100% (12/12), done."), Some(Progress { phase: "Compressing objects".into(), percent: 100 }));
+        assert_eq!(git_progress("Writing objects:   7% (1/14)"), Some(Progress { phase: "Writing objects".into(), percent: 7 }));
+        assert_eq!(git_progress("Enumerating objects: 5, done."), None);
+        assert_eq!(git_progress("From https://example.com/r"), None);
+        assert_eq!(git_progress(""), None);
+        assert_eq!(git_progress("error: 300% sure"), None);
+    }
+
+    #[test]
+    fn a_button_finds_its_own_action() {
+        let mut now = OpsNow { running: Some((vec!["fetch".into()], "Fetch".into(), "Receiving objects:  10% (1/10)".into())), queued: vec![(vec!["push".into()], "Push".into())], background_fetch: false };
+        assert_eq!(now.state("fetch"), Some(Busy::Running(Some(Progress { phase: "Receiving objects".into(), percent: 10 }))));
+        assert_eq!(now.state("push"), Some(Busy::Queued));
+        assert_eq!(now.state("pull"), None);
+        now.running = None;
+        now.background_fetch = true;
+        assert_eq!(now.state("fetch"), Some(Busy::Running(None)), "a scheduled fetch is a fetch too");
+    }
+
+    #[test]
+    fn a_button_for_one_op_finds_only_that_op() {
+        use gitem_core::ops::GitOp;
+        let gc = GitOp::new("Garbage collect").step(&["gc"]);
+        let aggressive = GitOp::new("Garbage collect").step(&["gc", "--aggressive"]);
+        let now = OpsNow { running: Some((gc.commands(), op_signature(&gc), String::new())), queued: vec![(aggressive.commands(), op_signature(&aggressive))], background_fetch: false };
+        assert_eq!(now.state_of(&gc), Some(Busy::Running(None)));
+        assert_eq!(now.state_of(&aggressive), Some(Busy::Queued), "same command and title, told apart by its options");
+        assert_eq!(now.state_of(&GitOp::new("Verify").step(&["fsck"])), None);
     }
 }
 

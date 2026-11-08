@@ -6,6 +6,7 @@ Changed:
 
 - The rail's Editor icon turns IDE mode on and off, and is lit while it's on, rather than opening an empty editor tab.
 - The file view has Edit, opening the file in the editor at the line you were reading, and the editor has Blame, leading back to it.
+- Fetch, Pull and Push in the toolbar show their action under way, with git's percentage and a bar along the button, and can't be pressed again until it's done, nor can their keys. Waiting behind something else, they say queued. The same goes for the buttons in Tools, Repository Health, Clean up branches and a pull request's Update, and the commit button says Committing… while it does.
 - A file opens in the editor from history as well: the file view at an older revision has Edit current, a blame line's menu has Edit at this line, a diff's toolbar has Edit, at the first change, and every file menu on a revision has Edit the current version. Each opens the file as it is now.
 - A double click on a preview's tab, a diff or a file opened from the Files tree, keeps it open, as Keep open in its menu does.
 - A changed file in Changes shows small buttons under the pointer: open it in the editor, discard its changes or delete it if it's new (asking first), and stage or unstage it. A folder in the tree has the same for everything in it, discarding only its tracked files. The right-click menu is unchanged.
