@@ -467,6 +467,11 @@ impl DiffView {
                 self.jump(1);
             }
             if let Some(path) = &self.path {
+                // An icon: the toolbar is short of room, and the line actions after it have to fit.
+                if cx.repo.root.join(path).is_file() && small_icon_button(ui, crate::chrome::icon::PENCIL_SIMPLE, "Edit", "").clicked() {
+                    let at = self.files.get().and_then(|l| l.files.iter().find(|f| &f.new_path == path).and_then(|f| f.hunks.first())).map(|h| (h.new_start as usize).saturating_sub(1));
+                    cx.open(Tab::editor(path, at, true));
+                }
                 if crate::widgets::small_button(ui, "Blame").clicked() {
                     let rev = if let DiffSource::Commit(s) = &self.src { Some(s.clone()) } else { None };
                     cx.open(Tab::file(path, rev, None));

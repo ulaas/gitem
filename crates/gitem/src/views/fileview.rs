@@ -421,9 +421,11 @@ impl FileView {
         ui.horizontal_wrapped(|ui| {
             // The file as it is now can be edited, whether or not IDE mode is on. At the line
             // in view, so the editor opens where you were reading.
-            if self.rev.is_none() && cx.repo.root.join(&self.path).is_file() {
-                let edit = format!("{} Edit", crate::chrome::icon::PENCIL_SIMPLE);
-                if crate::widgets::small_button(ui, edit).on_hover_text("Open this file in the editor").clicked() {
+            // At an older revision it's the file as it is now that's edited, near the same line.
+            if cx.repo.root.join(&self.path).is_file() {
+                let (label, tip) = if self.rev.is_none() { ("Edit", "Open this file in the editor") } else { ("Edit current", "Open the file as it is now in the editor, near this line") };
+                let edit = format!("{} {label}", crate::chrome::icon::PENCIL_SIMPLE);
+                if crate::widgets::small_button(ui, edit).on_hover_text(tip).clicked() {
                     cx.open(Tab::editor(&self.path, self.current, true));
                 }
                 ui.separator();
@@ -831,6 +833,13 @@ impl FileView {
     }
 
     fn blame_menu(&self, ui: &mut Ui, cx: &mut Cx, b: &BlameLine) {
+        if cx.repo.root.join(&self.path).is_file() {
+            let label = if self.rev.is_none() { "Edit at this line" } else { "Edit the current version near this line" };
+            if ui.button(label).clicked() {
+                cx.open(Tab::editor(&self.path, Some((b.final_line as usize).saturating_sub(1)), true));
+                ui.close();
+            }
+        }
         if ui.button("Show commit").clicked() {
             cx.inspect(&b.sha);
             ui.close();

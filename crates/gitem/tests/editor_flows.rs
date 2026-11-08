@@ -199,6 +199,36 @@ fn with_ide_mode_on_clicks_preview_and_a_double_click_keeps() {
     assert_eq!(editors(&h).len(), 2, "a kept file stays when another is previewed: {:?}", editors(&h));
 }
 
+/// From history too: a file at an older revision, and a diff, open the file as it is now.
+#[test]
+fn a_revision_and_a_diff_open_the_current_file_in_the_editor() {
+    let f = Fx::new();
+    let first = f.git(&["rev-parse", "HEAD"]).trim().to_string();
+    f.write_bytes("a.rs", b"fn a() {\r\n    one();\r\n}\r\nfn b() {}\r\n");
+    f.git(&["commit", "-q", "-am", "second"]);
+    let mut h = harness(&f, false);
+    settle(&mut h);
+
+    // The file at the first commit: Edit opens today's file, not the old one.
+    h.state_mut().repos[0].open_tab(Tab::file("a.rs", Some(first.clone()), None));
+    settle(&mut h);
+    let edit = format!("{} Edit current", gitem::chrome::icon::PENCIL_SIMPLE);
+    wait_for(&mut h, "Edit current", |h| h.query_by_label(&edit).is_some());
+    h.get_by_label(&edit).click();
+    settle(&mut h);
+    assert_eq!(editors(&h), vec![("a.rs".to_string(), true)]);
+    wait_for(&mut h, "the file to load", |h| editor_text(h, "a.rs").is_some_and(|t| t.contains("fn b()")));
+
+    // A change in the working tree, and its diff's Edit, at the change.
+    f.write_bytes("b.txt", b"\xEF\xBB\xBFfirst\nsecond\nthird\nfourth\n");
+    h.state_mut().repos[0].open_tab(Tab::diff(gitem_core::repo::DiffSource::Unstaged, Some("b.txt".into())));
+    settle(&mut h);
+    wait_for(&mut h, "the diff's Edit", |h| h.query_by_label("Edit").is_some());
+    h.get_by_label("Edit").click();
+    settle(&mut h);
+    assert!(editors(&h).iter().any(|(p, _)| p == "b.txt"), "{:?}", editors(&h));
+}
+
 /// A preview's tab, double-clicked, is kept, as Keep open in its menu would.
 #[test]
 fn a_double_click_on_a_previews_tab_keeps_it() {
