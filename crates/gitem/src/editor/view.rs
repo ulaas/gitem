@@ -35,6 +35,9 @@ pub struct ViewState {
     rows: Rows,
     /// A line to bring to the middle of the view, as from a click in the minimap.
     center_on: Option<usize>,
+    /// Where the primary caret wants to be across, moving between wrapped rows, so a short
+    /// row on the way doesn't pull it left for good.
+    goal_x: Option<f32>,
 }
 
 /// Where lines start, when that isn't simply line times row height.
@@ -227,9 +230,11 @@ fn galley(ui: &Ui, ed: &Editor, line: usize, m: &Metrics, base: Color32) -> Arc<
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
-/// Where a caret before char `col` is, relative to the galley.
+/// Where a caret before char `col` is, relative to the galley. Where a line wraps, the same
+/// position ends one row and starts the next; the caret is shown at the start of the next,
+/// as editors do, and Up and Down count it there.
 fn caret_rect(g: &Galley, col: usize) -> Rect {
-    g.pos_from_cursor(CCursor::new(col))
+    g.pos_from_cursor(CCursor { index: CharIndex(col), prefer_next_row: true })
 }
 
 /// The rectangles covering chars `a..b` of a laid-out line, one per wrapped row.
@@ -292,7 +297,7 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
 
         // Keys first, so what's drawn is what they did.
         if focused {
-            keyboard(ui, ed, page, now_ms, look, &mut shown);
+            keyboard(ui, ed, page, now_ms, look, &m, &mut shown);
         }
         let mut rows = std::mem::take(&mut ed.view.rows);
         rows.update(ed, &m);
@@ -681,6 +686,94 @@ fn mouse(ui: &Ui, ed: &mut Editor, resp: &Response, origin: Pos2, m: &Metrics, p
     ui.scroll_to_rect(Rect::from_center_size(at, vec2(4.0, m.row_h)), None);
 }
 
+/// Each caret a wrapped row up or down: within its line if the line has another row that
+/// way, else into the next shown line's nearest row. Folded lines are passed over.
+fn visual_move(ui: &Ui, ed: &mut Editor, m: &Metrics, up: bool, extend: bool) {
+    let primary = ed.sels.primary();
+    let goal = ed.view.goal_x;
+    let mut primary_x = None;
+    let mut moved = Vec::new();
+    for s in ed.sels.iter().copied().collect::<Vec<_>>() {
+        let (line, col) = ed.buf.point(s.head);
+        let g = galley(ui, ed, line, m, Color32::WHITE);
+        let here = caret_rect(&g, col);
+        let x = if s == primary { goal.unwrap_or(here.center().x) } else { here.center().x };
+        if s == primary {
+            primary_x = Some(x);
+        }
+        let row = g.rows.iter().position(|r| here.center().y >= r.min_y() && here.center().y <= r.max_y()).unwrap_or(0);
+        let target = if up { row.checked_sub(1).map(|r| (line, r)) } else { (row + 1 < g.rows.len()).then_some((line, row + 1)) };
+        let head = match target {
+            Some((l, r)) => {
+                let y = g.rows[r].rect().center().y;
+                ed.buf.pos(l, g.cursor_from_pos(vec2(x, y)).index.0)
+            }
+            None => {
+                // The next line that isn't folded away, entering at its last row going up or
+                // its first going down.
+                let mut l = line;
+                let next = loop {
+                    l = if up { match l.checked_sub(1) { Some(v) => v, None => break None } } else { l + 1 };
+                    if l >= ed.buf.line_count() {
+                        break None;
+                    }
+                    if !ed.folds.iter().any(|f| l > f.0 && l <= f.1) {
+                        break Some(l);
+                    }
+                };
+                match next {
+                    Some(l) => {
+                        let g2 = galley(ui, ed, l, m, Color32::WHITE);
+                        let r = if up { g2.rows.len().saturating_sub(1) } else { 0 };
+                        let y = g2.rows.get(r).map_or(0.0, |row| row.rect().center().y);
+                        ed.buf.pos(l, g2.cursor_from_pos(vec2(x, y)).index.0)
+                    }
+                    None if up => 0,
+                    None => ed.buf.len_chars(),
+                }
+            }
+        };
+        moved.push(Selection { anchor: if extend { s.anchor } else { head }, head, goal: None });
+    }
+    let primary_index = ed.sels.primary_index();
+    ed.sels = SelectionSet::from_vec(moved, primary_index);
+    ed.view.goal_x = primary_x;
+    ed.hist.break_run();
+    ed.reveal = true;
+}
+
+#[cfg(test)]
+mod visual_tests {
+    use super::*;
+
+    /// With wrapping, Down goes to the next row of the same line before the next line.
+    #[test]
+    fn down_goes_a_wrapped_row_at_a_time() {
+        let ctx = egui::Context::default();
+        let text = format!("{}\nnext\n", "word ".repeat(40));
+        let mut ed = Editor::new("a.txt", gitem_text::Buffer::from_text(&text), true, gitem_text::indent::Indent::Spaces(4));
+        let mut rows_seen = Vec::new();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            let char_w = ui.fonts_mut(|f| f.glyph_width(&mono(13.0), '0'));
+            let m = Metrics { row_h: 20.0, char_w, font_size: 13.0, wrap: Some(char_w * 30.0) };
+            let rows = galley(ui, &ed, 0, &m, Color32::WHITE).rows.len();
+            assert!(rows >= 6, "200 chars at 30 a row: {rows}");
+            for _ in 0..rows {
+                visual_move(ui, &mut ed, &m, false, false);
+                rows_seen.push(ed.buf.point(ed.sels.primary().head));
+            }
+            visual_move(ui, &mut ed, &m, true, false);
+            rows_seen.push(ed.buf.point(ed.sels.primary().head));
+        });
+        out.textures_delta.clear();
+        let on_first: Vec<_> = rows_seen.iter().take_while(|p| p.0 == 0).collect();
+        assert_eq!(on_first.len() + 1, rows_seen.len() - 1, "every row of line 1 first, then line 2: {rows_seen:?}");
+        assert_eq!(rows_seen[rows_seen.len() - 2].0, 1);
+        assert_eq!(rows_seen.last().unwrap().0, 0, "and back up to the last row of line 1");
+        assert!(rows_seen.windows(2).take(on_first.len()).all(|w| w[1].1 > w[0].1 || w[1].0 > w[0].0), "{rows_seen:?}");
+    }
+}
+
 fn unit_range(ed: &Editor, pos: usize, unit: Unit) -> (usize, usize) {
     match unit {
         Unit::Char => (pos, pos),
@@ -693,7 +786,8 @@ fn unit_range(ed: &Editor, pos: usize, unit: Unit) -> (usize, usize) {
     }
 }
 
-fn keyboard(ui: &Ui, ed: &mut Editor, page: isize, now_ms: u64, look: &Look, shown: &mut Shown) {
+#[allow(clippy::too_many_arguments)]
+fn keyboard(ui: &Ui, ed: &mut Editor, page: isize, now_ms: u64, look: &Look, m: &Metrics, shown: &mut Shown) {
     let filter = EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false };
     let events = ui.input(|i| i.filtered_events(&filter));
     let pressed = |name: &str| ui.input(|i| crate::keys::context_pressed(i, look.keys, name));
@@ -734,7 +828,12 @@ fn keyboard(ui: &Ui, ed: &mut Editor, page: isize, now_ms: u64, look: &Look, sho
             }
             Event::Ime(egui::ImeEvent::Commit(t)) if !t.is_empty() => ed.run(Cmd::Type(t), now_ms),
             Event::Key { key: Key::Z, pressed: true, modifiers, .. } if modifiers.alt && !modifiers.command && !modifiers.shift => shown.toggle_wrap = true,
+            // With wrapping, Up and Down go a row at a time, as the text is seen.
+            Event::Key { key: key @ (Key::ArrowUp | Key::ArrowDown), pressed: true, modifiers, .. } if m.wrap.is_some() && !modifiers.alt && !modifiers.command => {
+                visual_move(ui, ed, m, key == Key::ArrowUp, modifiers.shift);
+            }
             Event::Key { key, pressed: true, modifiers, .. } => {
+                ed.view.goal_x = None;
                 if let Some(cmd) = key_command(key, modifiers, page, mac) {
                     ed.run(cmd, now_ms);
                 }
