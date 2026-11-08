@@ -464,6 +464,31 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         h.step();
         out.save(&mut h, "tab-menu");
         h.key_press(egui::Key::Escape);
+        h.step();
+        // A tab dragged over the Console's pane, still held: where it would land is drawn.
+        let console = h.state().repos[0].dock.iter_leaves().find(|(_, l)| l.tabs.iter().any(|t| t.key() == "console")).map(|(_, l)| l.rect).expect("the console pane");
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        let to = console.center() + egui::vec2(console.width() * 0.3, 0.0);
+        for i in 1..=12 {
+            let t = i as f32 / 12.0;
+            h.event(egui::Event::PointerMoved(at + (to - at) * t));
+            h.step();
+        }
+        out.save(&mut h, "tab-drag");
+        // Over the middle button: dropped there, it joins the Console's pane.
+        for i in 1..=4 {
+            h.event(egui::Event::PointerMoved(to + (console.center() - to) * (i as f32 / 4.0)));
+            h.step();
+        }
+        out.save(&mut h, "tab-drag-center");
+        let to = console.center();
+        h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.step();
+        out.save(&mut h, "tab-dropped");
+        h.key_press(egui::Key::Escape);
         h.key_press_modifiers(egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT), egui::Key::M);
         quiet(&mut h);
         out.save(&mut h, "zoomed");

@@ -387,10 +387,12 @@ pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
     s.tab.minimum_width = Some(84.0);
     s.tab_bar.show_scroll_bar_on_overflow = true;
     // Where a dragged tab would land: the accent, faint, with the drop buttons on the panel.
-    s.overlay.selection_color = p.accent.gamma_multiply(0.22);
+    s.overlay.selection_color = p.accent.gamma_multiply(0.3);
     s.overlay.selection_stroke_width = 1.5;
-    s.overlay.button_color = p.panel2;
-    s.overlay.button_border_stroke = Stroke::new(1.0, p.accent.gamma_multiply(0.6));
+    // The drop buttons stand out from any pane they're over: the window's own background, an
+    // accent border. On the panel's colour they were nearly invisible.
+    s.overlay.button_color = p.bg;
+    s.overlay.button_border_stroke = Stroke::new(1.5, p.accent);
     s.overlay.hovered_leaf_highlight.color = p.accent.gamma_multiply(0.06);
     s.overlay.hovered_leaf_highlight.stroke = Stroke::new(1.0, p.accent.gamma_multiply(0.5));
     s.overlay.hovered_leaf_highlight.corner_radius = CornerRadius::same(4);

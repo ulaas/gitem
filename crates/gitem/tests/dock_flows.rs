@@ -230,3 +230,29 @@ fn turning_ide_mode_on_offers_its_layout_once() {
     assert_eq!(panes(&h).len(), 3);
     assert!(h.query_by_label("Use the IDE layout").is_none(), "asked once");
 }
+
+#[test]
+fn a_tab_dragged_onto_another_pane_moves_there() {
+    let f = Fx::new();
+    let mut h = harness(&f);
+    settle(&mut h);
+    act(&mut h, Action::Layout(Preset::Ide));
+    h.state_mut().repos[0].open_tab(Tab::graph());
+    settle(&mut h);
+    let d = &h.state().repos[0].dock;
+    let path = d.find_tab_from(|t| t.key() == "graph").unwrap();
+    let id = gitem::app::dock_tab_id(egui_dock::NodePath { surface: path.surface, node: path.node }, path.tab.0);
+    let from = h.ctx.read_response(id).expect("the tab was drawn").rect.center();
+    let to = d.iter_leaves().find(|(_, l)| l.tabs.iter().any(|t| t.key() == "console")).unwrap().1.rect.center();
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    for i in 1..=16 {
+        h.event(egui::Event::PointerMoved(from + (to - from) * (i as f32 / 16.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    settle(&mut h);
+    let console_pane = panes(&h).into_iter().find(|p| p.contains(&"console".to_string())).unwrap();
+    assert!(console_pane.contains(&"graph".to_string()), "{:?}", panes(&h));
+}
