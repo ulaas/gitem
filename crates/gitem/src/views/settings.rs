@@ -680,6 +680,7 @@ impl SettingsView {
         });
         group(ui, "Saving", p, |g| {
             g.switch(&mut s.editor_trim_on_save, "Trim spaces at line ends when saving", "");
+            g.switch(&mut s.editor_autosave, "Save when switching to another window", "Every file with unsaved edits, in each open repository's editor tabs. A file that changed on disk meanwhile is left for you to decide.");
         });
     }
 

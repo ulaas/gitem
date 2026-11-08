@@ -1,6 +1,10 @@
 //! The code editor: a buffer, its carets and undo, and the commands that change them. Drawing
 //! and input are in `view`, so everything here can be tested without a window.
 pub mod highlight;
+pub mod lsp;
+pub mod outline;
+#[cfg(feature = "tree-sitter")]
+pub mod treesitter;
 pub mod view;
 
 use gitem_text::brackets;
@@ -60,6 +64,8 @@ pub enum Request {
     TrimTrailing,
     /// Find in files, starting from the word or selection at the caret.
     FindInFiles,
+    /// The list of definitions, to go to one.
+    Outline,
 }
 
 /// Find and replace, and the matches for the text as it is.
@@ -101,6 +107,11 @@ pub struct Editor {
     pub folds: Vec<(usize, usize)>,
     /// Goes up when the folds change, so the view lays rows out again.
     pub folds_gen: u64,
+    /// Blocks the syntax says can fold, by first line, when a grammar knows the language.
+    /// Empty otherwise, and folding goes by indent.
+    pub syntax_folds: Vec<(usize, usize)>,
+    /// The text version `syntax_folds` was worked out for.
+    pub syntax_for: u64,
     /// The comment marker for this kind of file.
     comment: Option<&'static str>,
     view: view::ViewState,
@@ -125,6 +136,8 @@ impl Editor {
             focus: false,
             folds: Vec::new(),
             folds_gen: 0,
+            syntax_folds: Vec::new(),
+            syntax_for: u64::MAX,
             comment: lines::comment_prefix(path),
             view: view::ViewState::default(),
         }
@@ -666,6 +679,9 @@ impl Editor {
     /// Whether the line opens a block: the next line with text is indented deeper. Cheap
     /// enough for every line in view.
     pub fn can_fold(&self, line: usize) -> bool {
+        if let Ok(i) = self.syntax_folds.binary_search_by_key(&line, |f| f.0) {
+            return self.syntax_folds[i].1 > line;
+        }
         let Some(base) = self.indent_of(line) else { return false };
         (line + 1..self.buf.line_count().min(line + 200)).find_map(|l| self.indent_of(l)).is_some_and(|i| i > base)
     }
@@ -673,6 +689,9 @@ impl Editor {
     /// The last line of the block `line` opens, by indent: blank lines inside it go with it,
     /// those after it don't.
     fn fold_end(&self, line: usize) -> Option<usize> {
+        if let Ok(i) = self.syntax_folds.binary_search_by_key(&line, |f| f.0) {
+            return Some(self.syntax_folds[i].1).filter(|e| *e > line);
+        }
         let base = self.indent_of(line)?;
         let mut end = None;
         for l in line + 1..self.buf.line_count() {

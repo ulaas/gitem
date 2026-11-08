@@ -42,6 +42,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Ctrl+K, then an arrow", "The pane that way"),
     ("Ctrl+S", "Editor: save"),
     ("Ctrl+H, Ctrl+G", "Editor: replace, go to line"),
+    ("Ctrl+Shift+O", "Editor: go to a definition in this file"),
     ("Ctrl+D, Ctrl+F2", "Editor: select the next match, or all of them"),
     ("Ctrl+Shift+Up, Ctrl+Shift+Down", "Editor: add a caret above or below"),
     ("Alt+Up, Alt+Down", "Editor: move lines. With Shift, copy them"),
@@ -115,6 +116,7 @@ pub const CONTEXT: &[ContextKey] = &[
     ck("editor_save", "Ctrl+S", "Editor: save", &["Editor"], false),
     ck("editor_replace", "Ctrl+H", "Editor: find and replace", &["Editor"], false),
     ck("editor_goto", "Ctrl+G", "Editor: go to line", &["Editor"], false),
+    ck("editor_outline", "Ctrl+Shift+O", "Editor: go to a definition", &["Editor"], false),
     ck("diff_prev", "Alt+Up", "Diff: previous change", &["Diff"], false),
     ck("diff_next", "Alt+Down", "Diff: next change", &["Diff"], false),
     ck("file_blame", "Alt+B", "File: show or hide blame", &["File"], false),
@@ -141,6 +143,7 @@ const CONTEXT_ROWS: &[(&str, &[&str])] = &[
     ("Alt+B", &["file_blame"]),
     ("Ctrl+S", &["editor_save"]),
     ("Ctrl+H, Ctrl+G", &["editor_replace", "editor_goto"]),
+    ("Ctrl+Shift+O", &["editor_outline"]),
     ("P, R, E, S, F, D", &["rebase_pick", "rebase_reword", "rebase_edit", "rebase_squash", "rebase_fixup", "rebase_drop"]),
 ];
 
@@ -208,7 +211,13 @@ pub fn context_pressed(i: &egui::InputState, bindings: &std::collections::HashMa
 
 /// The same, keeping them from anything else that would act on them.
 pub fn context_take(i: &mut egui::InputState, bindings: &std::collections::HashMap<String, String>, name: &str) -> bool {
-    context_chord(bindings, name).is_some_and(|(m, k)| i.consume_key(m, k))
+    context_chord(bindings, name).is_some_and(|(m, k)| take_chord(i, m, k))
+}
+
+/// Takes a key press with exactly these keys held. egui's own `consume_key` lets Shift go by,
+/// so Ctrl+Shift+O was also Ctrl+O, opening a folder picker from the editor's outline key.
+pub fn take_chord(i: &mut egui::InputState, m: egui::Modifiers, k: egui::Key) -> bool {
+    held_for(i.modifiers, m, k) && i.consume_key(m, k)
 }
 
 /// How they read now, for a tooltip.

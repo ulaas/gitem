@@ -32,6 +32,14 @@ fn hash(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
+/// The outline box: what's typed, the definitions, and which is picked.
+struct Outline {
+    query: String,
+    symbols: Vec<crate::editor::outline::Symbol>,
+    picked: usize,
+    focus: bool,
+}
+
 enum Opened {
     Text(Buffer, u64),
     /// Not text that can be written back as it was.
@@ -87,6 +95,13 @@ pub struct EditorView {
     recoded: bool,
     /// Blame is out of date: the file was just opened or saved.
     reblame: bool,
+    /// The list of definitions, while it's open.
+    outline: Option<Outline>,
+    /// A language server for this file, when one is attached. None ships with gitem: this is
+    /// where one would go (see `editor::lsp`).
+    pub lsp: Option<Box<dyn crate::editor::lsp::LanguageServer>>,
+    /// The text version the server was last told about.
+    lsp_version: u64,
     /// The go-to box was showing last frame. It takes the keyboard once, as it opens.
     goto_shown: bool,
 }
@@ -191,6 +206,10 @@ impl EditorView {
                 if let Some(line) = self.goto.take() {
                     ed.go_to_line(line);
                 }
+                if let Some(s) = &mut self.lsp {
+                    s.did_open(&self.path, &ed.buf.text());
+                }
+                self.lsp_version = ed.buf.version;
                 self.ed = Some(ed);
                 self.disk = Some(h);
                 self.reblame = true;
@@ -253,6 +272,9 @@ impl EditorView {
                 self.pinned = true;
                 cx.out.push(Action::FileSaved(self.path.clone()));
                 self.reblame = true;
+                if let Some(s) = &mut self.lsp {
+                    s.did_save(&self.path);
+                }
                 true
             }
             Err(e) => {
@@ -460,10 +482,32 @@ impl EditorView {
         if let Some(c) = self.picked {
             self.change_bar(ui, cx, c, now_ms);
         }
+        if self.outline.is_some() {
+            self.outline_box(ui, cx);
+        }
+        #[cfg(feature = "tree-sitter")]
+        if let Some(ed) = &mut self.ed
+            && ed.syntax_for != ed.buf.version
+            && ed.buf.len_chars() < 4_000_000
+            && now - self.last_edit > 0.4
+        {
+            ed.syntax_folds = crate::editor::treesitter::fold_ranges(&self.path, &ed.buf.text()).unwrap_or_default();
+            ed.syntax_for = ed.buf.version;
+        }
         let caret_line = self.ed.as_ref().filter(|e| e.sels.primary().is_empty()).map(|e| e.buf.line_of(e.sels.primary().head));
         let note = caret_line.and_then(|l| self.blame_for(l, &cx.settings.inline_blame_format, now));
         let Some(ed) = &mut self.ed else { return };
         let version = ed.buf.version;
+        if let Some(s) = &mut self.lsp
+            && self.lsp_version != version
+        {
+            s.did_change(&self.path, version, &ed.buf.text());
+            self.lsp_version = version;
+        }
+        let underlines = match &self.lsp {
+            Some(s) => crate::editor::lsp::underlines(&s.diagnostics(&self.path), |l| ed.buf.line(l).chars().count()),
+            None => Vec::new(),
+        };
         let look = Look {
             font_size: cx.settings.editor_font_size,
             pal: cx.pal,
@@ -475,6 +519,7 @@ impl EditorView {
             staged_marks: &self.staged_marks,
             line_note: note.as_deref(),
             keys: &cx.settings.key_bindings,
+            underlines: &underlines,
         };
         let shown = view::show(ui, ed, &look);
         if ed.buf.version != version {
@@ -485,6 +530,9 @@ impl EditorView {
         }
         if shown.save {
             self.save(cx);
+        }
+        if shown.outline {
+            self.open_outline();
         }
         if shown.toggle_wrap {
             cx.out.push(Action::Settings(Box::new(|s| s.editor_word_wrap = !s.editor_word_wrap)));
@@ -516,6 +564,10 @@ impl EditorView {
             Request::TrimTrailing => {
                 let t = gitem_text::lines::trim_trailing(&ed.buf);
                 ed.transform(t, 0);
+            }
+            Request::Outline => {
+                self.open_outline();
+                return;
             }
             Request::FindInFiles => cx.open(Tab::Grep(Box::new(crate::views::grep::GrepView::looking_for(&ed.search_seed(), "")))),
             Request::Save => {}
@@ -716,6 +768,75 @@ impl EditorView {
             ed.goto = None;
             ed.focus = true;
             self.goto_shown = false;
+        }
+    }
+
+    fn open_outline(&mut self) {
+        let Some(ed) = &self.ed else { return };
+        let symbols = crate::editor::outline::symbols(&self.path, &ed.buf);
+        // Starts at the definition the caret is in.
+        let line = ed.buf.line_of(ed.sels.primary().head);
+        let picked = symbols.iter().rposition(|s| s.line <= line).unwrap_or(0);
+        self.outline = Some(Outline { query: String::new(), symbols, picked, focus: true });
+    }
+
+    /// A box listing the definitions, narrowed by typing. Enter or a click goes to one.
+    fn outline_box(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        let p = cx.pal;
+        let Some(o) = &mut self.outline else { return };
+        let mut go = None;
+        let mut close = false;
+        egui::Frame::new().fill(p.panel2).stroke(egui::Stroke::new(1.0, p.border)).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+            let r = ui.add(input(&mut o.query).hint_text("Go to a definition").desired_width(f32::INFINITY).id(egui::Id::new(("editor-outline", &self.path))));
+            if std::mem::take(&mut o.focus) {
+                r.request_focus();
+            }
+            if r.changed() {
+                o.picked = 0;
+            }
+            let shown = crate::editor::outline::filter(&o.symbols, &o.query);
+            let (up, down, enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+            if r.has_focus() || r.lost_focus() {
+                if down {
+                    o.picked = (o.picked + 1).min(shown.len().saturating_sub(1));
+                }
+                if up {
+                    o.picked = o.picked.saturating_sub(1);
+                }
+                if enter && let Some(s) = shown.get(o.picked) {
+                    go = Some(s.line);
+                }
+                close |= esc;
+            }
+            if shown.is_empty() {
+                ui.label(RichText::new(if o.symbols.is_empty() { "No definitions found in this file." } else { "Nothing matches." }).color(p.dim));
+            }
+            egui::ScrollArea::vertical().max_height(260.0).id_salt("outline-list").show(ui, |ui| {
+                for (i, s) in shown.iter().enumerate() {
+                    let text = format!("{}{}  {}", "    ".repeat(s.depth.min(6)), s.name, s.kind);
+                    let resp = ui.add(egui::Button::selectable(i == o.picked, RichText::new(text).monospace()).min_size(egui::vec2(ui.available_width(), 0.0)));
+                    let resp = resp.on_hover_text(format!("Line {}", s.line + 1));
+                    if i == o.picked {
+                        resp.scroll_to_me(None);
+                    }
+                    if resp.clicked() {
+                        go = Some(s.line);
+                    }
+                }
+            });
+        });
+        if let Some(line) = go {
+            if let Some(ed) = &mut self.ed {
+                ed.go_to_line(line);
+                ed.focus = true;
+            }
+            close = true;
+        }
+        if close {
+            self.outline = None;
+            if let Some(ed) = &mut self.ed {
+                ed.focus = true;
+            }
         }
     }
 

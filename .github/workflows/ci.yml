@@ -27,3 +27,7 @@ jobs:
         run: cargo test --workspace --locked
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked
+      # The optional tree-sitter build compiles C grammars, so it's checked on every platform
+      # rather than assumed to work where the default build does.
+      - name: Editor with tree-sitter
+        run: cargo test -p gitem --lib --locked --features tree-sitter editor

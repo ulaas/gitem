@@ -1851,6 +1851,11 @@ impl GitemApp {
         }
     }
 
+    /// No folder picker is open or waiting.
+    pub fn folder_pick_idle(&self) -> bool {
+        !self.folder_pick.busy()
+    }
+
     pub fn palette_is_open(&self) -> bool {
         self.palette.is_some()
     }
@@ -2141,7 +2146,7 @@ impl GitemApp {
             }
             Action::SaveAll => {
                 let mut out = Vec::new();
-                if let Some(r) = self.repos.get_mut(self.active) {
+                for r in self.repos.iter_mut() {
                     let RepoTab { repo, data, dock, zoom, .. } = r;
                     let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, out: &mut out, dialog_open: false, in_front: false };
                     for (_, t) in dock.iter_all_tabs_mut().chain(zoom.iter_mut().flat_map(|z| z.full.iter_all_tabs_mut())) {
@@ -3184,7 +3189,7 @@ impl GitemApp {
         use egui::{Key, Modifiers};
         const CS: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
         let bound = self.settings.key_bindings.clone();
-        let take = |name: &str| crate::keys::chord_for(&bound, name).is_some_and(|(m, k)| ctx.input_mut(|i| i.consume_key(m, k)));
+        let take = |name: &str| crate::keys::chord_for(&bound, name).is_some_and(|(m, k)| ctx.input_mut(|i| crate::keys::take_chord(i, m, k)));
         let (settings, open, close_tab, fetch, pull, push, undo) = (take("settings"), take("open"), take("close_tab"), take("fetch"), take("pull"), take("push"), take("undo_last"));
         if take("ide_mode") {
             out.push(Action::Settings(Box::new(|s| s.ide_mode = !s.ide_mode)));
@@ -3561,7 +3566,12 @@ impl GitemApp {
         // What a window that's come back to may have missed, as when a build ran meanwhile
         // on a drive that sends no notifications.
         let focused = ctx.input(|i| i.focused);
-        let regained = focused && !std::mem::replace(&mut self.window_focused, focused);
+        let was_focused = std::mem::replace(&mut self.window_focused, focused);
+        let regained = focused && !was_focused;
+        // Going to another window saves the editor's files, when asked to.
+        if was_focused && !focused && self.settings.editor_autosave {
+            out.push(Action::SaveAll);
+        }
         self.frame_no += 1;
         let persist = self.persist;
 

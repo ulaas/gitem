@@ -93,6 +93,8 @@ pub struct Look<'a> {
     pub line_note: Option<&'a str>,
     /// The keys the user changed, for Find and the like.
     pub keys: &'a HashMap<String, String>,
+    /// What a language server found, to underline: line, from and to column, how bad.
+    pub underlines: &'a [(usize, usize, usize, super::lsp::Severity)],
 }
 
 #[derive(Default)]
@@ -101,6 +103,8 @@ pub struct Shown {
     pub save: bool,
     /// Alt+Z was pressed.
     pub toggle_wrap: bool,
+    /// The outline was asked for.
+    pub outline: bool,
     /// A line number or change mark was clicked.
     pub gutter_click: Option<usize>,
     /// The text area, for a right-click menu.
@@ -381,6 +385,16 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
                 }
             }
             painter.galley(pos2(text_x, y), g.clone(), p.text);
+            for &(_, from, to, sev) in look.underlines.iter().filter(|u| u.0 == line) {
+                let color = match sev {
+                    super::lsp::Severity::Error => p.danger,
+                    super::lsp::Severity::Warning => p.warn,
+                    super::lsp::Severity::Hint => p.dim,
+                };
+                for r in range_rects(&g, from.min(len), to.min(len.max(from + 1))) {
+                    squiggle(&painter, at(r), color);
+                }
+            }
             if look.whitespace {
                 for (i, c) in ed.buf.line(line).chars().enumerate() {
                     let mark = match c {
@@ -448,6 +462,23 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
         ui.output_mut(|o| o.ime = Some(egui::output::IMEOutput { purpose: egui::IMEPurpose::Normal, rect: to_global * text_rect, cursor_rect: to_global * r, should_interrupt_composition: false }));
     }
     shown
+}
+
+#[allow(clippy::too_many_arguments)]
+/// A wavy line under a stretch of text, as editors mark problems.
+fn squiggle(painter: &egui::Painter, r: Rect, color: Color32) {
+    let y = r.bottom() - 2.0;
+    let mut points = Vec::new();
+    let mut x = r.left();
+    let mut up = true;
+    while x <= r.right() {
+        points.push(pos2(x, if up { y - 1.5 } else { y + 0.5 }));
+        x += 2.0;
+        up = !up;
+    }
+    if points.len() > 1 {
+        painter.add(egui::Shape::line(points, Stroke::new(1.0, color)));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -678,6 +709,9 @@ fn keyboard(ui: &Ui, ed: &mut Editor, page: isize, now_ms: u64, look: &Look, sho
     }
     if pressed("editor_goto") {
         ed.goto = Some(String::new());
+    }
+    if pressed("editor_outline") {
+        shown.outline = true;
     }
     if pressed("find_next") {
         ed.find_step(false);

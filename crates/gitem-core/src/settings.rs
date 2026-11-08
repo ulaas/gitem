@@ -146,6 +146,8 @@ pub struct Settings {
     pub editor_minimap: bool,
     /// Spaces and tabs at the ends of lines go when a file is saved.
     pub editor_trim_on_save: bool,
+    /// Files with unsaved edits are saved when the window loses focus.
+    pub editor_autosave: bool,
     /// Files edited lately, newest first, by repository.
     pub editor_recent: std::collections::HashMap<String, Vec<String>>,
     /// Dock layouts saved under a name, for any repository.
@@ -322,6 +324,7 @@ impl Default for Settings {
             editor_word_wrap: false,
             editor_minimap: false,
             editor_trim_on_save: false,
+            editor_autosave: false,
             editor_recent: std::collections::HashMap::new(),
             dock_layouts: std::collections::BTreeMap::new(),
             recent_repos: Vec::new(),

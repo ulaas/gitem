@@ -74,6 +74,7 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Editor: Unfold All" => (icon::ARROWS_OUT_SIMPLE, "", None),
         "Editor: Trim Trailing Whitespace" => (icon::SCISSORS, "", None),
         "Editor: Find in Files" => (icon::FILE_SEARCH, "", None),
+        "Editor: Go to Definition…" => (icon::LIST_BULLETS, "The functions, types and headings in this file", Some("Ctrl+Shift+O")),
         "Editor: Save All" => (icon::FLOPPY_DISK_BACK, "Every file with unsaved edits", None),
         "Editor: Word Wrap" => (icon::TEXT_INDENT, "Long lines go on over more rows, or scroll", Some("Alt+Z")),
         "Editor: Minimap" => (icon::SIDEBAR_SIMPLE, "The file in miniature beside the text", None),
@@ -387,6 +388,7 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Editor", "Editor: Unfold All", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::UnfoldAll)))));
     v.push(item("Editor", "Editor: Trim Trailing Whitespace", |cx| cx.out.push(Action::Editor(crate::editor::Request::TrimTrailing))));
     v.push(item("Editor", "Editor: Find in Files", |cx| cx.out.push(Action::Editor(crate::editor::Request::FindInFiles))));
+    v.push(item("Editor", "Editor: Go to Definition…", |cx| cx.out.push(Action::Editor(crate::editor::Request::Outline))));
     v.push(item("Editor", "Editor: Save All", |cx| cx.out.push(Action::SaveAll)));
     v.push(item("Editor", "Editor: Word Wrap", |cx| cx.out.push(Action::Settings(Box::new(|s| s.editor_word_wrap = !s.editor_word_wrap)))));
     v.push(item("Editor", "Editor: Minimap", |cx| cx.out.push(Action::Settings(Box::new(|s| s.editor_minimap = !s.editor_minimap)))));

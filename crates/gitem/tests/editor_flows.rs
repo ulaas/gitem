@@ -427,3 +427,80 @@ fn palette_commands_act_on_the_editor_in_front() {
     settle(&mut h);
     assert!(f.read("a.rs").starts_with(b"// fn a()"));
 }
+
+#[test]
+fn the_outline_goes_to_a_definition_by_name() {
+    let f = Fx::new();
+    f.write_bytes("m.rs", b"fn first() {}\n\nstruct Holder;\n\nfn second_one() {}\n");
+    let mut h = harness(&f, true);
+    settle(&mut h);
+    open_in_editor(&mut h, "m.rs");
+    h.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::O);
+    h.step();
+    h.step();
+    h.event(Event::Text("secon".into()));
+    h.step();
+    h.key_press(Key::Enter);
+    settle(&mut h);
+    assert!(h.state().folder_pick_idle(), "Ctrl+Shift+O isn't Ctrl+O: no folder picker");
+    let line = h.state_mut().repos[0].dock.iter_all_tabs_mut().find_map(|(_, t)| if let Tab::Editor(e) = t { e.editor_mut().map(|ed| ed.buf.line_of(ed.sels.primary().head)) } else { None });
+    assert_eq!(line, Some(4));
+    assert!(h.query_by_label("Go to a definition").is_none(), "the box closed");
+    // Typing goes to the text again.
+    h.event(Event::Text("x".into()));
+    h.step();
+    assert!(editor_text(&h, "m.rs").unwrap().contains("xfn second_one"));
+}
+
+/// Stands in for a language server, remembering what the editor told it.
+struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl gitem::editor::lsp::LanguageServer for Recorder {
+    fn did_open(&mut self, path: &str, _: &str) {
+        self.0.lock().unwrap().push(format!("open {path}"));
+    }
+    fn did_change(&mut self, path: &str, _: u64, text: &str) {
+        self.0.lock().unwrap().push(format!("change {path} {}", text.len()));
+    }
+    fn did_save(&mut self, path: &str) {
+        self.0.lock().unwrap().push(format!("save {path}"));
+    }
+    fn did_close(&mut self, _: &str) {}
+    fn diagnostics(&self, _: &str) -> Vec<gitem::editor::lsp::Diagnostic> {
+        Vec::new()
+    }
+    fn completions(&mut self, _: &str, _: gitem::editor::lsp::Position) -> Vec<gitem::editor::lsp::Completion> {
+        Vec::new()
+    }
+    fn hover(&mut self, _: &str, _: gitem::editor::lsp::Position) -> Option<String> {
+        None
+    }
+    fn definition(&mut self, _: &str, _: gitem::editor::lsp::Position) -> Option<gitem::editor::lsp::Location> {
+        None
+    }
+}
+
+#[test]
+fn a_language_server_hears_of_opening_changing_and_saving() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    settle(&mut h);
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut tab = Tab::editor("b.txt", None, true);
+    if let Tab::Editor(e) = &mut tab {
+        e.lsp = Some(Box::new(Recorder(heard.clone())));
+    }
+    h.state_mut().repos[0].open_tab(tab);
+    wait_for(&mut h, "the file to load", |h| editor_text(h, "b.txt").is_some());
+    settle(&mut h);
+    h.get_by_label("Text of b.txt").click();
+    h.step();
+    h.event(Event::Text("x".into()));
+    h.step();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::S);
+    settle(&mut h);
+    let heard = heard.lock().unwrap().clone();
+    assert_eq!(heard.first().map(String::as_str), Some("open b.txt"));
+    assert!(heard.iter().any(|c| c.starts_with("change b.txt")), "{heard:?}");
+    assert_eq!(heard.last().map(String::as_str), Some("save b.txt"), "{heard:?}");
+}
