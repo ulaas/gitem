@@ -504,3 +504,38 @@ fn a_language_server_hears_of_opening_changing_and_saving() {
     assert!(heard.iter().any(|c| c.starts_with("change b.txt")), "{heard:?}");
     assert_eq!(heard.last().map(String::as_str), Some("save b.txt"), "{heard:?}");
 }
+
+/// What an input method sends while composing: the text isn't touched until it commits, and
+/// the keys it uses meanwhile don't reach the text.
+#[test]
+fn composing_with_an_input_method_commits_once() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    settle(&mut h);
+    open_in_editor(&mut h, "b.txt");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::End);
+    let before = editor_text(&h, "b.txt").unwrap();
+    for pre in ["n", "ni", "nih", "にほ"] {
+        h.event(Event::Ime(egui::ImeEvent::Preedit { text: pre.into(), active_range_chars: None }));
+        h.step();
+    }
+    h.key_press(Key::Enter);
+    h.key_press(Key::Backspace);
+    h.step();
+    assert_eq!(editor_text(&h, "b.txt").unwrap(), before, "nothing goes in while composing");
+    h.event(Event::Ime(egui::ImeEvent::Commit("日本".into())));
+    h.step();
+    assert_eq!(editor_text(&h, "b.txt").unwrap(), format!("{before}日本"));
+    // Given up: an empty preedit, and the text is as it was.
+    h.event(Event::Ime(egui::ImeEvent::Preedit { text: "x".into(), active_range_chars: None }));
+    h.event(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.step();
+    h.key_press(Key::Backspace);
+    h.step();
+    assert_eq!(editor_text(&h, "b.txt").unwrap(), format!("{before}日"), "keys work again once composing ends");
+    // A correction replaces the chars around the caret.
+    h.event(Event::Ime(egui::ImeEvent::DeleteSurrounding { before_chars: 1, after_chars: 0 }));
+    h.event(Event::Ime(egui::ImeEvent::Commit("中".into())));
+    h.step();
+    assert_eq!(editor_text(&h, "b.txt").unwrap(), format!("{before}中"));
+}

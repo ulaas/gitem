@@ -38,6 +38,9 @@ pub struct ViewState {
     /// Where the primary caret wants to be across, moving between wrapped rows, so a short
     /// row on the way doesn't pull it left for good.
     goal_x: Option<f32>,
+    /// What an input method is composing, not yet text: shown at the caret, underlined, until
+    /// it's committed or given up.
+    pub preedit: Option<String>,
 }
 
 /// Where lines start, when that isn't simply line times row height.
@@ -429,6 +432,17 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
                 && ed.buf.line_of(primary.head) == line
             {
                 painter.text(pos2(end_of_text.max.x + char_w * 4.0, end_of_text.center().y), Align2::LEFT_CENTER, note, egui::FontId::proportional(look.font_size * 0.92), p.faint);
+            }
+            // What's being composed, over the text after the caret, on the panel's colour and
+            // underlined, as input methods show it everywhere else.
+            if let Some(pre) = &ed.view.preedit
+                && ed.buf.line_of(primary.head) == line
+            {
+                let c = at(caret_rect(&g, primary.head - start));
+                let r = painter.text(pos2(c.min.x, c.center().y), Align2::LEFT_CENTER, pre, mono(look.font_size), p.text);
+                painter.rect_filled(r.expand(1.0), 2.0, p.panel2);
+                painter.text(pos2(c.min.x, c.center().y), Align2::LEFT_CENTER, pre, mono(look.font_size), p.text);
+                painter.line_segment([pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())], Stroke::new(1.0, p.accent));
             }
             for s in ed.sels.iter().filter(|s| ed.buf.line_of(s.head) == line) {
                 let c = at(caret_rect(&g, s.head - start));
@@ -826,7 +840,25 @@ fn keyboard(ui: &Ui, ed: &mut Editor, page: isize, now_ms: u64, look: &Look, m: 
                     ed.run(Cmd::Backspace { word: false }, now_ms);
                 }
             }
-            Event::Ime(egui::ImeEvent::Commit(t)) if !t.is_empty() => ed.run(Cmd::Type(t), now_ms),
+            Event::Ime(egui::ImeEvent::Commit(t)) => {
+                ed.view.preedit = None;
+                if !t.is_empty() {
+                    ed.run(Cmd::Type(t), now_ms);
+                }
+            }
+            Event::Ime(egui::ImeEvent::Preedit { text, .. }) => ed.view.preedit = (!text.is_empty()).then_some(text),
+            // Some input methods replace what's around the caret, as when a word is corrected.
+            Event::Ime(egui::ImeEvent::DeleteSurrounding { before_chars, after_chars }) => {
+                let p = ed.sels.primary().head;
+                let (s, e) = (p.saturating_sub(before_chars), (p + after_chars).min(ed.buf.len_chars()));
+                if s < e {
+                    ed.sels = SelectionSet::single(Selection::new(s, e));
+                    ed.run(Cmd::Backspace { word: false }, now_ms);
+                }
+            }
+            // While composing, the input method has the keys: Enter, arrows and Backspace work
+            // on what it's composing, not on the text.
+            Event::Key { .. } if ed.view.preedit.is_some() => {}
             Event::Key { key: Key::Z, pressed: true, modifiers, .. } if modifiers.alt && !modifiers.command && !modifiers.shift => shown.toggle_wrap = true,
             // With wrapping, Up and Down go a row at a time, as the text is seen.
             Event::Key { key: key @ (Key::ArrowUp | Key::ArrowDown), pressed: true, modifiers, .. } if m.wrap.is_some() && !modifiers.alt && !modifiers.command => {
