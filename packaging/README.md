@@ -24,7 +24,7 @@ To try the builds without releasing, run the workflow by hand from **Actions > R
 ## What it doesn't do
 
 - **Signing.** Nothing is signed, so Windows SmartScreen and macOS Gatekeeper warn before the first run. On macOS, `xattr -d com.apple.quarantine gitem` after unpacking lets it start. Signing needs certificates as repository secrets.
-- **Store listings** such as winget and Homebrew, which can point at a published release.
+- **Store listings.** `winget/`, `scoop/`, `homebrew/` (a cask, for a tap of the owner's own) and `aur/` (`gitem-bin`) are templates. When a release is published, `.github/workflows/package-manifests.yml` fills them with its version and checksums and attaches them to the release as `gitem-<version>-package-manifests.tar.gz`. Submitting them to winget-pkgs, a Scoop bucket, a Homebrew tap or the AUR is left to a person.
 - **Bundled libraries.** The Linux builds and the AppImage use git, GTK and the graphics libraries already on the system, and nothing registers `gitem://` links or a menu entry; Settings does that on request.
 
 ## Locally

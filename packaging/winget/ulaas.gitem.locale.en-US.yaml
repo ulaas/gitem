@@ -1,0 +1,27 @@
+# Template: rendered by .github/workflows/package-manifests.yml. Placeholders between at signs are filled in.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: ulaas.gitem
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: gitem
+PublisherUrl: https://github.com/ulaas
+PublisherSupportUrl: https://github.com/ulaas/gitem/issues
+PackageName: gitem
+PackageUrl: https://ulaas.github.io/gitem/
+License: MIT
+LicenseUrl: https://github.com/ulaas/gitem/blob/v@VERSION@/LICENSE
+ShortDescription: A fast desktop Git client with a commit graph, a repo-aware editor, and its own diff and merge tools.
+Description: |-
+  gitem is a desktop Git client written in Rust with egui. It does everything through the git you
+  already have (2.38 or newer), and every command it runs is shown in its Console.
+Moniker: gitem
+Tags:
+  - git
+  - git-client
+  - git-gui
+  - diff
+  - merge
+  - rust
+ReleaseNotesUrl: https://github.com/ulaas/gitem/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

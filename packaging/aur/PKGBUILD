@@ -1,0 +1,46 @@
+# Template: rendered by .github/workflows/package-manifests.yml. Placeholders between at signs are filled in.
+# Maintainer: ulaas <https://github.com/ulaas>
+pkgname=gitem-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='A fast desktop Git client with a commit graph, a repo-aware editor, and its own diff and merge tools'
+arch=('x86_64' 'aarch64')
+url='https://ulaas.github.io/gitem/'
+license=('MIT')
+# gitem runs the system's git (2.38 or newer); the windowing and graphics libraries come from the system too.
+depends=('git' 'gcc-libs' 'glibc' 'libxkbcommon' 'wayland')
+optdepends=('vulkan-icd-loader: Vulkan rendering'
+            'mesa: OpenGL rendering'
+            'libx11: X11 sessions'
+            'libxcursor: X11 sessions'
+            'libxrandr: X11 sessions'
+            'libxi: X11 sessions'
+            'xdg-desktop-portal: file dialogs'
+            'libnotify: system notifications')
+provides=('gitem')
+conflicts=('gitem')
+options=('!strip' '!debug')
+_base="https://github.com/ulaas/gitem/releases/download/v${pkgver}"
+_raw="https://raw.githubusercontent.com/ulaas/gitem/v${pkgver}/packaging/linux"
+source=("gitem-${pkgver}.desktop::${_raw}/gitem.desktop"
+        "gitem-${pkgver}.png::${_raw}/gitem.png")
+source_x86_64=("${_base}/gitem-${pkgver}-linux-x64.tar.gz")
+source_aarch64=("${_base}/gitem-${pkgver}-linux-arm64.tar.gz")
+sha256sums=('@SHA256_DESKTOP@'
+            '@SHA256_ICON@')
+sha256sums_x86_64=('@SHA256_LINUX_X64_TGZ@')
+sha256sums_aarch64=('@SHA256_LINUX_ARM64_TGZ@')
+
+package() {
+    local dir
+    case "$CARCH" in
+        x86_64) dir="gitem-${pkgver}-linux-x64" ;;
+        aarch64) dir="gitem-${pkgver}-linux-arm64" ;;
+    esac
+    install -Dm755 "${dir}/gitem" "${pkgdir}/usr/bin/gitem"
+    install -Dm644 "${dir}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm644 "${dir}/THIRD-PARTY-NOTICES.md" "${pkgdir}/usr/share/licenses/${pkgname}/THIRD-PARTY-NOTICES.md"
+    install -Dm644 "${dir}/README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+    install -Dm644 "gitem-${pkgver}.desktop" "${pkgdir}/usr/share/applications/gitem.desktop"
+    install -Dm644 "gitem-${pkgver}.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/gitem.png"
+}

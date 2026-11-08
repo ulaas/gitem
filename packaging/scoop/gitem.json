@@ -1,0 +1,42 @@
+{
+    "version": "@VERSION@",
+    "description": "A fast desktop Git client with a commit graph, a repo-aware editor, and its own diff and merge tools.",
+    "homepage": "https://ulaas.github.io/gitem/",
+    "license": "MIT",
+    "depends": "git",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/ulaas/gitem/releases/download/v@VERSION@/gitem-@VERSION@-windows-x64.zip",
+            "hash": "@SHA256_WINDOWS_X64_ZIP@",
+            "extract_dir": "gitem-@VERSION@-windows-x64"
+        },
+        "arm64": {
+            "url": "https://github.com/ulaas/gitem/releases/download/v@VERSION@/gitem-@VERSION@-windows-arm64.zip",
+            "hash": "@SHA256_WINDOWS_ARM64_ZIP@",
+            "extract_dir": "gitem-@VERSION@-windows-arm64"
+        }
+    },
+    "bin": "gitem.exe",
+    "shortcuts": [
+        [
+            "gitem.exe",
+            "gitem"
+        ]
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/ulaas/gitem/releases/download/v$version/gitem-$version-windows-x64.zip",
+                "extract_dir": "gitem-$version-windows-x64"
+            },
+            "arm64": {
+                "url": "https://github.com/ulaas/gitem/releases/download/v$version/gitem-$version-windows-arm64.zip",
+                "extract_dir": "gitem-$version-windows-arm64"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/SHA256SUMS"
+        }
+    }
+}

@@ -1,0 +1,7 @@
+# Template: rendered by .github/workflows/package-manifests.yml. Placeholders between at signs are filled in.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
+PackageIdentifier: ulaas.gitem
+PackageVersion: @VERSION@
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.9.0

@@ -1,0 +1,28 @@
+# Template: rendered by .github/workflows/package-manifests.yml. Placeholders between at signs are filled in.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: ulaas.gitem
+PackageVersion: @VERSION@
+MinimumOSVersion: 10.0.17763.0
+ReleaseDate: @RELEASE_DATE@
+Installers:
+  # packaging/windows/gitem.iss: per-user, no administrator rights.
+  - Architecture: x64
+    InstallerType: inno
+    Scope: user
+    InstallerUrl: https://github.com/ulaas/gitem/releases/download/v@VERSION@/gitem-@VERSION@-windows-x64-setup.exe
+    InstallerSha256: @SHA256_WINDOWS_X64_SETUP@
+    ProductCode: '{6E3B0B58-6E0C-4C5E-9E0F-5F6B7A3D2C11}_is1'
+    UpgradeBehavior: install
+    Protocols:
+      - gitem
+  # No installer is built for Arm64: the plain zip, as a portable app.
+  - Architecture: arm64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: gitem-@VERSION@-windows-arm64\gitem.exe
+        PortableCommandAlias: gitem
+    InstallerUrl: https://github.com/ulaas/gitem/releases/download/v@VERSION@/gitem-@VERSION@-windows-arm64.zip
+    InstallerSha256: @SHA256_WINDOWS_ARM64_ZIP@
+ManifestType: installer
+ManifestVersion: 1.9.0

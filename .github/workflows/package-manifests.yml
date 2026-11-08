@@ -1,0 +1,85 @@
+name: Package manifests
+
+# When a release is published: fills the templates in packaging/ (winget, Scoop, Homebrew cask,
+# AUR gitem-bin) with the release's version and the checksums of its files, and attaches them to the
+# release as gitem-<version>-package-manifests.tar.gz. It submits nothing anywhere: a person takes the
+# files to winget-pkgs, a Scoop bucket, a Homebrew tap and the AUR.
+# Run by hand with a tag to make them again for a release that's already out.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag, such as v0.6.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  manifests:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+
+      - name: Version from the tag
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::$TAG isn't a version tag such as v1.2.3"; exit 1 ;;
+          esac
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Download the release's files and check them against SHA256SUMS
+        run: |
+          mkdir -p assets
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D assets -p "gitem-$VERSION-*" -p SHA256SUMS
+          cd assets
+          sha256sum -c SHA256SUMS --ignore-missing
+          for f in "gitem-$VERSION-windows-x64-setup.exe" "gitem-$VERSION-windows-x64.zip" \
+                   "gitem-$VERSION-windows-arm64.zip" "gitem-$VERSION-linux-x64.tar.gz" \
+                   "gitem-$VERSION-linux-arm64.tar.gz" "gitem-$VERSION-macos-universal.tar.gz"; do
+            [ -f "$f" ] || { echo "::error::The release has no $f"; exit 1; }
+          done
+
+      - name: Fill the templates
+        run: |
+          sum() { sha256sum "$1" | cut -d ' ' -f 1; }
+          date="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json publishedAt --jq '.publishedAt[0:10]')"
+          [ -n "$date" ] && [ "$date" != "null" ] || date="$(date -u +%F)"
+          out="gitem-$VERSION-package-manifests"
+          mkdir -p "$out/winget/manifests/u/ulaas/gitem/$VERSION" "$out/scoop" "$out/homebrew/Casks" "$out/aur"
+          cp packaging/winget/*.yaml "$out/winget/manifests/u/ulaas/gitem/$VERSION/"
+          cp packaging/scoop/gitem.json "$out/scoop/"
+          cp packaging/homebrew/gitem.rb "$out/homebrew/Casks/"
+          cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO "$out/aur/"
+          find "$out" -type f -exec sed -i \
+            -e "s/@VERSION@/$VERSION/g" \
+            -e "s/@RELEASE_DATE@/$date/g" \
+            -e "s/@SHA256_WINDOWS_X64_SETUP@/$(sum "assets/gitem-$VERSION-windows-x64-setup.exe")/g" \
+            -e "s/@SHA256_WINDOWS_X64_ZIP@/$(sum "assets/gitem-$VERSION-windows-x64.zip")/g" \
+            -e "s/@SHA256_WINDOWS_ARM64_ZIP@/$(sum "assets/gitem-$VERSION-windows-arm64.zip")/g" \
+            -e "s/@SHA256_LINUX_X64_TGZ@/$(sum "assets/gitem-$VERSION-linux-x64.tar.gz")/g" \
+            -e "s/@SHA256_LINUX_ARM64_TGZ@/$(sum "assets/gitem-$VERSION-linux-arm64.tar.gz")/g" \
+            -e "s/@SHA256_MACOS_UNIVERSAL_TGZ@/$(sum "assets/gitem-$VERSION-macos-universal.tar.gz")/g" \
+            -e "s/@SHA256_DESKTOP@/$(sum packaging/linux/gitem.desktop)/g" \
+            -e "s/@SHA256_ICON@/$(sum packaging/linux/gitem.png)/g" \
+            {} +
+          # Winget wants no template comment; the others keep theirs harmlessly, but drop it everywhere.
+          find "$out" -type f -exec sed -i '/^# Template: rendered by/d' {} +
+          if grep -rnE '@[A-Z0-9_]+@' "$out"; then echo "::error::A placeholder was left unfilled"; exit 1; fi
+          python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$out/scoop/gitem.json"
+          tar -czf "$out.tar.gz" "$out"
+          find "$out" -type f -print -exec cat {} \;
+          echo "ARCHIVE=$out.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Attach them to the release
+        run: gh release upload "$TAG" "$ARCHIVE" -R "$GITHUB_REPOSITORY" --clobber
