@@ -1,7 +1,7 @@
 ; Inno Setup script for gitem's Windows installer. Built by packaging/windows/build.ps1, which passes
 ; the version, so it's kept in Cargo.toml alone:
 ;
-;   iscc /DAppVersion=0.5.2 /DSourceExe=path\to\gitem.exe packaging\windows\gitem.iss
+;   iscc /DAppVersion=0.6.0 /DSourceExe=path\to\gitem.exe packaging\windows\gitem.iss
 ;
 ; It installs for the current user only and asks for no administrator rights. It writes under
 ; %LOCALAPPDATA%\Programs\gitem, the user's Start Menu and HKCU. The Explorer entry and the PATH
