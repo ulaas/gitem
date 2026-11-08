@@ -138,7 +138,13 @@ impl EditorView {
             let bytes = repo.worktree_file(&path).map_err(|e| e.to_string())?;
             let h = hash(&bytes);
             Ok(match Buffer::from_bytes(&bytes) {
-                Ok(b) => Opened::Text(b, h),
+                Ok(mut b) => {
+                    // No line break to go by: git's settings for the file decide.
+                    if !b.eol_was_found() {
+                        b.eol = if repo.crlf_for(&path) { LineEnding::CrLf } else { LineEnding::Lf };
+                    }
+                    Opened::Text(b, h)
+                }
                 Err(why) => Opened::Unsupported(why, bytes),
             })
         });

@@ -350,3 +350,42 @@ fn a_checkout_waits_for_unsaved_edits_and_a_fetch_does_not() {
     assert!(String::from_utf8(f.read("b.txt")).unwrap().contains("edit "), "saved first");
     assert_eq!(f.git(&["branch", "--show-current"]).trim(), "other");
 }
+
+#[test]
+fn an_empty_file_takes_its_line_endings_from_gitattributes() {
+    let f = Fx::new();
+    f.write_bytes(".gitattributes", b"*.txt text eol=crlf\n");
+    f.write_bytes("new.txt", b"");
+    f.write_bytes("new.md", b"");
+    let mut h = harness(&f, true);
+    settle(&mut h);
+    for path in ["new.txt", "new.md"] {
+        open_in_editor(&mut h, path);
+        h.event(Event::Text("a".into()));
+        h.key_press(Key::Enter);
+        h.event(Event::Text("b".into()));
+        h.key_press_modifiers(Modifiers::COMMAND, Key::S);
+        settle(&mut h);
+    }
+    assert_eq!(f.read("new.txt"), b"a\r\nb");
+    assert_eq!(f.read("new.md"), b"a\nb", "core.autocrlf is false here, and nothing else says CRLF");
+}
+
+#[test]
+fn a_file_with_conflicts_opens_where_they_are_resolved() {
+    let f = Fx::new();
+    f.git(&["checkout", "-q", "-b", "side"]);
+    f.write_bytes("b.txt", b"side\n");
+    f.git(&["commit", "-q", "-am", "side"]);
+    f.git(&["checkout", "-q", "main"]);
+    f.write_bytes("b.txt", b"main\n");
+    f.git(&["commit", "-q", "-am", "main"]);
+    let _ = f.git.run(Some(&f.root), &["merge", "side"]);
+    let mut h = harness(&f, true);
+    settle(&mut h);
+    files_sidebar(&mut h);
+    tree_row(&h, "b.txt");
+    settle(&mut h);
+    assert!(editors(&h).is_empty());
+    assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Merge(_))));
+}

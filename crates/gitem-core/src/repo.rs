@@ -610,6 +610,28 @@ impl Repo {
         std::fs::File::open(self.root.join(path)).and_then(|mut f| f.read(&mut head)).is_ok_and(|n| crate::util::is_binary(&head[..n]) && !crate::util::has_utf16_bom(&head[..n]))
     }
 
+    /// Whether a new line in this file should end in CRLF, as git would write it out: from
+    /// `.gitattributes` first, then `core.eol` and `core.autocrlf`. For a file with no lines yet
+    /// to tell by.
+    pub fn crlf_for(&self, path: &str) -> bool {
+        let attrs = self.run(&["check-attr", "eol", "text", "--", path]).map(|o| o.text()).unwrap_or_default();
+        let attr = |name: &str| attrs.lines().find_map(|l| l.rsplit_once(&format!(": {name}: ")).map(|(_, v)| v.trim().to_string()));
+        match attr("eol").as_deref() {
+            Some("crlf") => return true,
+            Some("lf") => return false,
+            _ => {}
+        }
+        if attr("text").as_deref() == Some("unset") {
+            return false;
+        }
+        match self.config_get("core.eol").as_deref() {
+            Some("crlf") => return true,
+            Some("lf") => return false,
+            _ => {}
+        }
+        self.config_get("core.autocrlf").as_deref() == Some("true")
+    }
+
     /// Whether the index has this path, so its text there is the file's staged version.
     pub fn is_tracked(&self, path: &str) -> bool {
         self.run(&["ls-files", "-z", "--", path]).is_ok_and(|o| !o.stdout.is_empty())
