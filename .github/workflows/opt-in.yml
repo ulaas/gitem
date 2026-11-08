@@ -4,7 +4,8 @@ name: Opt-in tests
 
 on:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 3 * * *"   # daily: everything but busy-machine
+    - cron: "0 4 * * 0"   # weekly, Sundays: busy-machine
   workflow_dispatch:
 
 permissions:
@@ -12,6 +13,7 @@ permissions:
 
 jobs:
   windows:
+    if: github.event.schedule != '0 4 * * 0'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -23,6 +25,7 @@ jobs:
         run: cargo test -p gitem --locked --test real_git_windows --test http_auth --test helper_modes -- --ignored --test-threads=1
 
   properties:
+    if: github.event.schedule != '0 4 * * 0'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -38,8 +41,8 @@ jobs:
           PROPTEST_CASES: "1000"
 
   busy-machine:
-    # Takes minutes with every core busy, so it runs weekly and on its own.
-    if: github.event.schedule == '' || github.run_number % 7 == 0
+    # Takes minutes with every core busy, so it runs weekly and on its own, or when asked.
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 4 * * 0'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -53,6 +56,7 @@ jobs:
   gitea:
     # The hosting client against a real Gitea, which the mock in http_clients.rs can't stand in
     # for. The test only talks to localhost and makes and deletes its own repository.
+    if: github.event.schedule != '0 4 * * 0'
     runs-on: ubuntu-latest
     services:
       gitea:
