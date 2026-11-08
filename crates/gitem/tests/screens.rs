@@ -855,3 +855,295 @@ fn draw_screens() {
     scene_set(&Out { dir: dir.clone(), theme: "dark" }, ThemeChoice::Dark);
     scene_set(&Out { dir, theme: "light" }, ThemeChoice::Light);
 }
+
+// ---- pictures for the project's website ---------------------------------------------------
+//
+// A made-up project, "starforge", with made-up people and dates, so nothing in these pictures
+// comes from the machine that draws them: no paths, names or accounts. Opt-in like the rest:
+//
+//   SITE_SHOTS_OUT=docs/assets/screens cargo test -p gitem --test screens draw_site_screens -- --ignored
+
+const PEOPLE: [(&str, &str); 4] = [("Mara Voss", "mara@example.com"), ("Jin Park", "jin@example.com"), ("Theo Okafor", "theo@example.com"), ("Lena Fischer", "lena@example.com")];
+
+struct Demo {
+    git: GitExe,
+    root: PathBuf,
+    /// Seconds before now of the next commit, counting down.
+    ago: std::cell::Cell<i64>,
+}
+
+impl Demo {
+    fn git(&self, who: usize, args: &[&str]) -> String {
+        let (name, email) = PEOPLE[who];
+        let when = format!("{} +0000", chrono_now() - self.ago.get());
+        let out = std::process::Command::new(&self.git.path)
+            .current_dir(&self.root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email)
+            .env("GIT_AUTHOR_DATE", &when)
+            .env("GIT_COMMITTER_DATE", &when)
+            .output()
+            .unwrap();
+        assert!(out.status.success() || args.first() == Some(&"merge"), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+    fn write(&self, path: &str, text: &str) {
+        let p = self.root.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    /// A commit by `who`, `hours` after the last one.
+    fn commit(&self, who: usize, hours: i64, message: &str) {
+        self.ago.set(self.ago.get() - hours * 3600);
+        self.git(who, &["add", "-A"]);
+        self.git(who, &["commit", "-q", "-m", message]);
+    }
+    fn merge(&self, who: usize, hours: i64, branch: &str) {
+        self.ago.set(self.ago.get() - hours * 3600);
+        self.git(who, &["merge", "-q", "--no-ff", branch, "-m", &format!("Merge branch '{branch}'")]);
+    }
+}
+
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+const PHYSICS: &str = "//! Collision: a uniform grid for the broad phase, swept tests for anything fast.
+
+use crate::math::{Aabb, Vec2};
+
+/// Cells a little larger than the biggest common body.
+pub const CELL: f32 = 64.0;
+/// Bodies faster than this per step are swept, so they can't pass through walls.
+pub const SWEEP_SPEED: f32 = 24.0;
+
+pub struct Body {
+    pub pos: Vec2,
+    pub vel: Vec2,
+    pub bounds: Aabb,
+    pub mass: f32,
+}
+
+pub struct World {
+    bodies: Vec<Body>,
+    grid: Grid,
+}
+
+impl World {
+    pub fn step(&mut self, dt: f32) {
+        for body in &mut self.bodies {
+            body.vel.y -= 9.81 * dt;
+            body.pos += body.vel * dt;
+        }
+        self.grid.rebuild(&self.bodies);
+        for (a, b) in self.grid.pairs() {
+            resolve(&mut self.bodies, a, b);
+        }
+    }
+}
+
+fn resolve(bodies: &mut [Body], a: usize, b: usize) {
+    let overlap = bodies[a].bounds.overlap(&bodies[b].bounds);
+    if overlap.length() == 0.0 {
+        return;
+    }
+    let total = bodies[a].mass + bodies[b].mass;
+    let push = overlap * (bodies[b].mass / total);
+    bodies[a].pos -= push;
+    bodies[b].pos += overlap - push;
+}
+";
+
+fn build_demo(git: &GitExe, root: &Path) -> Demo {
+    std::fs::create_dir_all(root).unwrap();
+    // The hours between the commits below add up to 249: the newest is a few hours old.
+    let d = Demo { git: git.clone(), root: root.to_path_buf(), ago: std::cell::Cell::new((249 + 3) * 3600) };
+    d.git(0, &["init", "-q", "-b", "main"]);
+    d.git(0, &["config", "core.autocrlf", "false"]);
+    d.write("Cargo.toml", "[package]\nname = \"starforge\"\nversion = \"0.1.0\"\nedition = \"2024\"\n");
+    d.write("README.md", "# starforge\n\nA small, loud 2D game engine.\n");
+    d.write("src/main.rs", "mod game_loop;\nmod math;\nmod physics;\nmod render;\n\nfn main() {\n    game_loop::run(60);\n}\n");
+    d.write("src/math.rs", "pub use glam::Vec2;\n\npub struct Aabb {\n    pub min: Vec2,\n    pub max: Vec2,\n}\n");
+    d.commit(0, 0, "Initial engine skeleton");
+    d.write("src/game_loop.rs", "/// A fixed-step loop: physics at a steady rate, drawing as fast as the screen allows.\npub fn run(hz: u32) {\n    let step = 1.0 / hz as f32;\n    let mut acc = 0.0;\n    loop {\n        acc += frame_time();\n        while acc >= step {\n            update(step);\n            acc -= step;\n        }\n        draw(acc / step);\n    }\n}\n");
+    d.commit(0, 20, "Add a fixed-step game loop");
+    d.write("src/render.rs", "/// Sprites are drawn in batches, one per texture, sorted by layer.\npub struct Batch {\n    pub texture: u32,\n    pub quads: Vec<Quad>,\n}\n\npub fn draw(batches: &mut [Batch]) {\n    batches.sort_by_key(|b| b.texture);\n    for b in batches.iter() {\n        submit(b);\n    }\n}\n");
+    d.commit(1, 26, "Renderer: batch sprites by texture");
+    d.write("src/physics.rs", &PHYSICS.replace("/// Bodies faster than this per step are swept, so they can't pass through walls.\npub const SWEEP_SPEED: f32 = 24.0;\n", ""));
+    d.commit(2, 30, "Physics: broad phase with a uniform grid");
+    d.git(0, &["tag", "v0.1.0"]);
+
+    d.git(3, &["switch", "-q", "-c", "feature/particles"]);
+    d.write("src/particles.rs", "pub struct Emitter {\n    pub rate: f32,\n    pub life: f32,\n    pool: Vec<Particle>,\n}\n");
+    d.commit(3, 18, "Particles: emitter and pool");
+    d.write("src/particles.rs", "pub struct Emitter {\n    pub rate: f32,\n    pub life: f32,\n    pub spin: f32,\n    pool: Vec<Particle>,\n}\n\nimpl Emitter {\n    /// Fades and spins each particle over its lifetime.\n    pub fn update(&mut self, dt: f32) {\n        for p in &mut self.pool {\n            p.age += dt;\n            p.alpha = 1.0 - p.age / self.life;\n            p.angle += self.spin * dt;\n        }\n    }\n}\n");
+    d.commit(3, 9, "Particles: fade and spin over their lifetime");
+    d.git(0, &["switch", "-q", "main"]);
+    d.write("src/physics.rs", PHYSICS);
+    d.commit(2, 5, "Fix tunnelling at high speed");
+    d.merge(0, 14, "feature/particles");
+    d.write("src/audio.rs", "/// Music streams from disk; switching tracks crossfades over `fade` seconds.\npub struct Music {\n    pub fade: f32,\n}\n");
+    d.commit(1, 22, "Audio: streaming music with crossfade");
+    d.write("Cargo.toml", "[package]\nname = \"starforge\"\nversion = \"0.9.0\"\nedition = \"2024\"\n");
+    d.commit(0, 6, "Bump version to 0.9.0");
+    d.git(0, &["tag", "v0.9.0"]);
+
+    d.git(3, &["switch", "-q", "-c", "fix/stick-deadzone"]);
+    d.write("src/input.rs", "/// A radial deadzone: small stick movements are ignored in every direction alike.\npub fn deadzone(x: f32, y: f32, r: f32) -> (f32, f32) {\n    let len = (x * x + y * y).sqrt();\n    if len < r { (0.0, 0.0) } else { (x, y) }\n}\n");
+    d.commit(3, 11, "Input: radial deadzone for analog sticks");
+    d.git(0, &["switch", "-q", "main"]);
+    d.write("src/render.rs", "/// Sprites are drawn in batches, one per texture, sorted by layer.\npub struct Batch {\n    pub texture: u32,\n    pub quads: Vec<Quad>,\n}\n\npub fn draw(batches: &mut [Batch]) {\n    batches.sort_by_key(|b| b.texture);\n    for b in batches.iter() {\n        submit(b);\n    }\n    bloom::apply(0.8);\n}\n");
+    d.commit(1, 16, "Renderer: HDR bloom pass");
+    d.write("README.md", "# starforge\n\nA small, loud 2D game engine.\n\n## Building on Linux\n\nInstall the ALSA and Vulkan headers, then `cargo run --release`.\n");
+    d.commit(3, 4, "Docs: building on Linux");
+    d.merge(0, 20, "fix/stick-deadzone");
+    d.write("Cargo.toml", "[package]\nname = \"starforge\"\nversion = \"1.0.0\"\nedition = \"2024\"\n");
+    d.commit(0, 8, "Release 1.0");
+    d.git(0, &["tag", "-a", "v1.0.0", "-m", "starforge 1.0"]);
+    let released = d.git(0, &["rev-parse", "HEAD"]);
+    d.write("src/weapons.rs", "/// Rockets are swept bodies: fast enough to need it.\npub struct Rocket {\n    pub speed: f32,\n    pub blast: f32,\n}\n");
+    d.commit(2, 30, "Physics: continuous collision for projectiles");
+
+    d.git(1, &["switch", "-q", "-c", "feature/shaders"]);
+    d.write("src/shaders.rs", "/// Shaders reload from disk when they change, and report compile errors in the game.\npub fn watch(dir: &str) {}\n");
+    d.commit(1, 7, "Shaders: hot reload from disk");
+    d.write("src/shaders.rs", "/// Shaders reload from disk when they change, and report compile errors in the game.\npub fn watch(dir: &str) {\n    for change in notify(dir) {\n        if let Err(e) = compile(&change) {\n            overlay::error(&e);\n        }\n    }\n}\n");
+    d.commit(1, 3, "Shaders: show compile errors in-game");
+    d.git(0, &["switch", "-q", "main"]);
+    // Where a teammate's clone would be: one commit behind. Never fetched.
+    d.git(0, &["remote", "add", "origin", "https://example.com/starforge/engine.git"]);
+    d.git(0, &["update-ref", "refs/remotes/origin/main", &released]);
+    d.git(0, &["branch", "-q", "--set-upstream-to=origin/main", "main"]);
+    d
+}
+
+fn site_harness(git: &GitExe, root: &Path, tweak: impl FnOnce(&mut Settings)) -> Harness<'static, GitemApp> {
+    let mut settings = Settings { details_on_open: true, theme: ThemeChoice::Black, accent: "Amber".into(), ..Default::default() };
+    tweak(&mut settings);
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, settings);
+    app.git = Ok(git.clone());
+    let root = root.to_path_buf();
+    let mut opened = false;
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(5);
+    let mut h = builder.build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                gitem::theme::install_fonts(&c);
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    );
+    let t = Instant::now();
+    while !h.state().repos.first().is_some_and(|r| r.data.status.get().is_some() && r.data.refs.get().is_some()) {
+        h.step();
+        assert!(t.elapsed() < PATIENCE, "the repository never loaded");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    quiet(&mut h);
+    settle_a_moment(&mut h);
+    quiet(&mut h);
+    h
+}
+
+fn site_save(h: &mut Harness<GitemApp>, dir: &Path, name: &str) {
+    h.step();
+    let img = h.render().expect("wgpu render");
+    let path = dir.join(format!("{name}.png"));
+    img.save(&path).unwrap();
+    eprintln!("wrote {}", path.display());
+}
+
+fn hover_row(h: &mut Harness<GitemApp>, label: &str) {
+    let at = h.get_all_by_label(label).max_by(|a, b| a.rect().width().total_cmp(&b.rect().width())).unwrap().rect().center();
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.step();
+}
+
+#[test]
+#[ignore = "writes the website's pictures: set SITE_SHOTS_OUT"]
+fn draw_site_screens() {
+    let dir = PathBuf::from(std::env::var("SITE_SHOTS_OUT").expect("SITE_SHOTS_OUT"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = GitExe::discover(None).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let top = tmp.path().canonicalize().unwrap();
+
+    // The graph, with the newest commit's details.
+    let root = top.join("starforge");
+    let d = build_demo(&git, &root);
+    {
+        let mut h = site_harness(&git, &root, |_| {});
+        open(&mut h, Tab::graph());
+        quiet(&mut h);
+        site_save(&mut h, &dir, "graph");
+    }
+
+    // Work in progress: Changes as a tree, a diff beside it, and a row's buttons under the pointer.
+    d.write("src/physics.rs", &PHYSICS.replace("pub const CELL: f32 = 64.0;", "pub const CELL: f32 = 96.0;").replace("            body.vel.y -= 9.81 * dt;\n", "            body.vel.y -= GRAVITY * dt;\n            body.vel *= 1.0 - DRAG * dt;\n"));
+    d.write("src/render.rs", "/// Sprites are drawn in batches, one per texture, sorted by layer.\npub struct Batch {\n    pub texture: u32,\n    pub layer: i32,\n    pub quads: Vec<Quad>,\n}\n\npub fn draw(batches: &mut [Batch]) {\n    batches.sort_by_key(|b| (b.layer, b.texture));\n    for b in batches.iter() {\n        submit(b);\n    }\n    bloom::apply(0.8);\n}\n");
+    d.write("src/weapons/railgun.rs", "/// Charges for `charge` seconds, then hits everything on its line.\npub struct Railgun {\n    pub charge: f32,\n}\n");
+    {
+        let mut h = site_harness(&git, &root, |s| s.changes_tree = true);
+        open(&mut h, Tab::changes());
+        quiet(&mut h);
+        let row = h.get_all_by_label("src/physics.rs").max_by(|a, b| a.rect().width().total_cmp(&b.rect().width())).unwrap();
+        row.click();
+        quiet(&mut h);
+        settle_a_moment(&mut h);
+        quiet(&mut h);
+        hover_row(&mut h, "src/render.rs");
+        site_save(&mut h, &dir, "changes");
+    }
+
+    // IDE mode: the editor with its change marks, the Files tree and Changes beside it.
+    {
+        let mut h = site_harness(&git, &root, |s| s.ide_mode = true);
+        open(&mut h, Tab::editor("src/physics.rs", Some(22), true));
+        let ctx = h.ctx.clone();
+        h.state_mut().apply_action(&ctx, gitem::action::Action::Layout(gitem::layouts::Preset::Ide));
+        quiet(&mut h);
+        settle_a_moment(&mut h);
+        quiet(&mut h);
+        site_save(&mut h, &dir, "editor");
+    }
+
+    // A side-by-side diff.
+    {
+        let mut h = site_harness(&git, &root, |_| {});
+        open(&mut h, Tab::diff(DiffSource::Unstaged, Some("src/physics.rs".into())));
+        quiet(&mut h);
+        click(&mut h, "Side by side");
+        // The pointer away from the button it just pressed.
+        h.event(egui::Event::PointerGone);
+        quiet(&mut h);
+        site_save(&mut h, &dir, "diff");
+    }
+
+    // A merge conflict, in the merge tool.
+    let conflict = top.join("starforge-merge");
+    let c = build_demo(&git, &conflict);
+    c.git(2, &["switch", "-q", "-c", "tune/gravity"]);
+    c.write("src/physics.rs", &PHYSICS.replace("            body.vel.y -= 9.81 * dt;\n", "            body.vel.y -= 12.0 * dt; // snappier jumps\n").replace("pub const CELL: f32 = 64.0;", "pub const CELL: f32 = 48.0;"));
+    c.commit(2, 2, "Gravity: snappier jumps");
+    c.git(0, &["switch", "-q", "main"]);
+    c.write("src/physics.rs", &PHYSICS.replace("            body.vel.y -= 9.81 * dt;\n", "            body.vel.y -= self.gravity * dt;\n").replace("pub const CELL: f32 = 64.0;", "pub const CELL: f32 = 80.0;"));
+    c.commit(0, 1, "Gravity per world, for low-gravity levels");
+    c.git(0, &["merge", "tune/gravity"]);
+    {
+        let mut h = site_harness(&git, &conflict, |_| {});
+        open(&mut h, Tab::merge("src/physics.rs"));
+        quiet(&mut h);
+        wait_for(&mut h, "Take");
+        quiet(&mut h);
+        site_save(&mut h, &dir, "merge");
+    }
+}

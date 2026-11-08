@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gitem — the Git client that doesn't back down</title>
+  <meta name="description" content="gitem is a fast, native Git client for Windows, macOS and Linux: a commit graph, a repo-aware editor, and its own diff and merge tools. Free and open source.">
+  <meta name="theme-color" content="#0b0705">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <meta property="og:title" content="gitem — the Git client that doesn't back down">
+  <meta property="og:description" content="A fast, native Git client with a commit graph, a repo-aware editor, and its own diff and merge tools.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://ulaas.github.io/gitem/assets/screens/graph.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script>document.documentElement.classList.add('js')</script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav" id="top">
+    <a class="nav-brand" href="#top" aria-label="gitem, back to top">
+      <img src="assets/logo.svg" alt="" width="34" height="34">
+      <span>GITEM</span>
+    </a>
+    <nav aria-label="Sections">
+      <ul>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#arsenal">Arsenal</a></li>
+        <li><a href="#safety">Safety</a></li>
+        <li><a href="#get">Get it</a></li>
+        <li><a class="nav-gh" href="https://github.com/ulaas/gitem">GitHub</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <div class="embers" aria-hidden="true"></div>
+      <div class="hero-inner">
+        <img class="hero-logo" src="assets/logo.svg" alt="" width="148" height="148">
+        <h1 id="hero-title" class="wordmark" data-text="GITEM">GITEM</h1>
+        <p class="hero-kicker">Rip through history. Crush merge conflicts. Ship.</p>
+        <p class="hero-lede">A fast, native Git client with a commit graph, a repo-aware editor, and its own diff and merge tools. For Windows, macOS and Linux. Free and open source.</p>
+        <div class="hero-cta">
+          <a class="btn btn-hot" href="#get">Get gitem</a>
+          <a class="btn btn-steel" href="https://github.com/ulaas/gitem">View the source</a>
+        </div>
+      </div>
+      <figure class="hero-shot reveal" data-reveal="rise">
+        <div class="bezel">
+          <img src="assets/screens/graph.png" width="1440" height="900" alt="gitem's commit graph: branches and merges drawn as coloured lanes, tag and branch badges, authors and dates, with the selected commit's details in a side panel.">
+        </div>
+      </figure>
+    </section>
+
+    <div class="ticker" aria-hidden="true">
+      <div class="ticker-track">
+        <span>GRAPH</span><span>STAGE</span><span>EDIT</span><span>DIFF</span><span>MERGE</span><span>REBASE</span><span>BISECT</span><span>UNDO</span><span>SHIP</span>
+        <span>GRAPH</span><span>STAGE</span><span>EDIT</span><span>DIFF</span><span>MERGE</span><span>REBASE</span><span>BISECT</span><span>UNDO</span><span>SHIP</span>
+      </div>
+    </div>
+
+    <section id="features" class="features" aria-labelledby="features-title">
+      <h2 id="features-title" class="section-title reveal">Built for the <em>heavy lifting</em></h2>
+
+      <article class="feature reveal" data-reveal="left">
+        <div class="feature-text">
+          <p class="feature-tag">01 · History</p>
+          <h3>Every branch. Every merge. Laid bare.</h3>
+          <p>A commit graph with lanes you can fold, badges for branches and tags, search with highlights and a minimap. Columns you drag, resize and hide. Click a commit and its details, files and diff are right there.</p>
+        </div>
+        <figure class="feature-shot">
+          <div class="bezel"><img src="assets/screens/graph.png" width="1440" height="900" loading="lazy" alt="The commit graph with feature branches merged back into main, release tags, and a remote branch one commit behind."></div>
+        </figure>
+      </article>
+
+      <article class="feature feature-flip reveal" data-reveal="right">
+        <div class="feature-text">
+          <p class="feature-tag">02 · Changes</p>
+          <h3>Stage with surgical precision.</h3>
+          <p>Files, diff and commit message on one screen. Stage a whole file, one hunk or a single line. Point at a file and it offers what you'd do next: open it, throw the change away, or stage it. Split work into several commits with the Composer.</p>
+        </div>
+        <figure class="feature-shot">
+          <div class="bezel"><img src="assets/screens/changes.png" width="1440" height="900" loading="lazy" alt="The Changes view: changed files as a tree, buttons to open, discard or stage on the row under the pointer, a diff beside the list and the commit box below."></div>
+        </figure>
+      </article>
+
+      <article class="feature reveal" data-reveal="left">
+        <div class="feature-text">
+          <p class="feature-tag">03 · IDE mode</p>
+          <h3>Edit right where you commit.</h3>
+          <p>Flip on IDE mode and the Files tree opens files for editing: syntax colours, several carets, find and replace, folding and an outline. It knows the repository. Marks beside each line show what changed, and one change at a time can be staged or reverted from the gutter.</p>
+        </div>
+        <figure class="feature-shot">
+          <div class="bezel"><img src="assets/screens/editor.png" width="1440" height="900" loading="lazy" alt="IDE mode: a source file open in the editor with change marks in the gutter and the current line's blame, the Files tree on the left and Changes on the right."></div>
+        </figure>
+      </article>
+
+      <article class="feature feature-flip reveal" data-reveal="right">
+        <div class="feature-text">
+          <p class="feature-tag">04 · Diff</p>
+          <h3>Diffs that don't flinch.</h3>
+          <p>Side by side or unified, with the words that changed picked out, syntax colours and image comparison. Stage or discard right from the diff. It also works as git's own difftool.</p>
+        </div>
+        <figure class="feature-shot">
+          <div class="bezel"><img src="assets/screens/diff.png" width="1440" height="900" loading="lazy" alt="A side-by-side diff with removed and added lines and the changed words highlighted, with Stage hunk and Discard hunk buttons."></div>
+        </figure>
+      </article>
+
+      <article class="feature reveal" data-reveal="left">
+        <div class="feature-text">
+          <p class="feature-tag">05 · Merge</p>
+          <h3>Merge conflicts? Handled.</h3>
+          <p>Ours, the result and theirs, side by side, scrolling together. Take a side, take both, or edit the result by hand, one conflict at a time. Your own edits are never thrown away. It also works as git's own mergetool.</p>
+        </div>
+        <figure class="feature-shot">
+          <div class="bezel"><img src="assets/screens/merge.png" width="1440" height="900" loading="lazy" alt="The merge tool with three columns, ours, result and theirs, two conflicts each offering Take ours, Take theirs, both orders and Edit, and a banner saying which branch is being merged."></div>
+        </figure>
+      </article>
+    </section>
+
+    <section id="arsenal" class="arsenal" aria-labelledby="arsenal-title">
+      <h2 id="arsenal-title" class="section-title reveal">Fully <em>loaded</em></h2>
+      <ul class="cards">
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9"/></svg>
+          <h3>Rebase without fear</h3>
+          <p>Drag commits into order, squash, reword, drop, and check for conflicts before anything runs.</p>
+        </li>
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></svg>
+          <h3>Undo that means it</h3>
+          <p>Took the wrong turn? Undo a merge, rebase, reset, discard or branch delete from the toolbar.</p>
+        </li>
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>
+          <h3>Pull requests, in place</h3>
+          <p>GitHub, GitLab, Bitbucket, Azure DevOps and Gitea: review, comment, approve and merge, self-hosted too.</p>
+        </li>
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.5 5.5L20 9l-4 4 1 6-5-3-5 3 1-6-4-4 5.5-.5z"/></svg>
+          <h3>AI, on your terms</h3>
+          <p>Commit messages, explanations, review and conflict help, through the provider you choose, and only when you ask.</p>
+        </li>
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 20V9"/></svg>
+          <h3>Dock it your way</h3>
+          <p>Drag tabs into splits, zoom a pane to fill the window, and keep your own layouts.</p>
+        </li>
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h6"/><circle cx="18" cy="16" r="3"/><path d="M20.5 18.5L22 20"/></svg>
+          <h3>Find anything</h3>
+          <p>One palette for commands, branches, files and commits. Search history by message, author, file or change.</p>
+        </li>
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6l1 4H8zM8 7l-3 14h14L16 7"/></svg>
+          <h3>Bisect, reflog, more</h3>
+          <p>Hunt a regression, recover lost work, tame submodules, hooks, LFS and sparse checkouts.</p>
+        </li>
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>
+          <h3>Twelve themes</h3>
+          <p>Dark and light themes, any accent colour, colour-blind safe diffs and reduced motion.</p>
+        </li>
+        <li class="card reveal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>
+          <h3>Native and fast</h3>
+          <p>Written in Rust and drawn on the GPU. It stays responsive on very large histories, diffs and files.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section id="safety" class="safety" aria-labelledby="safety-title">
+      <div class="hazard" aria-hidden="true"></div>
+      <div class="safety-inner">
+        <h2 id="safety-title" class="section-title reveal">Trust nothing. <em>Ask first.</em></h2>
+        <p class="safety-lede reveal">A repository can arrive with config that runs programs. gitem treats every one as untrusted until you say otherwise.</p>
+        <ul class="safety-list">
+          <li class="reveal"><strong>Nothing runs behind your back.</strong> Config that would start a program, such as filters, drivers or <code>core.fsmonitor</code>, stays off until you agree. Reads never run hooks.</li>
+          <li class="reveal"><strong>Destruction asks first.</strong> Force pushes, resets and discards show the exact git command before they happen.</li>
+          <li class="reveal"><strong>Secrets stay secret.</strong> Tokens live in your system's credential store and are masked wherever a URL is shown.</li>
+          <li class="reveal"><strong>Nothing phones home.</strong> No telemetry. AI requests only go where you point them, and only when you ask.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="made" aria-labelledby="made-title">
+      <h2 id="made-title" class="visually-hidden">How gitem was made</h2>
+      <blockquote class="made-quote reveal">
+        <p>Developed entirely with AI,<br><span>with a hint of human taste.</span></p>
+      </blockquote>
+    </section>
+
+    <section id="get" class="get" aria-labelledby="get-title">
+      <h2 id="get-title" class="section-title reveal">Lock and <em>load</em></h2>
+      <p class="get-lede reveal">gitem builds from source with the Rust toolchain and runs on the <code>git</code> you already have (2.38 or newer).</p>
+      <div class="terminal reveal">
+        <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+        <pre><code id="build-cmd">git clone https://github.com/ulaas/gitem
+cd gitem
+cargo build --release
+./target/release/gitem path/to/your/repo</code></pre>
+        <button class="copy" type="button" data-copy="build-cmd">Copy</button>
+      </div>
+      <div class="get-cta reveal">
+        <a class="btn btn-hot" href="https://github.com/ulaas/gitem/releases">Releases</a>
+        <a class="btn btn-steel" href="https://github.com/ulaas/gitem#readme">Read the README</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p><img src="assets/logo.svg" alt="" width="22" height="22"> gitem is free software under the <a href="https://github.com/ulaas/gitem/blob/main/LICENSE">MIT License</a>.</p>
+    <p><a href="https://github.com/ulaas/gitem">Source</a> · <a href="https://github.com/ulaas/gitem/blob/main/THIRD-PARTY-NOTICES.md">Third-party notices</a> · <a href="https://github.com/ulaas/gitem/blob/main/SECURITY.md">Security</a></p>
+    <p class="footer-note">Screenshots show a made-up project.</p>
+  </footer>
+
+  <script src="main.js" defer></script>
+</body>
+</html>

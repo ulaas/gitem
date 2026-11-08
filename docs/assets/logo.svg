@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="gitem logo">
+  <title>gitem</title>
+  <polygon points="22,12 38,40 2,40" fill="#ffc53d"/>
+  <polygon points="22,12 78,12 62,40 38,40" fill="#ffe27a"/>
+  <polygon points="78,12 98,40 62,40" fill="#ff8a1f"/>
+  <polygon points="2,40 38,40 50,94" fill="#ff7a12"/>
+  <polygon points="38,40 62,40 50,94" fill="#ffad2e"/>
+  <polygon points="62,40 98,40 50,94" fill="#d9381a"/>
+  <g stroke="#1a0b02" stroke-width="5" stroke-linecap="round" fill="#1a0b02">
+    <line x1="50" y1="27" x2="50" y2="70"/>
+    <line x1="50" y1="55" x2="72" y2="33"/>
+    <circle cx="50" cy="27" r="6.5" stroke="none"/>
+    <circle cx="50" cy="70" r="6.5" stroke="none"/>
+    <circle cx="72" cy="33" r="6.5" stroke="none"/>
+  </g>
+</svg>
