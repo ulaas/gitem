@@ -491,7 +491,9 @@ impl EditorView {
             && ed.buf.len_chars() < 4_000_000
             && now - self.last_edit > 0.4
         {
-            ed.syntax_folds = crate::editor::treesitter::fold_ranges(&self.path, &ed.buf.text()).unwrap_or_default();
+            let text = ed.buf.text();
+            ed.syntax_folds = crate::editor::treesitter::fold_ranges(&self.path, &text).unwrap_or_default();
+            ed.syntax_brackets = crate::editor::treesitter::bracket_pairs(&self.path, &text).unwrap_or_default();
             ed.syntax_for = ed.buf.version;
         }
         let caret_line = self.ed.as_ref().filter(|e| e.sels.primary().is_empty()).map(|e| e.buf.line_of(e.sels.primary().head));

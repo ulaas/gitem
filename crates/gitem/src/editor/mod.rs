@@ -112,6 +112,9 @@ pub struct Editor {
     pub syntax_folds: Vec<(usize, usize)>,
     /// The text version `syntax_folds` was worked out for.
     pub syntax_for: u64,
+    /// Bracket pairs the syntax has, by opener, from the same version. Without a grammar,
+    /// brackets are matched by counting.
+    pub syntax_brackets: Vec<(usize, usize)>,
     /// The comment marker for this kind of file.
     comment: Option<&'static str>,
     view: view::ViewState,
@@ -138,6 +141,7 @@ impl Editor {
             folds_gen: 0,
             syntax_folds: Vec::new(),
             syntax_for: u64::MAX,
+            syntax_brackets: Vec::new(),
             comment: lines::comment_prefix(path),
             view: view::ViewState::default(),
         }
@@ -737,6 +741,20 @@ impl Editor {
         if self.folds.len() != before {
             self.folds_gen += 1;
         }
+    }
+
+    /// The bracket at or just before `pos` and its partner. From the syntax when it's up to
+    /// date, so brackets in strings and comments don't pair; otherwise by counting.
+    pub fn matching_bracket(&self, pos: usize) -> Option<(usize, usize)> {
+        if self.syntax_for == self.buf.version && !self.syntax_brackets.is_empty() {
+            for at in [Some(pos), pos.checked_sub(1)].into_iter().flatten() {
+                if let Some(p) = self.syntax_brackets.iter().find(|p| p.0 == at || p.1 == at) {
+                    return Some(if p.0 == at { (p.0, p.1) } else { (p.1, p.0) });
+                }
+            }
+            return None;
+        }
+        brackets::matching(&self.buf, pos)
     }
 
     /// The matches for the find box, found again only when the text or query changed.

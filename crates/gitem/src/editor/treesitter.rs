@@ -90,9 +90,68 @@ pub fn fold_ranges(path: &str, text: &str) -> Option<Vec<(usize, usize)>> {
     Some(by_start.into_iter().collect())
 }
 
+/// Every bracket pair the syntax has, as char positions of the opener and closer. Brackets
+/// inside strings and comments aren't tokens of their own, so they never pair.
+pub fn bracket_pairs(path: &str, text: &str) -> Option<Vec<(usize, usize)>> {
+    let (tree, _) = parse(path, text)?;
+    let mut pairs = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        let mut open: Vec<(char, usize)> = Vec::new();
+        for c in &children {
+            match c.kind() {
+                "(" | "[" | "{" if !c.is_named() => open.push((c.kind().chars().next().unwrap_or('('), c.start_byte())),
+                ")" | "]" | "}" if !c.is_named() => {
+                    let want = match c.kind() {
+                        ")" => '(',
+                        "]" => '[',
+                        _ => '{',
+                    };
+                    if let Some(i) = open.iter().rposition(|o| o.0 == want) {
+                        pairs.push((open[i].1, c.start_byte()));
+                        open.truncate(i);
+                    }
+                }
+                _ => {}
+            }
+            if c.child_count() > 0 {
+                stack.push(*c);
+            }
+        }
+    }
+    // Byte offsets to char positions, going forward once.
+    let mut ends: Vec<usize> = pairs.iter().flat_map(|p| [p.0, p.1]).collect();
+    ends.sort_unstable();
+    ends.dedup();
+    let mut map = std::collections::HashMap::new();
+    let (mut byte, mut chars) = (0usize, 0usize);
+    for b in ends {
+        chars += text.get(byte..b).map_or(0, |s| s.chars().count());
+        byte = b;
+        map.insert(b, chars);
+    }
+    let mut out: Vec<(usize, usize)> = pairs.into_iter().filter_map(|(a, b)| Some((*map.get(&a)?, *map.get(&b)?))).collect();
+    out.sort_unstable();
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brackets_in_strings_and_comments_do_not_pair() {
+        let src = "fn é() { let s = \"(\"; // )\n}\n";
+        let pairs = bracket_pairs("a.rs", src).unwrap();
+        let open_brace = src.chars().position(|c| c == '{').unwrap();
+        let close_brace = src.chars().position(|c| c == '}').unwrap();
+        assert!(pairs.contains(&(open_brace, close_brace)), "{pairs:?}");
+        let in_string = src[..src.find("\"(").unwrap()].chars().count() + 1;
+        assert_eq!(src.chars().nth(in_string), Some('('));
+        assert!(!pairs.iter().any(|p| p.0 == in_string || p.1 == in_string), "the ( in the string is text, not a bracket");
+    }
 
     #[test]
     fn rust_symbols_nest_and_impls_name_their_trait() {

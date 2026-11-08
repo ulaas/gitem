@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use egui::text::{CCursor, CharIndex, LayoutJob, TextFormat};
 use egui::{Align2, Color32, CursorIcon, Event, EventFilter, Galley, Id, Key, Modifiers, Pos2, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
-use gitem_text::brackets;
 use gitem_text::selection::{self, Move};
 use gitem_text::{Selection, SelectionSet};
 
@@ -329,7 +328,7 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, look: &Look) -> Shown {
         let painter = ui.painter_at(ui.clip_rect());
         let full_w = size.x.max(vp.width());
         let primary = ed.sels.primary();
-        let bracket = if primary.is_empty() { brackets::matching(&ed.buf, primary.head) } else { None };
+        let bracket = if primary.is_empty() { ed.matching_bracket(primary.head) } else { None };
         let unit = ed.indent.unit().replace('\t', "    ").chars().count().max(1);
         let text_x = origin.x + PAD;
         let mut remeasure = false;
