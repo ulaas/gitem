@@ -10,6 +10,7 @@ Changed:
 
 Fixed:
 
+- Reveal in file manager opens the folder in the file manager Windows has registered for folders, such as Directory Opus, Files or XYplorer, rather than always in Explorer. With Explorer it still selects the file.
 - On Windows, switching keyboard layout while gitem ran (Win+Space, Alt+Shift) froze it, and no key worked after. The renderer's OpenGL backend, which gitem doesn't draw with, kept a hidden window that never answered the switch; it's no longer started. `WGPU_BACKEND` can still choose it.
 
 ## 0.6.0 (2026-11-08)

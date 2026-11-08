@@ -4227,6 +4227,16 @@ pub fn open_file(path: &Path, editor: &str, errors: &mut Vec<String>) {
     } else {
         #[cfg(windows)]
         {
+            // A file manager registered for folders, such as Directory Opus, Files or XYplorer,
+            // gets the folder. Only a folder goes to the shell, never the file: a repository's
+            // file is never started through its own association.
+            if let Some(handler) = folder_handler() {
+                let dir = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+                if !shell_open_folder(dir) {
+                    errors.push(format!("Could not open {} in {handler}", dir.display()));
+                }
+                return;
+            }
             c = std::process::Command::new("explorer");
             if path.is_dir() {
                 c.arg(path);
@@ -4248,6 +4258,66 @@ pub fn open_file(path: &Path, editor: &str, errors: &mut Vec<String>) {
     }
     if let Err(e) = c.spawn() {
         errors.push(format!("Could not open {}: {e}", path.display()));
+    }
+}
+
+/// The command Windows runs to open a folder, as the user's file manager registered it. File
+/// managers register on `Folder` or on `Directory`. Explorer's own default has no command (it
+/// starts through COM), which reads as none here.
+#[cfg(windows)]
+fn folder_handler() -> Option<String> {
+    use windows_sys::Win32::UI::Shell::{ASSOCF_NOTRUNCATE, ASSOCSTR_COMMAND, AssocQueryStringW};
+    ["Folder", "Directory"].into_iter().find_map(|class| {
+        let class: Vec<u16> = class.encode_utf16().chain(Some(0)).collect();
+        let mut buf = vec![0u16; 2048];
+        let mut len = buf.len() as u32;
+        // SAFETY: `class` is NUL-terminated and `buf` holds `len` UTF-16 units.
+        let hr = unsafe { AssocQueryStringW(ASSOCF_NOTRUNCATE, ASSOCSTR_COMMAND, class.as_ptr(), std::ptr::null(), buf.as_mut_ptr(), &mut len) };
+        if hr != 0 {
+            return None;
+        }
+        let end = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..end])).filter(|c| !c.trim().is_empty() && !is_explorer(c))
+    })
+}
+
+/// Whether that command is Explorer's own, which `explorer /select` can do better: it also
+/// selects the file.
+pub fn is_explorer(command: &str) -> bool {
+    let program = match command.trim_start().strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or(rest),
+        None => command.split_whitespace().next().unwrap_or(""),
+    };
+    let name = program.rsplit(['\\', '/']).next().unwrap_or(program).to_ascii_lowercase();
+    name == "explorer.exe" || name == "explorer"
+}
+
+/// Opens a folder with its default verb, which is the registered file manager's.
+#[cfg(windows)]
+fn shell_open_folder(dir: &Path) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    if !dir.is_dir() {
+        return false;
+    }
+    let wide: Vec<u16> = dir.as_os_str().to_string_lossy().replace('/', "\\").encode_utf16().chain(Some(0)).collect();
+    // SAFETY: `wide` is NUL-terminated; a null verb means the folder's default one.
+    let r = unsafe { ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), wide.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
+    r as usize > 32
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::is_explorer;
+
+    #[test]
+    fn explorer_is_told_from_other_file_managers() {
+        assert!(is_explorer(r"%SystemRoot%\Explorer.exe"));
+        assert!(is_explorer(r#""C:\Windows\explorer.exe" /idlist,%I,%L"#));
+        assert!(is_explorer("explorer"));
+        assert!(!is_explorer(r#""C:\Program Files\GPSoftware\Directory Opus\dopusrt.exe" /cmd Go "%1" NEW"#));
+        assert!(!is_explorer(r#""C:\Users\me\AppData\Local\Files\Files.exe" "%1""#));
+        assert!(!is_explorer(r"C:\Tools\xyplorer.exe %1"));
     }
 }
 
