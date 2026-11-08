@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/gitem-core", "crates/gitem-text", "crates/gitem"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/ulaas/gitem"

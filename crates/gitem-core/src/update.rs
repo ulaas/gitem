@@ -4,9 +4,9 @@ use serde_json::Value;
 
 use crate::{Error, Result};
 
-/// Where releases are listed, in GitHub's release API format. Empty until the project has a public
-/// home, in which case there's nothing to ask: see [`release_url`].
-pub const DEFAULT_RELEASE_URL: &str = "";
+/// Where releases are listed, in GitHub's release API format: the latest release on GitHub. Only
+/// asked when the user turns update checks on.
+pub const DEFAULT_RELEASE_URL: &str = "https://api.github.com/repos/ulaas/gitem/releases/latest";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
