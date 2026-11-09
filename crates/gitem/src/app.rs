@@ -2160,6 +2160,18 @@ impl GitemApp {
                     self.apply_action(ctx, a);
                 }
             }
+            Action::FindInFiles { text, folder } => {
+                if let Some(r) = self.repos.get_mut(self.active) {
+                    if r.squeeze.sidebar {
+                        // No room for the sidebar beside the view: a tab has it.
+                        let view = crate::views::find::FindView::looking_for(text.as_deref().unwrap_or(""), folder);
+                        self.apply_action(ctx, Action::OpenTab(Tab::Grep(Box::new(view))));
+                    } else {
+                        r.show_sidebar = true;
+                        r.sidebar.find_in_files(text, folder);
+                    }
+                }
+            }
             Action::SaveAll => {
                 let mut out = Vec::new();
                 for r in self.repos.iter_mut() {
@@ -3214,6 +3226,11 @@ impl GitemApp {
         let bound = self.settings.key_bindings.clone();
         let take = |name: &str| crate::keys::chord_for(&bound, name).is_some_and(|(m, k)| ctx.input_mut(|i| crate::keys::take_chord(i, m, k)));
         let (settings, open, close_tab, fetch, pull, push, undo) = (take("settings"), take("open"), take("close_tab"), take("fetch"), take("pull"), take("push"), take("undo_last"));
+        if take("find_in_files") {
+            // From an editor, what's at its caret is what to look for.
+            let in_editor = self.repos.get_mut(self.active).and_then(|r| r.dock.find_active_focused()).is_some_and(|(_, t)| matches!(t, Tab::Editor(e) if !e.path.is_empty()));
+            out.push(if in_editor { Action::Editor(crate::editor::Request::FindInFiles) } else { Action::FindInFiles { text: None, folder: None } });
+        }
         if take("ide_mode") {
             out.push(Action::Settings(Box::new(|s| s.ide_mode = !s.ide_mode)));
         }
@@ -3758,6 +3775,12 @@ impl GitemApp {
             });
         }
 
+        if let Some(tab) = self.repos.get_mut(self.active) {
+            // What find in files searches: the open editors, with unsaved text while one's drawn.
+            let with_text = tab.data.searching.replace(false);
+            let open = tab.dock.iter_all_tabs_mut().chain(tab.zoom.iter_mut().flat_map(|z| z.full.iter_all_tabs_mut())).filter_map(|(_, t)| if let Tab::Editor(v) = t { v.for_search(with_text) } else { None }).collect();
+            tab.data.set_editors(open);
+        }
         if let Some(tab) = self.repos.get_mut(self.active) {
             let RepoTab { repo, data, dock, zoom, inspect, show_inspect, sidebar, show_sidebar, show_rail, squeeze: tab_squeeze, peek, show_wip, .. } = tab;
             if let Some(s) = data.status.get()

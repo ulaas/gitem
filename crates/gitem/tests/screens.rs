@@ -773,12 +773,38 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
     }
     if wanted("grep") {
         let mut h = f.harness(set, vec![]);
-        h.state_mut().repos[0].open_tab(Tab::Grep(Box::new(gitem::views::grep::GrepView::looking_for("println", ""))));
+        h.state_mut().repos[0].open_tab(Tab::Grep(Box::new(gitem::views::find::FindView::looking_for("println", None))));
         quiet(&mut h);
-        h.query_all_by_label("Search").last().unwrap().click();
-        wait_for(&mut h, "src/lib.rs:2");
+        wait_for(&mut h, "src/lib.rs");
         quiet(&mut h);
         out.save(&mut h, "grep");
+    }
+    if wanted("find") {
+        // Find in files in the sidebar, beside an editor, with a change and a new file among
+        // what's found.
+        let src = |name: &str, body: &str| {
+            std::fs::create_dir_all(f.root.join("src/render")).unwrap();
+            std::fs::write(f.root.join(name), body).unwrap();
+        };
+        src("src/render/frame.rs", "use crate::render::Surface;\n\n/// One frame, drawn to a surface.\npub fn draw_frame(surface: &mut Surface, scene: &Scene) {\n    surface.clear();\n    for layer in &scene.layers {\n        draw_layer(surface, layer);\n    }\n    surface.present();\n}\n");
+        src("src/render/layer.rs", "pub fn draw_layer(surface: &mut Surface, layer: &Layer) {\n    if layer.hidden {\n        return;\n    }\n    for sprite in &layer.sprites {\n        surface.draw_sprite(sprite);\n    }\n}\n");
+        run(&f.git, &f.root, &["add", "src/render"]);
+        run(&f.git, &f.root, &["commit", "-q", "-m", "render"]);
+        src("src/render/frame.rs", "use crate::render::Surface;\n\n/// One frame, drawn to a surface, then shown.\npub fn draw_frame(surface: &mut Surface, scene: &Scene) {\n    surface.clear();\n    for layer in scene.layers.iter().filter(|l| l.visible) {\n        draw_layer(surface, layer);\n    }\n    surface.present();\n}\n");
+        src("src/render/debug.rs", "/// Draws the outline of every sprite, to see where they are.\npub fn draw_outlines(surface: &mut Surface, layer: &Layer) {\n    for sprite in &layer.sprites {\n        surface.draw_rect(sprite.bounds(), DEBUG_COLOR);\n    }\n}\n");
+        let mut h = f.harness(move |s| {
+            set(s);
+            s.ide_mode = true;
+        }, vec![]);
+        quiet(&mut h);
+        h.state_mut().repos[0].open_tab(Tab::editor("src/render/frame.rs", Some(5), true));
+        let ctx = h.ctx.clone();
+        h.state_mut().apply_action(&ctx, gitem::action::Action::FindInFiles { text: Some("draw_".into()), folder: None });
+        wait_for(&mut h, "src/render/layer.rs");
+        quiet(&mut h);
+        h.get_by_label("4: pub fn draw_frame(surface: &mut Surface, scene: &Scene) {").click();
+        quiet(&mut h);
+        out.save(&mut h, "find");
     }
     if wanted("keysbelow") {
         let mut h = f.harness(move |s| {

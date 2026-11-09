@@ -1,0 +1,330 @@
+//! Find in files as someone uses it: Ctrl+Shift+F, typing, the switches beside the box, where
+//! to look, F4, and results that keep up with the files. Every repository is in a temp folder.
+gitem_testenv::isolate!();
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use egui::accesskit::{Role, Toggled};
+use egui::{Event, Key, Modifiers, vec2};
+use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::{Harness, HarnessBuilder};
+use gitem::app::GitemApp;
+use gitem::views::Tab;
+use gitem_core::GitExe;
+use gitem_core::settings::Settings;
+
+const PATIENCE: Duration = Duration::from_secs(120);
+
+struct Fx {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    git: GitExe,
+}
+
+impl Fx {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let git = GitExe::discover(None).unwrap();
+        let root = dir.path().canonicalize().unwrap().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let f = Self { _dir: dir, root, git };
+        f.git(&["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Test User"), ("user.email", "t@example.com"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
+            f.git(&["config", k, v]);
+        }
+        f.write("src/lib.rs", "pub fn alpha() {\n    let needle = 1;\n}\n");
+        f.write("src/main.rs", "fn main() {\n    // Needle in a comment\n    alpha();\n}\n");
+        f.write("docs/guide.md", "# Guide\n\nNo match here.\n");
+        f.write(".gitignore", "build/\n");
+        f.write("build/out.txt", "needle in what's ignored\n");
+        f.git(&["add", "-A"]);
+        f.git(&["commit", "-q", "-m", "first"]);
+        f
+    }
+    fn git(&self, args: &[&str]) -> String {
+        self.git.run(Some(&self.root), args).unwrap_or_else(|e| panic!("git {args:?}: {e}")).text()
+    }
+    fn write(&self, p: &str, s: &str) {
+        let f = self.root.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, s).unwrap();
+    }
+}
+
+fn harness(f: &Fx, ide: bool) -> Harness<'static, GitemApp> {
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, Settings { details_on_open: false, ide_mode: ide, ..Default::default() });
+    app.git = Ok(f.git.clone());
+    let root = f.root.clone();
+    let mut opened = false;
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1400.0, 900.0)).with_max_steps(5).with_step_dt(1.0 / 60.0);
+    let mut h = builder.build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    );
+    wait_for(&mut h, "the repository", |h| h.state().repos.first().is_some_and(|r| r.data.status.get().is_some() && r.data.refs.get().is_some()));
+    h
+}
+
+fn wait_for(h: &mut Harness<GitemApp>, what: &str, cond: impl Fn(&Harness<GitemApp>) -> bool) {
+    let t = Instant::now();
+    while !cond(h) {
+        h.step();
+        if t.elapsed() > PATIENCE {
+            let labels: Vec<String> = h.root().children_recursive().filter_map(|n| n.accesskit_node().label().or_else(|| n.accesskit_node().value()).map(|l| format!("{:?} {l}", n.accesskit_node().role()))).collect();
+            panic!("timed out waiting for {what}; showing: {labels:#?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn shows(h: &Harness<GitemApp>, label: &str) -> bool {
+    h.query_all_by_label(label).next().is_some()
+}
+
+/// Ctrl+Shift+F, then the text, as typed.
+fn find(h: &mut Harness<GitemApp>, text: &str) {
+    h.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
+    h.step();
+    h.step();
+    h.event(Event::Text(text.into()));
+    h.step();
+}
+
+fn summary(h: &Harness<GitemApp>) -> Option<String> {
+    h.query_all_by_role(Role::Label).filter_map(|n| n.accesskit_node().label().or_else(|| n.accesskit_node().value())).find(|l| l.contains(" in ") && l.contains("result"))
+}
+
+fn wait_summary(h: &mut Harness<GitemApp>, want: &str) {
+    let w = want.to_string();
+    wait_for(h, want, move |h| summary(h).is_some_and(|s| s.starts_with(&w)) && summary(h).is_some_and(|s| !s.contains("Searching")));
+}
+
+fn toggle(h: &mut Harness<GitemApp>, name: &str) {
+    h.query_all_by_label(name).find(|n| n.accesskit_node().role() == Role::CheckBox).unwrap().click();
+    h.step();
+    h.step();
+}
+
+#[test]
+fn ctrl_shift_f_searches_as_you_type_and_a_result_opens_at_the_match() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    find(&mut h, "needle");
+    // Both files, case aside; not the ignored one.
+    wait_summary(&mut h, "2 results in 2 files");
+    assert!(shows(&h, "src/lib.rs") && shows(&h, "src/main.rs"));
+    assert!(!shows(&h, "build/out.txt"), "ignored files aren't searched");
+    assert!(h.query_all_by_label("Search").any(|n| n.accesskit_node().role() == Role::RadioButton && n.accesskit_node().toggled() == Some(Toggled::True)), "in the sidebar");
+
+    h.get_by_label("2: let needle = 1;").click();
+    wait_for(&mut h, "the editor", |h| h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Editor(e) if e.path == "src/lib.rs" && e.text().is_some())));
+    for _ in 0..3 {
+        h.step();
+    }
+    let picked = h.state_mut().repos[0].dock.iter_all_tabs_mut().find_map(|(_, t)| if let Tab::Editor(e) = t { (e.path == "src/lib.rs").then(|| e.editor_mut().map(|ed| (ed.sels.primary().start(), ed.sels.primary().end()))).flatten() } else { None });
+    // "pub fn alpha() {\n" is 17 chars, then four spaces and "let ".
+    assert_eq!(picked, Some((17 + 8, 17 + 14)), "the match is selected");
+}
+
+#[test]
+fn the_switches_narrow_what_matches() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    find(&mut h, "needle");
+    wait_summary(&mut h, "2 results");
+    // Alt+C from the box: case counts, so the comment's Needle goes.
+    h.key_press_modifiers(Modifiers::ALT, Key::C);
+    wait_summary(&mut h, "1 result in 1 file");
+    assert!(h.query_all_by_label("Match case").any(|n| n.accesskit_node().role() == Role::CheckBox && n.accesskit_node().toggled() == Some(Toggled::True)));
+    toggle(&mut h, "Match case");
+    wait_summary(&mut h, "2 results");
+
+    // A regular expression, and one that's wrong says so instead of searching.
+    toggle(&mut h, "Use regular expression");
+    h.event(Event::Text("|alpha\\(".into()));
+    wait_summary(&mut h, "4 results in 2 files");
+    h.event(Event::Text("[".into()));
+    wait_for(&mut h, "the error", |h| h.query_by_label_contains("Error: ").is_some());
+
+    // Whole words: "alph" is in "alpha", but not as a word.
+    toggle(&mut h, "Use regular expression");
+    for _ in 0.."needle|alpha\\([".len() {
+        h.key_press(Key::Backspace);
+    }
+    h.event(Event::Text("alph".into()));
+    wait_summary(&mut h, "2 results in 2 files");
+    toggle(&mut h, "Match whole word");
+    wait_for(&mut h, "no results", |h| shows(h, "No results"));
+
+    // Ignored files, from the options under the dots.
+    toggle(&mut h, "Match whole word");
+    for _ in 0.."alph".len() {
+        h.key_press(Key::Backspace);
+    }
+    h.event(Event::Text("needle".into()));
+    wait_summary(&mut h, "2 results");
+    h.get_by_label("Files to include and exclude").click();
+    h.step();
+    h.step();
+    toggle(&mut h, "Search ignored files too");
+    wait_summary(&mut h, "3 results in 3 files");
+    assert!(shows(&h, "build/out.txt"));
+}
+
+#[test]
+fn where_to_look_changed_files_open_editors_and_a_revision() {
+    let f = Fx::new();
+    f.write("src/main.rs", "fn main() {\n    alpha();\n}\n");
+    f.write("new.txt", "a needle, untracked\n");
+    let mut h = harness(&f, true);
+    wait_for(&mut h, "the change", |h| h.state().repos[0].data.status.get().is_some_and(|s| s.entries.len() >= 2));
+    find(&mut h, "needle");
+    wait_summary(&mut h, "2 results in 2 files");
+    assert!(shows(&h, "new.txt") && shows(&h, "src/lib.rs"));
+
+    h.get_by_label("Changed files").click();
+    wait_summary(&mut h, "1 result in 1 file");
+    assert!(shows(&h, "new.txt"));
+
+    // Open editors, with what's typed and not saved.
+    h.state_mut().repos[0].open_tab(Tab::editor("docs/guide.md", None, true));
+    wait_for(&mut h, "the editor", |h| h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Editor(e) if e.path == "docs/guide.md" && e.text().is_some())));
+    h.get_by_label("Open editors").click();
+    wait_for(&mut h, "no results", |h| shows(h, "No results"));
+    h.get_by_label("Text of docs/guide.md").click();
+    h.step();
+    h.event(Event::Text("needle ".into()));
+    wait_summary(&mut h, "1 result in 1 file");
+    assert!(shows(&h, "docs/guide.md"), "the unsaved text was searched");
+    assert_eq!(std::fs::read_to_string(f.root.join("docs/guide.md")).unwrap(), "# Guide\n\nNo match here.\n", "and nothing was saved");
+
+    // At the first commit, the comment still has its Needle.
+    h.get_by_label("At a revision").click();
+    wait_summary(&mut h, "2 results in 2 files");
+    h.get_by_label("2: // Needle in a comment").click();
+    wait_for(&mut h, "the file at HEAD", |h| h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(v) if v.path == "src/main.rs" && v.rev.as_deref() == Some("HEAD"))));
+}
+
+#[test]
+fn f4_goes_through_the_results_and_they_keep_up_with_the_files() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    find(&mut h, "needle");
+    wait_summary(&mut h, "2 results in 2 files");
+    let open_at = |h: &Harness<GitemApp>| h.state().repos[0].dock.iter_all_tabs().filter_map(|(_, t)| if let Tab::Editor(e) = t { Some(e.path.clone()) } else { None }).collect::<Vec<_>>();
+    h.key_press(Key::F4);
+    wait_for(&mut h, "the first", |h| open_at(h).contains(&"src/lib.rs".to_string()));
+    h.key_press(Key::F4);
+    wait_for(&mut h, "the second", |h| open_at(h).contains(&"src/main.rs".to_string()));
+
+    // A file saved elsewhere: the results catch up on their own.
+    f.write("docs/guide.md", "# Guide\n\nA needle now.\n");
+    wait_summary(&mut h, "3 results in 3 files");
+}
+
+#[test]
+fn find_in_folder_looks_only_there_and_the_tab_has_the_same_search() {
+    let f = Fx::new();
+    f.write("docs/more.md", "needle in the docs\n");
+    let mut h = harness(&f, true);
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_action(&ctx, gitem::action::Action::FindInFiles { text: Some("needle".into()), folder: Some("docs".into()) });
+    wait_summary(&mut h, "1 result in 1 file");
+    assert!(shows(&h, "docs/more.md"));
+    h.get_by_label("Search everywhere again").click();
+    wait_summary(&mut h, "3 results in 3 files");
+
+    h.get_by_label("Open in a tab").click();
+    wait_for(&mut h, "the tab", |h| h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Grep(_))));
+    wait_for(&mut h, "its results", |h| h.query_all_by_label("docs/more.md").count() == 2);
+}
+
+#[test]
+fn settings_leave_files_out_and_can_wait_for_enter() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    {
+        let s = &mut h.state_mut().settings;
+        s.find_exclude = "**/main.rs".into();
+        s.find_on_type = false;
+    }
+    find(&mut h, "needle");
+    for _ in 0..40 {
+        h.step();
+    }
+    assert!(summary(&h).is_none(), "nothing until Enter");
+    h.key_press(Key::Enter);
+    wait_summary(&mut h, "1 result in 1 file");
+    assert!(shows(&h, "src/lib.rs") && !shows(&h, "src/main.rs"), "main.rs is always left out");
+    // Ignored files too means everything, Settings' list included.
+    h.get_by_label("Files to include and exclude").click();
+    h.step();
+    toggle(&mut h, "Search ignored files too");
+    wait_summary(&mut h, "3 results in 3 files");
+    // A size limit of 1 MB leaves a bigger file out, and says so.
+    f.write("big.txt", &format!("needle\n{}", "x".repeat(1_100_000)));
+    h.state_mut().settings.find_max_file_mb = 1;
+    h.get_by_label("Search again").click();
+    wait_for(&mut h, "the note", |h| h.query_by_label_contains("over 1 MB left out").is_some() || h.query_all_by_role(Role::Label).any(|n| n.accesskit_node().value().is_some_and(|v| v.contains("over 1 MB left out"))));
+}
+
+/// The middle of `n` frames, in milliseconds. The harness doesn't paint, so this is the
+/// view's own work.
+fn median_frame_ms(h: &mut Harness<GitemApp>, n: usize, mut each: impl FnMut(&mut Harness<GitemApp>)) -> f64 {
+    let mut times: Vec<f64> = (0..n)
+        .map(|_| {
+            each(h);
+            let t = Instant::now();
+            h.step();
+            t.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
+    times.sort_by(f64::total_cmp);
+    times[n / 2]
+}
+
+/// As in `ui_flows.rs`: most of one 60 Hz frame, when these take about a millisecond on an
+/// idle machine, which leaves room for a test run with every core busy.
+const FRAME_BOUND_MS: f64 = 12.0;
+
+/// As many results as a search keeps, and more: it ends quickly, and a frame costs what's on
+/// screen, not what was found, still or scrolling, in the sidebar and in a tab.
+#[test]
+fn twenty_thousand_results_stay_quick() {
+    let f = Fx::new();
+    for i in 0..2500 {
+        let body: String = (0..10).map(|l| format!("let needle_{l} = {i}; // a needle\n")).collect();
+        f.write(&format!("gen/d{}/f{i}.rs", i % 25), &body);
+    }
+    let mut h = harness(&f, true);
+    let t = Instant::now();
+    find(&mut h, "needle");
+    wait_for(&mut h, "the limit", |h| h.query_by_label_contains("Search all").is_some() || h.query_all_by_role(Role::Label).any(|n| n.accesskit_node().value().is_some_and(|v| v.contains("Showing the first"))));
+    let took = t.elapsed();
+    eprintln!("20,000 results in {took:?}");
+    assert!(took < Duration::from_secs(20), "{took:?}");
+    let still = median_frame_ms(&mut h, 60, |_| {});
+    let down = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, -6.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move };
+    let row = h.query_all_by_role(Role::Button).find(|n| n.accesskit_node().label().is_some_and(|l| l.starts_with("gen/"))).expect("a result").rect().center();
+    h.hover_at(row);
+    let scrolling = median_frame_ms(&mut h, 60, |h| h.event(down.clone()));
+    eprintln!("sidebar: {still:.2} ms still, {scrolling:.2} ms scrolling");
+    assert!(still < FRAME_BOUND_MS && scrolling < FRAME_BOUND_MS, "{still:.1} ms still, {scrolling:.1} ms scrolling");
+
+    // All of them, in a tab.
+    h.get_by_label("Open in a tab").click();
+    // Which 20,000 is whichever were found first, so not the same files each time.
+    wait_for(&mut h, "the tab's results", |h| h.query_all_by_role(Role::Label).filter(|n| n.accesskit_node().value().is_some_and(|v| v.starts_with("20,000 results in"))).count() == 2);
+    let still = median_frame_ms(&mut h, 60, |_| {});
+    eprintln!("sidebar and tab: {still:.2} ms still");
+    assert!(still < FRAME_BOUND_MS, "{still:.1} ms with both");
+}

@@ -15,9 +15,9 @@ pub mod diffview;
 pub mod editorview;
 pub mod fileview;
 pub mod filetree;
+pub mod find;
 pub mod graph;
 pub mod graphcols;
-pub mod grep;
 pub mod health;
 pub mod history;
 pub mod home;
@@ -76,7 +76,7 @@ tabs! {
     Console(console::ConsoleView),
     Patches(patches::PatchesView),
     Prune(prune::PruneView),
-    Grep(grep::GrepView),
+    Grep(find::FindView),
     PullRequest(pullrequest::PullRequestView),
     Composer(composer::ComposerView),
     Tree(tree::TreeView),

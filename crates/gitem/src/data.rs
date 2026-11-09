@@ -181,9 +181,25 @@ pub fn git_progress(line: &str) -> Option<Progress> {
     (!phase.is_empty()).then(|| Progress { phase: phase.to_string(), percent })
 }
 
+/// A file open in an editor, as find in files sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenEditor {
+    /// Repository-relative.
+    pub path: String,
+    /// The text, while it has edits that aren't saved: what's searched instead of the file.
+    pub unsaved: Option<Arc<str>>,
+}
+
 #[derive(Default)]
 pub struct RepoData {
     pub status: Task<Arc<RepoStatus>>,
+    /// The files open in editors here, as of this frame.
+    pub editors: Arc<Vec<OpenEditor>>,
+    /// Bumped when what's in `editors` changes: one opens or closes, or its text is edited.
+    pub editors_gen: u64,
+    /// A find in files view was drawn this frame, so `editors` should carry unsaved text.
+    pub searching: std::cell::Cell<bool>,
+    editors_sig: u64,
     pub refs: Task<Arc<Refs>>,
     /// Bumped when branches, tags, or stashes change.
     pub refs_gen: u64,
@@ -222,6 +238,23 @@ pub struct RepoData {
 }
 
 impl RepoData {
+    /// What's open in editors now, given as path, the editor's own stamp for its text, and
+    /// the editor as find in files sees it.
+    pub fn set_editors(&mut self, open: Vec<(OpenEditor, u64)>) {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (e, stamp) in &open {
+            e.path.hash(&mut h);
+            stamp.hash(&mut h);
+            e.unsaved.is_some().hash(&mut h);
+        }
+        let sig = h.finish();
+        if sig != self.editors_sig || self.editors.len() != open.len() || self.editors.iter().zip(&open).any(|(a, (b, _))| a.unsaved.is_some() != b.unsaved.is_some()) {
+            self.editors_sig = sig;
+            self.editors_gen += 1;
+            self.editors = Arc::new(open.into_iter().map(|(e, _)| e).collect());
+        }
+    }
+
     pub fn refresh(&mut self, ctx: &egui::Context, repo: &Repo) {
         self.refresh_status(ctx, repo);
         // Restarting would discard the running query, and a steady stream of

@@ -116,7 +116,8 @@ gitem --version
 | `Ctrl+W` | Close the tab, asking first if that loses something |
 | `Ctrl+Tab` `Ctrl+Shift+Tab` | Next and previous tab in the pane |
 | `Ctrl+1` to `Ctrl+9` | Go to that repository |
-| `Ctrl+Shift+F` `Ctrl+Shift+L` `Ctrl+Shift+K` | Fetch, pull, push |
+| `Ctrl+Shift+F` | Find in files: search the text of every file |
+| `Ctrl+Shift+J` `Ctrl+Shift+L` `Ctrl+Shift+K` | Fetch, pull, push |
 | `Enter` | Submit a dialog from a one-line field; answer a question that loses nothing |
 | `Ctrl+Enter` | Submit the open form. With none open, or from the commit box, commit |
 | `Esc` | Close a dialog or menu |
@@ -132,6 +133,8 @@ gitem --version
 | `Ctrl+F` | Find in a file or a diff; search in the graph |
 | `/` | Find a ref in the graph |
 | `F3` `Shift+F3` | Next and previous search match |
+| `F4` `Shift+F4` | Open the next and previous find in files result |
+| `Alt+C` `Alt+W` `Alt+R` | Find in files: match case, whole words, regular expressions |
 | `Alt+B` | Toggle blame in a file |
 | `Ctrl+Shift+E` | IDE mode on or off: a click in the Files tree opens the file for editing |
 | `Ctrl+S` | Editor: save |

@@ -7139,7 +7139,7 @@ fn f1_lists_the_keys_and_can_be_narrowed() {
     h.event(egui::Event::Text("fetch".into()));
     h.step();
     h.step();
-    assert!(h.query_by_label("Ctrl+Shift+F").is_some());
+    assert!(h.query_by_label("Ctrl+Shift+J").is_some());
     assert!(h.query_by_label("Ctrl+Shift+K").is_none());
     h.key_press(egui::Key::Escape);
     h.step();

@@ -14,7 +14,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Ctrl+Tab", "Next tab in this pane"),
     ("Ctrl+Shift+Tab", "Previous tab in this pane"),
     ("Ctrl+1 to Ctrl+9", "Go to that repository"),
-    ("Ctrl+Shift+F", "Fetch"),
+    ("Ctrl+Shift+F", "Find in files: search the text of every file"),
+    ("Ctrl+Shift+J", "Fetch"),
     ("Ctrl+Shift+L", "Pull"),
     ("Ctrl+Shift+K", "Push"),
     ("Ctrl+Shift+Z", "Zen mode, outside a text box"),
@@ -24,7 +25,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Esc", "Close a dialog or menu"),
     ("Tab", "Move between controls"),
     ("Shift+F10", "Open the menu of the current row, in Changes and the Graph"),
-    ("↑ ↓", "Changes: move through the files. Graph: move through the commits"),
+    ("↑ ↓", "Changes: move through the files. Graph: move through the commits. Find in files' box: earlier searches"),
     ("Ctrl+click", "Sidebar: pick several branches, to delete together"),
     ("J, K", "Graph: next and previous commit"),
     ("Space", "Changes: stage or unstage the current file"),
@@ -32,6 +33,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("/", "Graph: find a ref"),
     ("Ctrl+F", "Find in a file or a diff, or search the graph"),
     ("F3, Shift+F3", "Next and previous match"),
+    ("F4, Shift+F4", "Find in files: open the next and previous result"),
+    ("Alt+C, Alt+W, Alt+R", "Find in files: match case, whole words, regular expressions"),
     ("Alt+↑, Alt+↓", "Diff: previous and next change"),
     ("Alt+Up, Alt+Down", "Rebase: move the step"),
     ("Alt+B", "File: show or hide blame"),
@@ -79,7 +82,8 @@ pub const BINDABLE: &[(&str, &str, &str)] = &[
     ("settings", "Ctrl+,", "Settings"),
     ("open", "Ctrl+O", "Open a folder"),
     ("close_tab", "Ctrl+W", "Close this tab"),
-    ("fetch", "Ctrl+Shift+F", "Fetch"),
+    ("find_in_files", "Ctrl+Shift+F", "Find in files"),
+    ("fetch", "Ctrl+Shift+J", "Fetch"),
     ("pull", "Ctrl+Shift+L", "Pull"),
     ("push", "Ctrl+Shift+K", "Push"),
     ("undo_last", "Ctrl+Alt+Z", "Undo the last action"),
@@ -357,10 +361,10 @@ mod tests {
         let mut b = std::collections::HashMap::new();
         b.insert("fetch".to_string(), "Ctrl+Alt+F".to_string());
         assert_eq!(chord_for(&b, "fetch"), parse_chord("Ctrl+Alt+F"));
-        assert_eq!(shown_keys(&b, "Ctrl+Shift+F"), "Ctrl+Alt+F");
+        assert_eq!(shown_keys(&b, "Ctrl+Shift+J"), "Ctrl+Alt+F");
         assert_eq!(shown_keys(&b, "Ctrl+Shift+L"), "Ctrl+Shift+L");
         b.insert("fetch".to_string(), "nonsense".to_string());
-        assert_eq!(chord_for(&b, "fetch"), parse_chord("Ctrl+Shift+F"));
+        assert_eq!(chord_for(&b, "fetch"), parse_chord("Ctrl+Shift+J"));
         assert_eq!(binding_problems(&b).len(), 1);
         b.insert("fetch".to_string(), "Ctrl+Shift+L".to_string());
         assert!(binding_problems(&b)[0].contains("same keys"));
@@ -400,7 +404,7 @@ mod tests {
         assert_eq!(context_chord(&b, "rebase_pick"), Some((M::NONE, Key::K)));
         assert_eq!(binding_problems(&b), Vec::<String>::new());
         // A command, which acts everywhere.
-        let b = bound(&[("graph_next", "Ctrl+Shift+F")]);
+        let b = bound(&[("graph_next", "Ctrl+Shift+J")]);
         assert_eq!(context_chord(&b, "graph_next"), Some((M::NONE, Key::J)));
         assert!(binding_problems(&b)[0].contains("already Fetch"), "{:?}", binding_problems(&b));
         // What stays fixed.

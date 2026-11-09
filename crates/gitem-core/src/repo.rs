@@ -1006,27 +1006,6 @@ impl Repo {
         Ok(self.git.run(Some(&self.root), &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])?.text().trim().to_string())
     }
 
-    /// Lines in tracked files that match, here or at a revision.
-    pub fn grep(&self, query: &str, rev: Option<&str>, ignore_case: bool, regex: bool) -> Result<Vec<GrepHit>> {
-        let mut a: Vec<String> = ["grep", "-n", "-I", "--null", "--no-color", "--full-name"].map(String::from).to_vec();
-        a.push(if regex { "-E".to_string() } else { "-F".to_string() });
-        if ignore_case {
-            a.push("-i".to_string());
-        }
-        a.extend(["-e".to_string(), query.to_string()]);
-        if let Some(r) = rev {
-            a.push(rev_arg(r)?.to_string());
-        }
-        a.push("--".to_string());
-        let o = self.git.run_opts(Some(&self.root), &a, &Default::default(), &mut |_| {})?;
-        // One means nothing found, which isn't a failure.
-        if o.code == 1 && o.stderr.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        let text = o.into_result()?.text();
-        Ok(parse_grep(&text, rev))
-    }
-
     /// The commit template named by `commit.template`, without its comment lines.
     pub fn commit_template(&self) -> Option<String> {
         let name = self.config_get("commit.template").filter(|p| !p.trim().is_empty())?;
@@ -1489,26 +1468,6 @@ impl Repo {
 
 /// Where projects list commits that blame should look through, such as reformats.
 pub const IGNORE_REVS_FILE: &str = ".git-blame-ignore-revs";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrepHit {
-    pub path: String,
-    pub line: u32,
-    pub text: String,
-}
-
-/// `path NUL number : text`. With a revision, git puts `rev:` before the path.
-pub fn parse_grep(output: &str, rev: Option<&str>) -> Vec<GrepHit> {
-    output
-        .lines()
-        .filter_map(|l| {
-            let (path, rest) = l.split_once('\0')?;
-            let path = rev.and_then(|r| path.strip_prefix(r)).and_then(|p| p.strip_prefix(':')).unwrap_or(path);
-            let (line, text) = rest.split_once([':', '\0'])?;
-            Some(GrepHit { path: path.to_string(), line: line.parse().ok()?, text: text.to_string() })
-        })
-        .collect()
-}
 
 fn home_dir() -> Result<PathBuf> {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).ok_or_else(|| Error::Other("Couldn't tell where your home folder is.".to_string()))

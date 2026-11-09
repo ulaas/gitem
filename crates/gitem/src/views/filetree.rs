@@ -167,7 +167,7 @@ impl FileTree {
     }
 }
 
-fn file_glyph(name: &str) -> &'static str {
+pub(crate) fn file_glyph(name: &str) -> &'static str {
     let ext = name.rsplit_once('.').map_or("", |x| x.1).to_lowercase();
     match ext.as_str() {
         "rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "c" | "h" | "cc" | "cpp" | "hpp" | "cs" | "go" | "java" | "kt" | "swift" | "rb" | "php" | "sh" | "ps1" | "bat" | "cmd" | "lua" | "html" | "css" | "scss" | "json" | "toml" | "yaml" | "yml" | "xml" | "sql" => icon::FILE_CODE,
@@ -310,6 +310,10 @@ fn open_file(cx: &mut Cx, row: &Row, keep: bool) {
 }
 
 fn folder_menu(ui: &mut Ui, cx: &mut Cx, path: &str) {
+    if ui.button("Find in folder…").clicked() {
+        cx.out.push(Action::FindInFiles { text: None, folder: Some(path.to_string()) });
+        ui.close();
+    }
     if ui.button("Visual history of this folder").clicked() {
         cx.open(Tab::visual(path));
         ui.close();
@@ -364,27 +368,47 @@ fn paint_row(ui: &Ui, row: &Row, rect: Rect, selected: bool, hovered: bool, p: &
     }
 }
 
-/// Switches the sidebar between its two views. Returns the choice if it changed.
-pub fn view_switch(ui: &mut Ui, files: bool, p: &Palette) -> Option<bool> {
+/// What the sidebar shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideView {
+    Repository,
+    Files,
+    Search,
+}
+
+/// Switches the sidebar between its views. Returns the choice if it changed.
+pub fn view_switch(ui: &mut Ui, now: SideView, p: &Palette) -> Option<SideView> {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
     ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
-    let half = rect.width() / 2.0;
+    let views = [(SideView::Repository, icon::GIT_BRANCH, "Repository"), (SideView::Files, icon::FOLDER, "Files"), (SideView::Search, icon::MAGNIFYING_GLASS, "Search")];
+    let name_w = |n: &str| ui.painter().layout_no_wrap(n.to_string(), prop(12.5), p.text).size().x + 20.0 + 16.0;
+    // Where every name fits, each has a third. Where not, the one showing keeps its name and
+    // the others are their icons, named on hover.
+    let even = rect.width() / views.len() as f32;
+    let all_names = views.iter().all(|(_, _, n)| name_w(n) <= even);
+    let on_w = views.iter().find(|v| v.0 == now).map_or(even, |(_, _, n)| name_w(n).max(even));
+    let off_w = (rect.width() - on_w) / (views.len() - 1) as f32;
     let mut choice = None;
-    for (i, (value, glyph, name)) in [(false, icon::GIT_BRANCH, "Repository"), (true, icon::FOLDER, "Files")].into_iter().enumerate() {
-        let r = Rect::from_min_size(rect.min + vec2(half * i as f32, 0.0), vec2(half, rect.height()));
-        let on = files == value;
+    let mut x = rect.left();
+    for (value, glyph, name) in views {
+        let on = now == value;
+        let names = all_names || on;
+        let w = if all_names { even } else if on { on_w } else { off_w };
+        let r = Rect::from_min_size(pos2(x, rect.top()), vec2(w, rect.height()));
+        x += w;
         let resp = ui.interact(r, ui.id().with(("sidebar-view", name)), Sense::click());
         resp.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, on, name));
         if resp.hovered() && !on {
             ui.painter().rect_filled(r.shrink2(vec2(2.0, 2.0)), 4.0, p.hover);
         }
         let color = if on || resp.hovered() { p.text } else { p.dim };
-        let g = ui.painter().layout_no_wrap(name.to_string(), prop(12.5), color);
-        let total = 20.0 + g.size().x;
+        let g = ui.painter().layout_no_wrap(if names { name.to_string() } else { String::new() }, prop(12.5), color);
+        let total = if names { 20.0 + g.size().x } else { 14.0 };
         let left = r.center().x - total / 2.0;
         ui.painter().text(pos2(left + 7.0, r.center().y), Align2::CENTER_CENTER, glyph, prop(14.0), if on { p.accent } else { color });
         ui.painter().galley(pos2(left + 20.0, r.center().y - g.size().y / 2.0), g, color);
+        let resp = if names { resp } else { resp.on_hover_text(name) };
         if on {
             let line = Rect::from_min_size(pos2(r.left() + 6.0, r.bottom() - 2.0), vec2(r.width() - 12.0, 2.0));
             ui.painter().rect_filled(line, 1.0, p.accent);
