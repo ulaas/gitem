@@ -17,6 +17,10 @@ directories = "6"
 md5 = "0.8"
 thiserror = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
+grep-searcher = "0.1.17"
+grep-regex = "0.1.14"
+grep-matcher = "0.1.9"
+ignore = "0.4.34"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Threading"] }

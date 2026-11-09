@@ -28,6 +28,7 @@ pub mod rebase;
 pub mod repo;
 pub mod runner;
 pub mod settings;
+pub mod textsearch;
 pub mod treemap;
 pub mod trust;
 pub mod undo;
