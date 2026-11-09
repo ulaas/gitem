@@ -41,6 +41,9 @@ pub enum Action {
     SaveLayout(String),
     /// For the editor in front: the focused pane's tab, or the first editor open.
     Editor(crate::editor::Request),
+    /// Find in files, in the sidebar's Search pane, seeded with text to look for and perhaps
+    /// only in a folder. Where there's no room for the sidebar, in a tab.
+    FindInFiles { text: Option<String>, folder: Option<String> },
     /// Saves every editor with unsaved edits in this repository.
     SaveAll,
     /// A file was written by the editor: the repository's status is out of date.

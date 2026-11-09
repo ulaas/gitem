@@ -73,7 +73,8 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Editor: Fold All" => (icon::ARROWS_IN_SIMPLE, "", None),
         "Editor: Unfold All" => (icon::ARROWS_OUT_SIMPLE, "", None),
         "Editor: Trim Trailing Whitespace" => (icon::SCISSORS, "", None),
-        "Editor: Find in Files" => (icon::FILE_SEARCH, "", None),
+        "Find in Files" => (icon::FILE_SEARCH, "Search the text of every file, in the sidebar", Some("Ctrl+Shift+F")),
+        "Find in Files in a Tab" => (icon::FILE_SEARCH, "The same search, in a tab of its own", None),
         "Editor: Go to Definition…" => (icon::LIST_BULLETS, "The functions, types and headings in this file", Some("Ctrl+Shift+O")),
         "Editor: Save All" => (icon::FLOPPY_DISK_BACK, "Every file with unsaved edits", None),
         "Editor: Word Wrap" => (icon::TEXT_INDENT, "Long lines go on over more rows, or scroll", Some("Alt+Z")),
@@ -86,7 +87,7 @@ fn meta(category: &str, label: &str) -> (&'static str, &'static str, Option<&'st
         "Layout: Delete Saved…" => (icon::TRASH, "", None),
         "Fill the Window with This Pane" => (icon::CORNERS_OUT, "Or bring the layout back", Some("Ctrl+Shift+M")),
         "About gitem" => (icon::INFO, "Version and build", None),
-        "Fetch…" => (icon::CLOUD_ARROW_DOWN, "Download commits from a remote", Some("Ctrl+Shift+F")),
+        "Fetch…" => (icon::CLOUD_ARROW_DOWN, "Download commits from a remote", Some("Ctrl+Shift+J")),
         "Pull…" => (icon::ARROW_LINE_DOWN, "Bring upstream commits into this branch", Some("Ctrl+Shift+L")),
         "Push…" => (icon::ARROW_LINE_UP, "Send this branch's commits to a remote", Some("Ctrl+Shift+K")),
         "Create Branch…" => (icon::GIT_BRANCH, "", None),
@@ -308,7 +309,8 @@ pub fn commands() -> Vec<Item> {
         }));
     }));
     v.push(item("Git", "Fetch the Full History", |cx| cx.run(ops::unshallow())));
-    view!("Search File Contents", Tab::Grep(Box::default()));
+    v.push(item("View", "Find in Files", |cx| cx.out.push(Action::FindInFiles { text: None, folder: None })));
+    view!("Find in Files in a Tab", Tab::Grep(Box::new(crate::views::find::FindView::looking_for("", None))));
     v.push(item("App", "Open Folder…", |cx| cx.out.push(Action::PickFolder)));
     v.push(item("Git", "Scan for Repositories…", |cx| cx.form(forms::scan_form())));
     v.push(item("App", "Change Theme…", |cx| {
@@ -387,7 +389,6 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Editor", "Editor: Fold All", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::FoldAll)))));
     v.push(item("Editor", "Editor: Unfold All", |cx| cx.out.push(Action::Editor(crate::editor::Request::Run(crate::editor::Cmd::UnfoldAll)))));
     v.push(item("Editor", "Editor: Trim Trailing Whitespace", |cx| cx.out.push(Action::Editor(crate::editor::Request::TrimTrailing))));
-    v.push(item("Editor", "Editor: Find in Files", |cx| cx.out.push(Action::Editor(crate::editor::Request::FindInFiles))));
     v.push(item("Editor", "Editor: Go to Definition…", |cx| cx.out.push(Action::Editor(crate::editor::Request::Outline))));
     v.push(item("Editor", "Editor: Save All", |cx| cx.out.push(Action::SaveAll)));
     v.push(item("Editor", "Editor: Word Wrap", |cx| cx.out.push(Action::Settings(Box::new(|s| s.editor_word_wrap = !s.editor_word_wrap)))));

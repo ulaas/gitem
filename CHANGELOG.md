@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+Added:
+
+- Find in files, with Ctrl+Shift+F: the text of every file, searched as you type, in the sidebar's new Search view or in a tab of its own. Results come in as they're found, grouped by file with the matches marked and git's mark beside each file, and a click opens the file at the match, selected. Match case, whole words and regular expressions are switches beside the box (Alt+C, Alt+W, Alt+R); files to include and exclude take globs such as `*.rs` or `src/**`; what `.gitignore` leaves out is skipped unless you ask. Look in the whole working tree, only the changed files, only the files open in editors (unsaved edits included), or the files at any commit, branch or tag. F4 and Shift+F4 go through the results, Up and Down in the box bring back earlier searches, and Find in folder… in the Files tree looks in one folder. The results keep up as files change. The search runs inside gitem on every core, without git, and finds the first result in a few milliseconds even in a large tree. It replaces Search contents.
+
 Changed:
+
+- Fetch's key is now Ctrl+Shift+J: Ctrl+Shift+F is Find in files, as in most editors. Keys you've set yourself in Settings stay as they are.
 
 - Home is laid out again as cards: the repository's name and host at the top, four tiles for the branch, changes, stashes and worktrees, quick-start tiles, recent commits with their authors, recent branches and workspaces. It stays readable on a wide window and stacks into one column on a narrow one.
 - Home has Git on this computer, for the global config every repository starts with: your name and email (with a warning when they aren't set), the default branch name, how pull joins branches (merge, rebase or fast-forward only), line endings, publishing new branches on first push, pruning on fetch, remembering conflict resolutions and signing commits. Where this repository sets its own value, it says so.

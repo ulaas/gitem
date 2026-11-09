@@ -520,13 +520,13 @@ fn searching_contents_opens_the_file_and_works_at_a_revision() {
     assert!(repo.grep("x", Some("--output=evil"), false, false).is_err(), "a revision can't be an option");
 
     let mut h = f.harness(|_| {});
-    h.state_mut().repos[0].open_tab(Tab::Grep(Box::new(gitem::views::grep::GrepView::looking_for("needle", "HEAD~1"))));
+    let mut view = gitem::views::find::FindView::looking_for("needle", None);
+    view.within = gitem::views::find::Within::Revision;
+    view.rev = "HEAD~1".into();
+    h.state_mut().repos[0].open_tab(Tab::Grep(Box::new(view)));
     h.step();
-    wait_for(&mut h, "the view", |h| h.query_all_by_label("Search").count() > 1);
-    h.query_all_by_label("Search").last().unwrap().click();
-    h.step();
-    wait_for_label(&mut h, "src.txt:2");
-    click(&mut h, "src.txt:2");
+    wait_for_label(&mut h, "2: needle here");
+    click(&mut h, "2: needle here");
     settle(&mut h);
     assert!(h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::File(v) if v.path == "src.txt" && v.rev.as_deref() == Some("HEAD~1"))), "at the revision it was found in");
 }

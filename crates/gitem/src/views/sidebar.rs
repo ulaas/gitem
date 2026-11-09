@@ -25,6 +25,9 @@ pub struct Sidebar {
     commits: Task<Vec<Commit>>,
     commits_gen: Option<u64>,
     files: crate::views::filetree::FilesView,
+    /// The Search view is showing, in place of the others.
+    searching: bool,
+    find: crate::views::find::FindView,
     contributors: Task<Vec<Contributor>>,
     contributors_gen: Option<u64>,
     commits_limit: usize,
@@ -115,7 +118,7 @@ struct Lists {
 
 impl Default for Sidebar {
     fn default() -> Self {
-        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None }
+        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), searching: false, find: crate::views::find::FindView::compact(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None }
     }
 }
 
@@ -145,10 +148,28 @@ const TRACKING_PAGE: usize = 50;
 const BRANCH_PAGE: usize = 20;
 
 impl Sidebar {
+    /// Shows the Search view, looking for this, perhaps only in a folder.
+    pub fn find_in_files(&mut self, text: Option<String>, folder: Option<String>) {
+        self.searching = true;
+        self.find.seed(text, folder);
+    }
+
     pub fn ui(&mut self, ui: &mut Ui, cx: &mut Cx) {
+        use crate::views::filetree::SideView;
         let p = cx.pal.clone();
-        if let Some(files) = crate::views::filetree::view_switch(ui, cx.settings.sidebar_files, &p) {
-            cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.sidebar_files = files)));
+        let now = if self.searching { SideView::Search } else if cx.settings.sidebar_files { SideView::Files } else { SideView::Repository };
+        if let Some(view) = crate::views::filetree::view_switch(ui, now, &p) {
+            self.searching = view == SideView::Search;
+            if view == SideView::Search {
+                self.find.seed(None, None);
+            } else {
+                let files = view == SideView::Files;
+                cx.out.push(crate::action::Action::Settings(Box::new(move |s| s.sidebar_files = files)));
+            }
+        }
+        if self.searching {
+            self.find.ui(ui, cx);
+            return;
         }
         if cx.settings.sidebar_files {
             self.files.ui(ui, cx);

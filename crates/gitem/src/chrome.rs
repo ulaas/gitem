@@ -541,7 +541,7 @@ pub fn tab_glyph(tab: &Tab) -> &'static str {
         Tab::History(_) => icon::CLOCK,
         Tab::PullRequest(_) => icon::GIT_PULL_REQUEST,
         Tab::Tree(_) => icon::FOLDER_OPEN,
-        Tab::Grep(_) => icon::TEXT_AA,
+        Tab::Grep(_) => icon::FILE_SEARCH,
         Tab::Prune(_) => icon::BROOM,
         Tab::StashHunks(_) => icon::ARCHIVE,
         _ => icon::SQUARE,

@@ -73,6 +73,11 @@ pub struct EditorView {
     check: Task<Option<Vec<u8>>>,
     seen_gen: u64,
     goto: Option<usize>,
+    /// With `goto`: the column to put the caret at and how many chars after it to select, in
+    /// chars, as find in files shows a match.
+    goto_select: Option<(usize, usize)>,
+    /// The unsaved text as last handed to find in files, for the buffer version it was.
+    shared_text: Option<(u64, std::sync::Arc<str>)>,
     dark: bool,
     bases_task: Task<Bases>,
     bases: Bases,
@@ -111,6 +116,51 @@ impl EditorView {
         Self { path: path.to_string(), goto: line, pinned, ..Default::default() }
     }
 
+    /// Open at a match: the caret at a 0-based line and column, with `len` chars selected.
+    pub fn at_match(path: &str, line: usize, column: usize, len: usize, pinned: bool) -> Self {
+        Self { goto_select: Some((column, len)), ..Self::new(path, Some(line), pinned) }
+    }
+
+    /// This editor as find in files sees it. `with_text` hands over unsaved text too, which
+    /// costs a copy of it each time it's edited, so only while something is searching.
+    pub fn for_search(&mut self, with_text: bool) -> Option<(crate::data::OpenEditor, u64)> {
+        if self.path.is_empty() {
+            return None;
+        }
+        let dirty = self.is_dirty();
+        let version = self.ed.as_ref().map_or(0, |e| e.buf.version);
+        let unsaved = match &self.ed {
+            Some(ed) if dirty && with_text => {
+                if self.shared_text.as_ref().is_none_or(|(v, _)| *v != version) {
+                    self.shared_text = Some((version, std::sync::Arc::from(ed.buf.text())));
+                }
+                self.shared_text.as_ref().map(|(_, t)| t.clone())
+            }
+            _ => None,
+        };
+        let stamp = if dirty { version.wrapping_add(1) } else { 0 };
+        Some((crate::data::OpenEditor { path: self.path.clone(), unsaved }, stamp))
+    }
+
+    /// Moves to where `goto` asks, once the text is here.
+    fn go_where_asked(&mut self) {
+        let Some(ed) = &mut self.ed else { return };
+        let Some(line) = self.goto.take() else { return };
+        match self.goto_select.take() {
+            Some((column, len)) => {
+                let line = line.min(ed.buf.line_count().saturating_sub(1));
+                let room = ed.buf.line_end(line) - ed.buf.line_start(line);
+                let from = ed.buf.line_start(line) + column.min(room);
+                let to = (from + len).min(ed.buf.len_chars());
+                ed.sels = gitem_text::SelectionSet::single(gitem_text::Selection::new(from, to));
+                ed.open_folds_at_carets();
+                ed.reveal = true;
+                ed.focus = true;
+            }
+            None => ed.go_to_line(line),
+        }
+    }
+
     pub fn key(&self) -> String {
         format!("edit:{}", self.path)
     }
@@ -135,6 +185,7 @@ impl EditorView {
     pub fn retarget(&mut self, new: Self) {
         if new.goto.is_some() {
             self.goto = new.goto;
+            self.goto_select = new.goto_select;
         }
         self.pinned |= new.pinned;
     }
@@ -203,14 +254,12 @@ impl EditorView {
                     ed.read_only = true;
                     self.problem = Some(format!("A line of this file is {} characters long, so it's shown without editing.", longest));
                 }
-                if let Some(line) = self.goto.take() {
-                    ed.go_to_line(line);
-                }
                 if let Some(s) = &mut self.lsp {
                     s.did_open(&self.path, &ed.buf.text());
                 }
                 self.lsp_version = ed.buf.version;
                 self.ed = Some(ed);
+                self.go_where_asked();
                 self.disk = Some(h);
                 self.reblame = true;
                 self.remember(cx);
@@ -447,6 +496,8 @@ impl EditorView {
         {
             self.blame = b;
         }
+        // Asked again, for another line, while open.
+        self.go_where_asked();
         if let Some(e) = &self.load.error {
             empty_state(ui, "This file can't be opened", e, cx.pal);
             return;
@@ -571,7 +622,7 @@ impl EditorView {
                 self.open_outline();
                 return;
             }
-            Request::FindInFiles => cx.open(Tab::Grep(Box::new(crate::views::grep::GrepView::looking_for(&ed.search_seed(), "")))),
+            Request::FindInFiles => cx.out.push(Action::FindInFiles { text: Some(ed.search_seed()), folder: None }),
             Request::Save => {}
         }
         ed.focus = true;
@@ -899,7 +950,7 @@ impl EditorView {
             }
         }
         if ui.button("Find in files").clicked() {
-            cx.open(Tab::Grep(Box::new(crate::views::grep::GrepView::looking_for(&ed.search_seed(), ""))));
+            cx.out.push(Action::FindInFiles { text: Some(ed.search_seed()), folder: None });
             ui.close();
         }
         ui.separator();
