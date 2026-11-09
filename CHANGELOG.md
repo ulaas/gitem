@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+Changed:
+
+- Every one-line text box has a × at its end while there's text in it, which empties it and leaves the keyboard there: find in files, filters, branch names, settings and the rest.
+
 ## 0.7.0 (2026-11-10)
 
 Added:

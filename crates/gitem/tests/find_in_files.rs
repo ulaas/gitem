@@ -328,3 +328,19 @@ fn twenty_thousand_results_stay_quick() {
     eprintln!("sidebar and tab: {still:.2} ms still");
     assert!(still < FRAME_BOUND_MS, "{still:.1} ms with both");
 }
+
+#[test]
+fn the_cross_in_a_box_empties_it_and_typing_goes_on_there() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    assert!(h.query_by_label(gitem::widgets::CLEAR_TEXT).is_none(), "an empty box has none");
+    find(&mut h, "needle");
+    wait_summary(&mut h, "2 results");
+    h.get_by_label(gitem::widgets::CLEAR_TEXT).click();
+    h.step();
+    h.step();
+    wait_for(&mut h, "the results to go", |h| summary(h).is_none() && h.query_by_label("src/lib.rs").is_none());
+    assert!(h.query_by_label(gitem::widgets::CLEAR_TEXT).is_none(), "and the cross with them");
+    h.event(Event::Text("alpha".into()));
+    wait_summary(&mut h, "2 results");
+}

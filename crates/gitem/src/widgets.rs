@@ -252,9 +252,102 @@ pub fn keyed_context_menu(resp: &Response, by_key: bool, add: impl FnOnce(&mut U
 /// text box in the app is made here.
 const INPUT_MARGIN: egui::Margin = egui::Margin::symmetric(6, 5);
 
-/// A one-line text box as tall as a button, so it lines up with those beside it.
-pub fn input(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
-    egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(6, 2)).min_size(vec2(0.0, crate::theme::CONTROL_HEIGHT)).vertical_align(egui::Align::Center)
+/// A one-line text box as tall as a button, so it lines up with those beside it. With text in
+/// it, a × at its end empties it.
+pub fn input(text: &mut dyn egui::TextBuffer) -> Input<'_> {
+    Input { text, hint: None, width: None, font: None, id: None, id_salt: None, password: false, color: None }
+}
+
+/// What [`input`] makes: egui's one-line box, set up as every box here is, with a way to empty it.
+pub struct Input<'t> {
+    text: &'t mut dyn egui::TextBuffer,
+    hint: Option<egui::WidgetText>,
+    width: Option<f32>,
+    font: Option<egui::FontSelection>,
+    id: Option<egui::Id>,
+    id_salt: Option<egui::Id>,
+    password: bool,
+    color: Option<Color32>,
+}
+
+/// The accessible name of the × that empties a box.
+pub const CLEAR_TEXT: &str = "Clear text";
+
+impl Input<'_> {
+    pub fn hint_text(mut self, hint: impl Into<egui::WidgetText>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+    pub fn desired_width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self
+    }
+    pub fn font(mut self, font: impl Into<egui::FontSelection>) -> Self {
+        self.font = Some(font.into());
+        self
+    }
+    pub fn id(mut self, id: egui::Id) -> Self {
+        self.id = Some(id);
+        self
+    }
+    pub fn id_salt(mut self, salt: impl std::hash::Hash + std::fmt::Debug) -> Self {
+        self.id_salt = Some(egui::Id::new(salt));
+        self
+    }
+    pub fn password(mut self, password: bool) -> Self {
+        self.password = password;
+        self
+    }
+    pub fn text_color(mut self, color: Color32) -> Self {
+        self.color = Some(color);
+        self
+    }
+}
+
+impl egui::Widget for Input<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        const SIDE: f32 = 18.0;
+        let clearable = !self.text.as_str().is_empty() && self.text.is_mutable() && ui.is_enabled();
+        // The text stops short of the ×, rather than running under it.
+        let right = if clearable { 6 + SIDE as i8 + 2 } else { 6 };
+        let mut edit = egui::TextEdit::singleline(&mut *self.text).margin(egui::Margin { left: 6, right, top: 2, bottom: 2 }).min_size(vec2(0.0, crate::theme::CONTROL_HEIGHT)).vertical_align(egui::Align::Center).password(self.password);
+        if let Some(h) = self.hint {
+            edit = edit.hint_text(h);
+        }
+        if let Some(w) = self.width {
+            edit = edit.desired_width(w);
+        }
+        if let Some(f) = self.font {
+            edit = edit.font(f);
+        }
+        if let Some(id) = self.id {
+            edit = edit.id(id);
+        }
+        if let Some(salt) = self.id_salt {
+            edit = edit.id_salt(salt);
+        }
+        if let Some(c) = self.color {
+            edit = edit.text_color(c);
+        }
+        let mut resp = ui.add(edit);
+        if !clearable {
+            return resp;
+        }
+        let rect = Rect::from_center_size(pos2(resp.rect.right() - 4.0 - SIDE / 2.0, resp.rect.center().y), Vec2::splat(SIDE));
+        let x = ui.interact(rect, resp.id.with("clear"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        x.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, CLEAR_TEXT));
+        let visuals = ui.visuals();
+        let (fill, color) = if x.hovered() { (visuals.widgets.hovered.bg_fill, visuals.strong_text_color()) } else { (Color32::TRANSPARENT, visuals.weak_text_color()) };
+        ui.painter().circle_filled(rect.center(), SIDE / 2.0, fill);
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, egui_phosphor::regular::X, prop(11.5), color);
+        if x.on_hover_text("Clear").clicked() {
+            self.text.clear();
+            resp.mark_changed();
+            // Typing goes on in the box.
+            ui.memory_mut(|m| m.request_focus(resp.id));
+        }
+        resp
+    }
 }
 
 /// A button for a row of small actions. egui's own small button drops the usual height, so
