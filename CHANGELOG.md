@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Changed:
+
+- Home is laid out again as cards: the repository's name and host at the top, four tiles for the branch, changes, stashes and worktrees, quick-start tiles, recent commits with their authors, recent branches and workspaces. It stays readable on a wide window and stacks into one column on a narrow one.
+- Home has Git on this computer, for the global config every repository starts with: your name and email (with a warning when they aren't set), the default branch name, how pull joins branches (merge, rebase or fast-forward only), line endings, publishing new branches on first push, pruning on fetch, remembering conflict resolutions and signing commits. Where this repository sets its own value, it says so.
+
 ## 0.6.1 (2026-11-08)
 
 Changed:
