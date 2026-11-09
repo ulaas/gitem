@@ -100,13 +100,17 @@ pub struct SettingsView {
 // ---- building blocks ---------------------------------------------------------
 
 /// The rows of one card, with a hairline between them.
-struct Group<'a> {
+pub(crate) struct Group<'a> {
     ui: &'a mut Ui,
     p: &'a Palette,
     first: bool,
 }
 
-impl Group<'_> {
+impl<'a> Group<'a> {
+    pub(crate) fn new(ui: &'a mut Ui, p: &'a Palette) -> Self {
+        Self { ui, p, first: true }
+    }
+
     fn divider(&mut self) {
         if !std::mem::replace(&mut self.first, false) {
             let (r, _) = self.ui.allocate_exact_size(vec2(self.ui.available_width(), 1.0), Sense::hover());
@@ -131,7 +135,7 @@ impl Group<'_> {
 
     /// Label and hint on the left, the control on the right. Controls are added from
     /// the right edge inwards.
-    fn row(&mut self, label: &str, hint: &str, control: impl FnOnce(&mut Ui)) {
+    pub(crate) fn row(&mut self, label: &str, hint: &str, control: impl FnOnce(&mut Ui)) {
         self.divider();
         let p = self.p;
         self.ui.add_space(8.0);
@@ -156,7 +160,7 @@ impl Group<'_> {
     }
 
     /// A row with a switch. The whole row is the click target.
-    fn switch(&mut self, on: &mut bool, label: &str, hint: &str) {
+    pub(crate) fn switch(&mut self, on: &mut bool, label: &str, hint: &str) {
         self.divider();
         let p = self.p;
         let ui = &mut *self.ui;
@@ -197,7 +201,7 @@ fn group(ui: &mut Ui, title: &str, p: &Palette, body: impl FnOnce(&mut Group)) {
 }
 
 /// One choice out of a few, as a joined strip. Returns true when it changes.
-fn segmented<T: PartialEq + Clone>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], p: &Palette) -> bool {
+pub(crate) fn segmented<T: PartialEq + Clone>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], p: &Palette) -> bool {
     const PAD: f32 = 11.0;
     let galleys: Vec<_> = options.iter().map(|(_, t)| ui.painter().layout_no_wrap(t.to_string(), prop(12.5), p.text)).collect();
     let total: f32 = galleys.iter().map(|g| g.size().x + 2.0 * PAD).sum();
