@@ -82,6 +82,67 @@ const FOREIGN_ENV: [&str; 21] = [
     "GIT_WORK_TREE",
 ];
 
+/// A running `git cat-file --batch`. See [`GitExe::cat_file`]. Ends git when dropped.
+pub struct CatFile {
+    child: std::process::Child,
+    input: std::process::ChildStdin,
+    output: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl CatFile {
+    /// An object's contents into `buf`, by its id. False if the repository doesn't have it.
+    pub fn read(&mut self, oid: &str, buf: &mut Vec<u8>) -> std::io::Result<bool> {
+        use std::io::BufRead;
+        writeln!(self.input, "{oid}")?;
+        self.input.flush()?;
+        let mut header = String::new();
+        if self.output.read_line(&mut header)? == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "git cat-file ended"));
+        }
+        let header = header.trim_end();
+        if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+            return Ok(false);
+        }
+        let size: usize = header.rsplit(' ').next().and_then(|n| n.parse().ok()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("git cat-file said: {header}")))?;
+        buf.clear();
+        buf.resize(size + 1, 0);
+        self.output.read_exact(buf)?;
+        // The line feed after the contents.
+        buf.truncate(size);
+        Ok(true)
+    }
+}
+
+impl Drop for CatFile {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// git running, its output read as it comes. See [`GitExe::stream`].
+pub struct Streaming {
+    child: std::process::Child,
+    pub stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Streaming {
+    /// Waits for git to end, once its output is all read. True if it ended with `codes`.
+    pub fn finish(mut self, codes: &[i32]) -> bool {
+        self.child.wait().is_ok_and(|s| s.code().is_some_and(|c| codes.contains(&c)))
+    }
+}
+
+impl Drop for Streaming {
+    fn drop(&mut self) {
+        // Already over unless it was dropped early, and then it has to stop.
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GitOutput {
     pub stdout: Vec<u8>,
@@ -278,15 +339,9 @@ impl GitExe {
         self.run_raw(cwd, args)?.into_result()
     }
 
-    /// Full control: stdin, env, cancellation, and a callback receiving stderr
-    /// lines as they arrive (`\r` counts as a line end so progress works).
-    pub fn run_opts(&self, cwd: Option<&Path>, args: &[String], opts: &RunOpts, on_line: &mut dyn FnMut(&str)) -> Result<GitOutput> {
-        let stop = [opts.cancel.as_ref(), self.cancel.as_ref()];
-        let stopped = || stop.iter().flatten().any(|c| c.load(Ordering::Relaxed));
-        if stopped() {
-            return Err(Error::Other("cancelled".into()));
-        }
-        let start = Instant::now();
+    /// git as `run_opts` starts it: settings that make its output the same everywhere, nothing
+    /// of the user's run on a read, and the environment it needs. Not started yet.
+    fn command(&self, cwd: Option<&Path>, args: &[String], opts: &RunOpts) -> Command {
         let mut cmd = Command::new(&self.path);
         // `git config` runs nothing, and has to report what the repository really says. Its
         // list would show every one of these as if someone had set them.
@@ -361,6 +416,41 @@ impl GitExe {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        cmd
+    }
+
+    /// `git cat-file --batch`, kept running to be asked for one object after another. For
+    /// reading many files at a revision, where starting git for each would cost more than
+    /// reading them.
+    pub fn cat_file(&self, cwd: &Path) -> Result<CatFile> {
+        let mut cmd = self.command(Some(cwd), &["cat-file".to_string(), "--batch".to_string()], &RunOpts { stdin: Some(Vec::new()), ..Default::default() });
+        cmd.stderr(Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| Error::Other(format!("failed to start {}: {e}", self.path.display())))?;
+        let input = child.stdin.take().expect("stdin is piped");
+        let output = std::io::BufReader::with_capacity(256 * 1024, child.stdout.take().expect("stdout is piped"));
+        Ok(CatFile { child, input, output })
+    }
+
+    /// A read whose output is taken as it comes, not when git is done. Its messages are
+    /// dropped. Ends git when dropped.
+    pub fn stream(&self, cwd: &Path, args: &[String]) -> Result<Streaming> {
+        let mut cmd = self.command(Some(cwd), args, &RunOpts::default());
+        cmd.stderr(Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| Error::Other(format!("failed to start {}: {e}", self.path.display())))?;
+        let stdout = std::io::BufReader::with_capacity(64 * 1024, child.stdout.take().expect("stdout is piped"));
+        Ok(Streaming { child, stdout })
+    }
+
+    /// Full control: stdin, env, cancellation, and a callback receiving stderr
+    /// lines as they arrive (`\r` counts as a line end so progress works).
+    pub fn run_opts(&self, cwd: Option<&Path>, args: &[String], opts: &RunOpts, on_line: &mut dyn FnMut(&str)) -> Result<GitOutput> {
+        let stop = [opts.cancel.as_ref(), self.cancel.as_ref()];
+        let stopped = || stop.iter().flatten().any(|c| c.load(Ordering::Relaxed));
+        if stopped() {
+            return Err(Error::Other("cancelled".into()));
+        }
+        let start = Instant::now();
+        let mut cmd = self.command(cwd, args, opts);
         let display = format!("git {}", args.iter().map(|a| display_arg(a)).collect::<Vec<_>>().join(" "));
         let mut child = cmd.spawn().map_err(|e| Error::Other(format!("failed to start {}: {e}", self.path.display())))?;
 

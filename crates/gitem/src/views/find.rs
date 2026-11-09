@@ -209,17 +209,25 @@ impl FindView {
         "Find in files".into()
     }
 
-    fn asked(&self) -> Asked {
+    fn asked(&self, settings: &gitem_core::settings::Settings) -> Asked {
+        // What Settings always leaves out goes with the box's own, unless ignored files are
+        // asked for, which means everything.
+        let mut exclude = self.exclude.trim().to_string();
+        let always = settings.find_exclude.trim();
+        if !self.include_ignored && !always.is_empty() {
+            exclude = if exclude.is_empty() { always.to_string() } else { format!("{exclude}, {always}") };
+        }
         let query = Query {
             text: self.text.clone(),
             regex: self.regex,
             case_sensitive: self.case_sensitive,
             whole_word: self.whole_word,
             include: self.include.clone(),
-            exclude: self.exclude.clone(),
+            exclude,
             include_ignored: self.include_ignored,
+            max_file_size: u64::from(settings.find_max_file_mb) * 1024 * 1024,
             max_matches: if self.all { 0 } else { textsearch::DEFAULT_MAX_MATCHES },
-            ..Default::default()
+            threads: settings.find_threads as usize,
         };
         Asked { query, within: self.within, folder: self.folder.clone(), rev: self.rev.trim().to_string() }
     }
@@ -327,7 +335,7 @@ impl FindView {
     }
 
     fn start(&mut self, ctx: &egui::Context, cx: &Cx, refresh: bool) {
-        let asked = self.asked();
+        let asked = self.asked(cx.settings);
         if let Some(run) = self.running.take() {
             run.search.cancel();
         }
@@ -409,6 +417,10 @@ impl FindView {
             if r.changed() {
                 self.history_at = None;
                 self.changed(now);
+                // Searching waits for Enter, with Settings' search as you type off.
+                if !cx.settings.find_on_type {
+                    self.edited_at = None;
+                }
             }
             if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 // Now, not after the pause, and kept for Up to bring back.
@@ -685,7 +697,7 @@ impl FindView {
             });
         }
         if s.skipped_large > 0 {
-            let mb = textsearch::DEFAULT_MAX_FILE_SIZE / (1024 * 1024);
+            let mb = cx.settings.find_max_file_mb;
             ui.label(RichText::new(format!("{} over {mb} MB left out.", plural(s.skipped_large, "file", "files"))).small().color(p.faint));
         }
         if !s.errors.is_empty() {

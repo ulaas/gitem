@@ -686,6 +686,18 @@ impl SettingsView {
             g.switch(&mut s.editor_trim_on_save, "Trim spaces at line ends when saving", "");
             g.switch(&mut s.editor_autosave, "Save when switching to another window", "Every file with unsaved edits, in each open repository's editor tabs. A file that changed on disk meanwhile is left for you to decide.");
         });
+        group(ui, "Find in files", p, |g| {
+            g.switch(&mut s.find_on_type, "Search as you type", "Otherwise only when Enter is pressed. Ctrl+Shift+F opens it.");
+            g.stacked("Always leave out", "Globs, comma-separated, as in the exclude box: **/vendor/**, *.min.js. Searching ignored files too includes these.", |ui| {
+                ui.add(input(&mut s.find_exclude).hint_text("Nothing beyond what .gitignore leaves out").desired_width(f32::INFINITY));
+            });
+            g.row("Largest file", "Bigger files are left out and counted: nearly always generated, and slow. 0 is no limit.", |ui| {
+                ui.add(egui::DragValue::new(&mut s.find_max_file_mb).range(0..=4096).suffix(" MB"));
+            });
+            g.row("Files read at once", "0 is one per core. Fewer leaves more of the machine for other work while a search runs.", |ui| {
+                ui.add(egui::DragValue::new(&mut s.find_threads).range(0..=256).custom_formatter(|n, _| if n == 0.0 { "Every core".to_string() } else { format!("{n}") }));
+            });
+        });
     }
 
     fn blame(&mut self, ui: &mut Ui, s: &mut Settings, p: &Palette) {

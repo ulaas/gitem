@@ -1,6 +1,8 @@
 //! How fast find in files is on a folder, beside `git grep` on the same.
 //!
-//! `cargo run --release -p gitem-core --example search_bench -- FOLDER QUERY [--regex] [--runs N]`
+//! `cargo run --release -p gitem-core --example search_bench -- FOLDER QUERY [--regex] [--runs N] [--rev REV]`
+//!
+//! With `--rev`, the files as that revision has them, beside `git grep` at the same.
 //!
 //! Run it twice: the first run reads from disk, the rest from the system's file cache.
 use std::collections::HashMap;
@@ -17,12 +19,17 @@ fn main() {
         std::process::exit(2);
     };
     let regex = args.iter().any(|a| a == "--regex");
+    let rev = args.iter().position(|a| a == "--rev").and_then(|i| args.get(i + 1)).cloned();
     let runs: usize = args.iter().position(|a| a == "--runs").and_then(|i| args.get(i + 1)).and_then(|n| n.parse().ok()).unwrap_or(3);
     let root = PathBuf::from(folder).canonicalize().expect("folder");
     let git = GitExe::discover(None).ok();
     for run in 1..=runs {
         let query = Query { text: text.clone(), regex, max_matches: 0, ..Default::default() };
-        let req = Request { root: root.clone(), query, scope: Scope::WorkingTree { folder: None }, overlay: HashMap::new(), git: None };
+        let scope = match &rev {
+            Some(r) => Scope::Revision(r.clone()),
+            None => Scope::WorkingTree { folder: None },
+        };
+        let req = Request { root: root.clone(), query, scope, overlay: HashMap::new(), git: git.clone() };
         let t = Instant::now();
         let search = textsearch::start(req, || {}).expect("query");
         let mut first: Option<Duration> = None;
@@ -39,7 +46,13 @@ fn main() {
         let grep = git.as_ref().map(|g| {
             let t = Instant::now();
             let flavour = if regex { "-E" } else { "-F" };
-            let _ = g.run_raw(Some(&root), &["grep", "-n", "-I", "-i", "--untracked", flavour, "-e", text, "--"]);
+            let mut a = vec!["grep", "-n", "-I", "-i", flavour, "-e", text.as_str()];
+            match &rev {
+                Some(r) => a.push(r.as_str()),
+                None => a.push("--untracked"),
+            }
+            a.push("--");
+            let _ = g.run_raw(Some(&root), &a);
             t.elapsed()
         });
         println!(

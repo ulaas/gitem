@@ -242,6 +242,15 @@ pub struct Settings {
     pub palette_recent: Vec<String>,
     /// The sidebar shows files rather than branches and the like.
     pub sidebar_files: bool,
+    /// Find in files leaves out files bigger than this, in MB. 0 is no limit.
+    pub find_max_file_mb: u32,
+    /// How many files find in files reads at once. 0 is one per core.
+    pub find_threads: u32,
+    /// Globs find in files always leaves out, as its own exclude box takes them, unless
+    /// ignored files are asked for too.
+    pub find_exclude: String,
+    /// Find in files starts as typing pauses, not only on Enter.
+    pub find_on_type: bool,
     /// The Changes list groups files by folder rather than listing them flat.
     pub changes_tree: bool,
     /// Open tabs per repository, restored next time.
@@ -378,6 +387,10 @@ impl Default for Settings {
             palette_recent: Vec::new(),
             changes_tree: false,
             sidebar_files: false,
+            find_max_file_mb: 50,
+            find_threads: 0,
+            find_exclude: String::new(),
+            find_on_type: true,
             session_tabs: std::collections::HashMap::new(),
             session_layouts: std::collections::HashMap::new(),
             unknown: serde_json::Map::new(),

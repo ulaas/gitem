@@ -277,6 +277,54 @@ fn at_a_revision_the_files_are_as_they_were() {
     assert!(!f.root.join("x").exists());
 }
 
+/// At a revision, the same searcher reads the files, so everything the working tree has
+/// works there too: lines joined by a search, the size limit, binary files, and the regex
+/// syntax, which isn't git's.
+#[test]
+fn a_revision_is_searched_as_the_working_tree_is() {
+    let f = Fx::new();
+    f.write("a.txt", "first line\nsecond line\n").write("big.txt", format!("{}needle\n", "x".repeat(4000))).write("bin.dat", b"needle\x00\x01\x02");
+    f.write("crlf.txt", "ends with needle\r\nnext\r\n");
+    f.commit_all("first");
+    for p in ["a.txt", "big.txt", "bin.dat", "crlf.txt"] {
+        std::fs::remove_file(f.root.join(p)).unwrap();
+    }
+    let at_head = |query: Query| f.search_in(query, Scope::Revision("HEAD".into()), HashMap::new());
+    let (files, s) = at_head(q("line\nsecond"));
+    assert_eq!(paths(&files), ["a.txt"], "{s:?}");
+    assert_eq!(files[0].lines.iter().map(|l| l.line).collect::<Vec<_>>(), [1, 2]);
+    let (files, s) = at_head(Query { max_file_size: 1000, ..q("needle") });
+    assert_eq!(paths(&files), ["crlf.txt"], "big is over the limit and bin is binary");
+    assert_eq!(s.skipped_large, 1);
+    // `$` before a CRLF, and a class git's own regex syntax doesn't have.
+    assert_eq!(paths(&at_head(Query { regex: true, ..q(r"needle$") }).0), ["big.txt", "crlf.txt"]);
+    assert_eq!(hits(&at_head(Query { regex: true, ..q(r"\p{Lu}*sec\w+") }).0), ["second"]);
+}
+
+#[test]
+fn a_big_revision_is_read_in_many_batches_and_all_of_it_is_found() {
+    let f = Fx::new();
+    // More files than one batch takes, a few with matches far apart.
+    for i in 0..1200 {
+        f.write(&format!("d{}/f{i}.txt", i % 7), if i % 300 == 3 { format!("file {i}\nthe needle\n") } else { format!("file {i}\n") });
+    }
+    f.commit_all("many");
+    let (files, s) = f.search_in(Query { threads: 3, ..q("needle") }, Scope::Revision("HEAD".into()), HashMap::new());
+    assert_eq!(files.len(), 4, "{s:?}");
+    assert_eq!(s.files_searched, 1200);
+    assert!(s.errors.is_empty(), "{s:?}");
+    // Plain text has git name the files to read; a regex reads them all. Same answer.
+    let rev = |query: Query| f.search_in(query, Scope::Revision("HEAD".into()), HashMap::new());
+    for (text, case) in [("NEEDLE", false), ("needle", true), ("file 9", false), ("absent", false)] {
+        let plain = rev(Query { case_sensitive: case, ..q(text) });
+        let read_all = rev(Query { case_sensitive: case, regex: true, ..q(text) });
+        assert_eq!(plain.0, read_all.0, "{text}");
+        assert_eq!(plain.1.files_searched, read_all.1.files_searched, "{text}: every file counts as looked at");
+    }
+    // And with one thread, the same.
+    assert_eq!(f.search(Query { threads: 1, ..q("needle") }).0.len(), 4);
+}
+
 #[test]
 fn notify_is_called_and_results_come_before_the_end() {
     let f = Fx::new();

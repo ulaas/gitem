@@ -4,8 +4,8 @@
 //! show while the rest are still being searched, and a search stops within a file of being
 //! told to.
 //!
-//! At a revision there's no folder to walk, so `git grep` does the reading and the same
-//! matcher finds where on each line the matches are.
+//! At a revision there's no folder to walk, so git hands over the files' contents and the
+//! same searcher reads them: what matches is the same at a revision as in the working tree.
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -53,11 +53,13 @@ pub struct Query {
     pub max_file_size: u64,
     /// Stop once this many have been found; 0 means no limit.
     pub max_matches: usize,
+    /// How many files are read at once; 0 means one per core.
+    pub threads: usize,
 }
 
 impl Default for Query {
     fn default() -> Self {
-        Self { text: String::new(), regex: false, case_sensitive: false, whole_word: false, include: String::new(), exclude: String::new(), include_ignored: false, max_file_size: DEFAULT_MAX_FILE_SIZE, max_matches: DEFAULT_MAX_MATCHES }
+        Self { text: String::new(), regex: false, case_sensitive: false, whole_word: false, include: String::new(), exclude: String::new(), include_ignored: false, max_file_size: DEFAULT_MAX_FILE_SIZE, max_matches: DEFAULT_MAX_MATCHES, threads: 0 }
     }
 }
 
@@ -258,13 +260,8 @@ pub fn split_globs(s: &str) -> Vec<String> {
 pub fn start(req: Request, notify: impl Fn() + Send + Sync + 'static) -> Result<Search, String> {
     let matcher = compile(&req.query)?;
     let overrides = globs(&req.root, &req.query)?;
-    if let Scope::Revision(_) = &req.scope {
-        if req.git.is_none() {
-            return Err("Searching a revision needs git.".into());
-        }
-        if req.query.is_multi_line() {
-            return Err("A search across lines isn't possible at a revision, only in the working tree.".into());
-        }
+    if matches!(req.scope, Scope::Revision(_)) && req.git.is_none() {
+        return Err("Searching a revision needs git.".into());
     }
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -335,6 +332,14 @@ struct Shared {
 impl Shared {
     fn stopped(&self) -> bool {
         self.cancel.load(Ordering::Relaxed) || self.limit_hit.load(Ordering::Relaxed)
+    }
+
+    /// How many files to read at once.
+    fn threads(&self) -> usize {
+        match self.query.threads {
+            0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+            n => n,
+        }
     }
 
     fn error(&self, e: impl ToString) {
@@ -411,6 +416,21 @@ impl Shared {
             return;
         }
         self.send(tx, FileMatches { path: rel, lines: sink.lines, matches: sink.matches, unsaved: overlay.is_some() });
+    }
+
+    /// Searches a file's contents, as git has them at a revision.
+    fn search_bytes(&self, searcher: &mut Searcher, rel: String, bytes: &[u8], tx: &Sender<Event>) {
+        if self.stopped() {
+            return;
+        }
+        self.files_searched.fetch_add(1, Ordering::Relaxed);
+        let mut sink = Collect { shared: self, lines: Vec::new(), matches: 0, binary: false };
+        if let Err(e) = searcher.search_slice(&self.matcher, bytes, &mut sink) {
+            return self.error(format!("{rel}: {e}"));
+        }
+        if !sink.binary && !sink.lines.is_empty() {
+            self.send(tx, FileMatches { path: rel, lines: sink.lines, matches: sink.matches, unsaved: false });
+        }
     }
 }
 
@@ -512,7 +532,8 @@ fn walk(shared: &Arc<Shared>, folder: Option<&str>, tx: &Sender<Event>) {
     };
     let honour = !shared.query.include_ignored;
     let mut b = WalkBuilder::new(&start);
-    b.hidden(false)
+    b.threads(shared.query.threads)
+        .hidden(false)
         .git_ignore(honour)
         .git_exclude(honour)
         .git_global(honour)
@@ -566,7 +587,7 @@ fn allowed(shared: &Shared, rel: &str, is_dir: bool) -> bool {
 fn files(shared: &Arc<Shared>, list: Vec<String>, tx: &Sender<Event>) {
     let list: Vec<String> = list.into_iter().filter(|rel| allowed(shared, rel, false)).collect();
     let next = AtomicUsize::new(0);
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(list.len().max(1));
+    let threads = shared.threads().min(list.len().max(1));
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {
@@ -590,84 +611,141 @@ fn files(shared: &Arc<Shared>, list: Vec<String>, tx: &Sender<Event>) {
     });
 }
 
-/// At a revision, `git grep` reads the files out of git's database, and the same matcher
-/// finds where the matches are on each line it gives back.
+/// A file at a revision, as `git ls-tree --long` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Blob {
+    oid: String,
+    size: u64,
+    path: String,
+}
+
+/// `mode SP type SP oid SP+ size TAB path NUL`, files only: not links, nor submodules.
+fn parse_ls_tree_long(out: &[u8]) -> Vec<Blob> {
+    out.split(|b| *b == 0)
+        .filter_map(|rec| {
+            let rec = std::str::from_utf8(rec).ok()?;
+            let (meta, path) = rec.split_once('\t')?;
+            let mut f = meta.split_whitespace();
+            let (mode, kind, oid, size) = (f.next()?, f.next()?, f.next()?, f.next()?);
+            (kind == "blob" && mode != "120000").then(|| Blob { oid: oid.to_string(), size: size.parse().unwrap_or(0), path: path.to_string() })
+        })
+        .collect()
+}
+
+/// For plain text, `git grep` names the files at a revision that could have it, inside one
+/// process and faster than they can be read out of it, and they're searched as it names them.
+/// Never fewer than the searcher would find: no `-w`, no `-I`, and only for ASCII, where git
+/// ignores case as the searcher does. None for a regular expression, which is the searcher's
+/// syntax, not git's: then every file is read.
+fn candidates(shared: &Shared, git: &GitExe, rev: &str) -> Option<crate::runner::Streaming> {
+    let q = &shared.query;
+    if q.regex || q.text.is_empty() || !q.text.is_ascii() || q.is_multi_line() {
+        return None;
+    }
+    let mut a: Vec<String> = ["grep", "-l", "-z", "--no-color", "--full-name", "-F"].map(String::from).to_vec();
+    if !q.case_sensitive {
+        a.push("-i".into());
+    }
+    a.extend(["-e".to_string(), q.text.clone(), rev.to_string(), "--".to_string()]);
+    git.stream(&shared.root, &a).ok()
+}
+
+/// At a revision there's no folder to walk: git lists the files and a `cat-file` on each core
+/// brings back their contents, which the same searcher reads as it would the working tree's.
+/// What matches is the same at a revision as on disk.
 fn revision(shared: &Arc<Shared>, git: &GitExe, rev: &str, tx: &Sender<Event>) {
     let rev = match crate::repo::rev_arg(rev) {
-        Ok(r) => r,
+        Ok(r) => r.to_string(),
         Err(e) => return shared.error(e),
     };
-    let q = &shared.query;
-    let run = |flavour: &str| {
-        let mut a: Vec<String> = ["grep", "-n", "-I", "--null", "--no-color", "--full-name"].map(String::from).to_vec();
-        a.push(flavour.to_string());
-        if !q.case_sensitive {
-            a.push("-i".into());
-        }
-        if q.whole_word {
-            a.push("-w".into());
-        }
-        a.extend(["-e".to_string(), q.text.clone(), rev.to_string(), "--".to_string()]);
-        let opts = RunOpts { cancel: Some(shared.cancel.clone()), ..Default::default() };
-        git.run_opts(Some(&shared.root), &a, &opts, &mut |_| {})
-    };
-    // Perl's syntax is the nearest to the matcher's. Not every git has it built in.
-    let out = if q.regex {
-        match run("-P") {
-            Ok(o) if !o.ok() && o.stderr.to_lowercase().contains("pcre") => run("-E"),
-            other => other,
-        }
-    } else {
-        run("-F")
-    };
-    let out = match out {
-        Ok(o) => o,
+    // Started first, to look while the files are listed. Until it's read, it waits.
+    let named = candidates(shared, git, &rev);
+    let opts = RunOpts { cancel: Some(shared.cancel.clone()), ..Default::default() };
+    let args: Vec<String> = ["ls-tree", "-r", "-z", "--long", "--full-tree", rev.as_str()].map(String::from).to_vec();
+    let listed = match git.run_opts(Some(&shared.root), &args, &opts, &mut |_| {}) {
+        Ok(o) if o.ok() => o,
+        Ok(o) => return shared.error(format!("{rev}: {}", o.stderr.trim())),
         Err(e) => return shared.error(e),
     };
-    // One means nothing found, which isn't a failure.
-    if !out.ok() && !(out.code == 1 && out.stderr.trim().is_empty()) {
-        return shared.error(out.stderr.trim());
+    let max = shared.query.max_file_size;
+    let mut blobs = Vec::new();
+    for blob in parse_ls_tree_long(&listed.stdout) {
+        if !allowed(shared, &blob.path, false) {
+            continue;
+        }
+        if max > 0 && blob.size > max {
+            shared.skipped_large.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        blobs.push(blob);
     }
-    let text = out.text();
-    let mut current: Option<FileMatches> = None;
-    for hit in crate::repo::parse_grep(&text, Some(rev)) {
-        if shared.stopped() {
-            break;
+    let (send, work) = channel::<usize>();
+    let work = Mutex::new(work);
+    std::thread::scope(|s| {
+        // One `cat-file` per thread, asked for one file after another: starting git costs more
+        // than reading a file, on Windows most of all.
+        for _ in 0..shared.threads().min(blobs.len().div_ceil(16).max(1)) {
+            s.spawn(|| {
+                let mut git = match git.cat_file(&shared.root) {
+                    Ok(g) => g,
+                    Err(e) => return shared.error(e),
+                };
+                let mut searcher = shared.searcher();
+                let mut bytes = Vec::new();
+                loop {
+                    let next = work.lock().ok().and_then(|w| w.recv().ok());
+                    let Some(blob) = next.and_then(|i| blobs.get(i)) else { break };
+                    if shared.stopped() {
+                        break;
+                    }
+                    match git.read(&blob.oid, &mut bytes) {
+                        Ok(true) => shared.search_bytes(&mut searcher, blob.path.clone(), &bytes, tx),
+                        Ok(false) => shared.error(format!("{}: missing from the repository", blob.path)),
+                        Err(e) => return shared.error(format!("{}: {e}", blob.path)),
+                    }
+                }
+            });
         }
-        if current.as_ref().is_some_and(|c| c.path != hit.path) {
-            shared.send(tx, current.take().expect("checked"));
-        }
-        if current.is_none() {
-            if !allowed(shared, &hit.path, false) {
-                continue;
+        let mut sent = vec![false; blobs.len()];
+        if let Some(mut named) = named {
+            use std::io::BufRead;
+            let by_path: HashMap<&str, usize> = blobs.iter().enumerate().map(|(i, b)| (b.path.as_str(), i)).collect();
+            let prefix = format!("{rev}:");
+            let mut path = Vec::new();
+            while !shared.stopped() && named.stdout.read_until(0, &mut path).is_ok_and(|n| n > 0) {
+                let p = String::from_utf8_lossy(path.strip_suffix(&[0]).unwrap_or(&path)).into_owned();
+                if let Some(&i) = by_path.get(p.strip_prefix(&prefix).unwrap_or(&p)) {
+                    sent[i] = true;
+                    let _ = send.send(i);
+                }
+                path.clear();
             }
-            shared.files_searched.fetch_add(1, Ordering::Relaxed);
-            current = Some(FileMatches { path: hit.path.clone(), lines: Vec::new(), matches: 0, unsaved: false });
-        }
-        let content = hit.text.as_bytes();
-        let mut found = Vec::new();
-        let _ = shared.matcher.find_iter(content, |r| {
-            if !r.is_empty() {
-                found.push(r.start()..r.end());
+            // Zero is something found and one nothing. Anything else, and the rest are read too.
+            if !shared.stopped() && named.finish(&[0, 1]) {
+                let passed = sent.iter().filter(|s| !**s).count();
+                shared.files_searched.fetch_add(passed, Ordering::Relaxed);
+                sent.fill(true);
             }
-            true
-        });
-        let n = found.len().max(1);
-        if !shared.take(n) {
-            break;
         }
-        let c = current.as_mut().expect("set above");
-        c.matches += n;
-        c.lines.push(line_match(hit.line, content, &found));
-    }
-    if let Some(c) = current {
-        shared.send(tx, c);
-    }
+        for (i, done) in sent.iter().enumerate() {
+            if !done && !shared.stopped() {
+                let _ = send.send(i);
+            }
+        }
+        drop(send);
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ls_tree_lists_files_with_sizes_and_leaves_out_links_and_submodules() {
+        let out = b"100644 blob aaa      12\tsrc/a b.rs\x00100755 blob bbb       3\trun.sh\x00120000 blob ccc       5\tlink\x00160000 commit ddd       -\tsub\x00";
+        let blobs = parse_ls_tree_long(out);
+        assert_eq!(blobs, vec![Blob { oid: "aaa".into(), size: 12, path: "src/a b.rs".into() }, Blob { oid: "bbb".into(), size: 3, path: "run.sh".into() }]);
+    }
 
     fn preview(text: &str, needle: &str) -> LineMatch {
         let ranges: Vec<Range<usize>> = text.match_indices(needle).map(|(i, m)| i..i + m.len()).collect();

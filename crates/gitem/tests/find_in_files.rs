@@ -247,3 +247,84 @@ fn find_in_folder_looks_only_there_and_the_tab_has_the_same_search() {
     wait_for(&mut h, "the tab", |h| h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Grep(_))));
     wait_for(&mut h, "its results", |h| h.query_all_by_label("docs/more.md").count() == 2);
 }
+
+#[test]
+fn settings_leave_files_out_and_can_wait_for_enter() {
+    let f = Fx::new();
+    let mut h = harness(&f, true);
+    {
+        let s = &mut h.state_mut().settings;
+        s.find_exclude = "**/main.rs".into();
+        s.find_on_type = false;
+    }
+    find(&mut h, "needle");
+    for _ in 0..40 {
+        h.step();
+    }
+    assert!(summary(&h).is_none(), "nothing until Enter");
+    h.key_press(Key::Enter);
+    wait_summary(&mut h, "1 result in 1 file");
+    assert!(shows(&h, "src/lib.rs") && !shows(&h, "src/main.rs"), "main.rs is always left out");
+    // Ignored files too means everything, Settings' list included.
+    h.get_by_label("Files to include and exclude").click();
+    h.step();
+    toggle(&mut h, "Search ignored files too");
+    wait_summary(&mut h, "3 results in 3 files");
+    // A size limit of 1 MB leaves a bigger file out, and says so.
+    f.write("big.txt", &format!("needle\n{}", "x".repeat(1_100_000)));
+    h.state_mut().settings.find_max_file_mb = 1;
+    h.get_by_label("Search again").click();
+    wait_for(&mut h, "the note", |h| h.query_by_label_contains("over 1 MB left out").is_some() || h.query_all_by_role(Role::Label).any(|n| n.accesskit_node().value().is_some_and(|v| v.contains("over 1 MB left out"))));
+}
+
+/// The middle of `n` frames, in milliseconds. The harness doesn't paint, so this is the
+/// view's own work.
+fn median_frame_ms(h: &mut Harness<GitemApp>, n: usize, mut each: impl FnMut(&mut Harness<GitemApp>)) -> f64 {
+    let mut times: Vec<f64> = (0..n)
+        .map(|_| {
+            each(h);
+            let t = Instant::now();
+            h.step();
+            t.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
+    times.sort_by(f64::total_cmp);
+    times[n / 2]
+}
+
+/// As in `ui_flows.rs`: most of one 60 Hz frame, when these take about a millisecond on an
+/// idle machine, which leaves room for a test run with every core busy.
+const FRAME_BOUND_MS: f64 = 12.0;
+
+/// As many results as a search keeps, and more: it ends quickly, and a frame costs what's on
+/// screen, not what was found, still or scrolling, in the sidebar and in a tab.
+#[test]
+fn twenty_thousand_results_stay_quick() {
+    let f = Fx::new();
+    for i in 0..2500 {
+        let body: String = (0..10).map(|l| format!("let needle_{l} = {i}; // a needle\n")).collect();
+        f.write(&format!("gen/d{}/f{i}.rs", i % 25), &body);
+    }
+    let mut h = harness(&f, true);
+    let t = Instant::now();
+    find(&mut h, "needle");
+    wait_for(&mut h, "the limit", |h| h.query_by_label_contains("Search all").is_some() || h.query_all_by_role(Role::Label).any(|n| n.accesskit_node().value().is_some_and(|v| v.contains("Showing the first"))));
+    let took = t.elapsed();
+    eprintln!("20,000 results in {took:?}");
+    assert!(took < Duration::from_secs(20), "{took:?}");
+    let still = median_frame_ms(&mut h, 60, |_| {});
+    let down = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, -6.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move };
+    let row = h.query_all_by_role(Role::Button).find(|n| n.accesskit_node().label().is_some_and(|l| l.starts_with("gen/"))).expect("a result").rect().center();
+    h.hover_at(row);
+    let scrolling = median_frame_ms(&mut h, 60, |h| h.event(down.clone()));
+    eprintln!("sidebar: {still:.2} ms still, {scrolling:.2} ms scrolling");
+    assert!(still < FRAME_BOUND_MS && scrolling < FRAME_BOUND_MS, "{still:.1} ms still, {scrolling:.1} ms scrolling");
+
+    // All of them, in a tab.
+    h.get_by_label("Open in a tab").click();
+    // Which 20,000 is whichever were found first, so not the same files each time.
+    wait_for(&mut h, "the tab's results", |h| h.query_all_by_role(Role::Label).filter(|n| n.accesskit_node().value().is_some_and(|v| v.starts_with("20,000 results in"))).count() == 2);
+    let still = median_frame_ms(&mut h, 60, |_| {});
+    eprintln!("sidebar and tab: {still:.2} ms still");
+    assert!(still < FRAME_BOUND_MS, "{still:.1} ms with both");
+}
