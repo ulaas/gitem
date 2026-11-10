@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3 (2026-11-11)
+
+Fixed:
+
+- A remote's branches in the sidebar are grouped into folders by the `/` in their names, as local branches are: `origin/ulas/branch-a` and `origin/ulas/branch-b` sit in a `ulas` folder under origin, not in one flat list. Each folder opens and closes on its own.
+
 ## 0.7.2 (2026-11-10)
 
 Changed:

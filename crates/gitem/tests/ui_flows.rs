@@ -3154,6 +3154,40 @@ fn local_and_remote_branches_open_to_their_latest_commits() {
     no_errors(&h);
 }
 
+/// `ulas/branch-a` and `ulas/branch-b` on origin sit in a `ulas` folder under origin, as they do
+/// under Branches, and each folder closes on its own.
+#[test]
+fn a_remotes_branches_are_in_folders_like_the_local_ones() {
+    let f = Fx::new();
+    many_commits(&f, 3);
+    let bare = tempfile::tempdir().unwrap();
+    let bare_path = bare.path().join("r.git");
+    f.git.run(None, &["init", "-q", "--bare", "-b", "main", &bare_path.to_string_lossy()]).unwrap();
+    f.git(&["remote", "add", "origin", &bare_path.to_string_lossy()]);
+    f.git(&["branch", "ulas/branch-a"]);
+    f.git(&["branch", "ulas/branch-b", "HEAD~1"]);
+    f.git(&["push", "-q", "origin", "main", "ulas/branch-a", "ulas/branch-b"]);
+
+    let mut h = harness(&f);
+    settle(&mut h);
+    click(&mut h, "Remotes section");
+    settle(&mut h);
+    click(&mut h, "origin");
+    settle(&mut h);
+    pump_for_label(&mut h, "Close folder origin/ulas");
+    assert!(h.query_by_label("Close folder ulas").is_some(), "the local one is there too");
+    assert!(h.query_by_label("Expand origin/ulas/branch-a").is_some() && h.query_by_label("Expand origin/ulas/branch-b").is_some());
+    assert_eq!(h.query_all_by_label("branch-a").count(), 2, "shown by the rest of its name, here and under Branches");
+
+    click(&mut h, "Close folder origin/ulas");
+    settle(&mut h);
+    assert!(h.query_by_label("Open folder origin/ulas").is_some());
+    assert!(h.query_by_label("Expand origin/ulas/branch-a").is_none(), "closed, so its branches are hidden");
+    assert!(h.query_by_label("Close folder ulas").is_some(), "and the local folder stays open");
+    assert!(h.query_by_label("Expand origin/main").is_some(), "a branch outside it stays");
+    no_errors(&h);
+}
+
 fn selected_in_graph(h: &Harness<GitemApp>) -> Vec<String> {
     h.state().repos[0].dock.iter_all_tabs().find_map(|(_, t)| if let Tab::Graph(g) = t { Some(g.selected().to_vec()) } else { None }).unwrap()
 }
