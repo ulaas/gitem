@@ -71,8 +71,9 @@ pub fn ref_glyph(kind: RefKind) -> String {
 }
 
 /// Paint a ref badge at `pos`, returning its rectangle.
-pub fn paint_badge(ui: &Ui, pos: egui::Pos2, h: f32, r: &RefLabel, p: &Palette) -> Rect {
-    let color = ref_color(r.kind, r.current, p);
+/// `lane` is the branch's colour in the graph, where it has one: otherwise the kind's colour.
+pub fn paint_badge(ui: &Ui, pos: egui::Pos2, h: f32, r: &RefLabel, lane: Option<Color32>, p: &Palette) -> Rect {
+    let color = lane.unwrap_or_else(|| ref_color(r.kind, r.current, p));
     let text = format!("{}{}", ref_glyph(r.kind), r.name);
     let galley = ui.painter().layout_no_wrap(text, prop(11.0), p.text);
     let rect = Rect::from_min_size(pos, vec2(galley.size().x + 10.0, h));

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+Changed:
+
+- Branches wear the colour of their lane in the graph: their badges there and in Details, and their names and dots in the sidebar's branch list, so you can tell at a glance which line is which branch. Tags and stashes keep their own colours, and a branch that isn't in the graph keeps the plain look.
+
 ## 0.7.1 (2026-11-10)
 
 Changed:

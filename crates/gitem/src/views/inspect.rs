@@ -242,7 +242,8 @@ impl InspectPanel {
                 for (r, _) in badges.iter().take(if self.all_refs { badges.len() } else { SHOWN }) {
                     let w = badge_width(ui, r);
                     let (rect, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-                    paint_badge(ui, rect.min, 18.0, r, &p);
+                    let lane = matches!(r.kind, RefKind::Branch | RefKind::Remote).then(|| cx.data.lane_of(&r.name)).flatten().map(|l| p.lane(l));
+                    paint_badge(ui, rect.min, 18.0, r, lane, &p);
                 }
                 if more > 0 && crate::widgets::small_button(ui, if self.all_refs { "Fewer".to_string() } else { format!("+{more}") }).clicked() {
                     self.all_refs = !self.all_refs;
