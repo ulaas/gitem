@@ -43,6 +43,7 @@ fn raw(method: &str, url: &str, token: &str, body: Option<Value>) -> u16 {
     let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
     let reply = match (method, body) {
         ("POST", Some(b)) => agent.post(url).header("authorization", &auth).header("content-type", "application/json").send(b.to_string()),
+        ("PATCH", Some(b)) => agent.patch(url).header("authorization", &auth).header("content-type", "application/json").send(b.to_string()),
         ("DELETE", _) => agent.delete(url).header("authorization", &auth).call(),
         _ => agent.get(url).header("authorization", &auth).call(),
     };
@@ -132,6 +133,14 @@ fn exercise(url: &str, token: &str, name: &str) {
         assert!(t.elapsed() < Duration::from_secs(30), "the pull request ref never moved");
         std::thread::sleep(Duration::from_millis(500));
     }
+
+    // Gitea won't merge a draft, and gitem doesn't offer to: it's marked ready on the host first,
+    // which on Gitea means the title loses its WIP: prefix.
+    assert!(prs[0].merge_refusal().is_some_and(|r| r.contains("draft")), "{:?}", prs[0].merge_refusal());
+    let pulls = format!("{url}/api/v1/repos/gitem/{name}/pulls/{}", prs[0].number);
+    assert_eq!(raw("PATCH", &pulls, token, Some(json!({"title":"A change"}))), 201, "marking it ready");
+    let prs = c.list_prs().unwrap();
+    assert_eq!((prs[0].title.as_str(), prs[0].draft), ("A change", false), "ready");
 
     // Gitea works out whether it can merge in the background, so this may take a moment.
     let t = Instant::now();
