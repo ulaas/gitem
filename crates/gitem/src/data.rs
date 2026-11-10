@@ -200,6 +200,9 @@ pub struct RepoData {
     /// A find in files view was drawn this frame, so `editors` should carry unsaved text.
     pub searching: std::cell::Cell<bool>,
     editors_sig: u64,
+    /// Each branch's lane colour in the commit graph, by the name its badge there shows, for
+    /// the badges and branch lists elsewhere to match. Empty until a graph has been drawn.
+    pub lanes: std::cell::RefCell<Arc<HashMap<String, u16>>>,
     pub refs: Task<Arc<Refs>>,
     /// Bumped when branches, tags, or stashes change.
     pub refs_gen: u64,
@@ -240,6 +243,11 @@ pub struct RepoData {
 impl RepoData {
     /// What's open in editors now, given as path, the editor's own stamp for its text, and
     /// the editor as find in files sees it.
+    /// The lane colour of `name` in the commit graph, where it has a badge there.
+    pub fn lane_of(&self, name: &str) -> Option<u16> {
+        self.lanes.borrow().get(name).copied()
+    }
+
     pub fn set_editors(&mut self, open: Vec<(OpenEditor, u64)>) {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for (e, stamp) in &open {

@@ -381,7 +381,13 @@ impl Sidebar {
         let picked = !b.is_remote && self.picked.contains(&b.name);
         let (rect, resp) = keyed_row(ui, ROW, b.is_current || picked, &p, ("sidebar branch", b.is_remote, &b.name));
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, picked, label));
-        let text_color = if b.is_current { p.text } else { p.dim };
+        // Coloured as its lane is in the graph, where it's there to be.
+        let lane = cx.data.lane_of(&b.name);
+        let text_color = match lane {
+            Some(l) => p.series_text(l as usize),
+            None if b.is_current => p.text,
+            None => p.dim,
+        };
         // Any branch opens to its commits. Ones with something incoming start open.
         let open = self.is_open(b);
         {
@@ -402,7 +408,14 @@ impl Sidebar {
         if picked {
             ui.painter().text(pos2(rect.left() + 21.0, rect.center().y), egui::Align2::CENTER_CENTER, crate::chrome::icon::CHECK, prop(12.0), p.accent);
         } else {
-            ui.painter().circle(pos2(rect.left() + 21.0, rect.center().y), 3.5, if b.is_current { p.accent } else { p.panel }, egui::Stroke::new(1.0, if b.is_current { p.accent } else { p.faint }), );
+            // The current branch's dot is ringed, as its commit is in the graph.
+            let (fill, ring) = match (lane, b.is_current) {
+                (Some(l), true) => (p.lane(l), egui::Stroke::new(1.5, p.text)),
+                (Some(l), false) => (p.lane(l), egui::Stroke::NONE),
+                (None, true) => (p.accent, egui::Stroke::new(1.0, p.accent)),
+                (None, false) => (p.panel, egui::Stroke::new(1.0, p.faint)),
+            };
+            ui.painter().circle(pos2(rect.left() + 21.0, rect.center().y), 3.5, fill, ring);
         }
         let mut right = rect.right() - 4.0;
         // Incoming comes last, at the edge, so it's the easiest to spot.

@@ -1,6 +1,7 @@
 //! The commit graph: virtualised table with lanes, ref badges, search with
 //! highlighting, branch filters, a minimap, and drag-and-drop between refs.
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use egui::epaint::CubicBezierShape;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
@@ -31,6 +32,19 @@ struct Graph {
     more: bool,
     /// Commits from git, before the working-changes row and stash clean-up.
     loaded: usize,
+    /// Each branch's lane colour: the colour of the commit it points at.
+    lanes: Arc<HashMap<String, u16>>,
+}
+
+/// Branches, local and remote, by the lane colour of the commit each points at.
+fn lane_colors(commits: &[Commit], rows: &LaneRows) -> HashMap<String, u16> {
+    let mut out = HashMap::new();
+    for (i, c) in commits.iter().enumerate() {
+        for r in c.refs.iter().filter(|r| matches!(r.kind, RefKind::Branch | RefKind::Remote)) {
+            out.insert(r.name.clone(), rows.row(i).color);
+        }
+    }
+    out
 }
 
 #[derive(Clone, PartialEq, Default)]
@@ -174,6 +188,23 @@ fn a_commits_badges_lead_with_the_current_branch_and_drop_the_noise() {
     assert_eq!(got, [("main".to_string(), true), ("side".to_string(), false), ("origin/other".to_string(), false), ("v1".to_string(), false)]);
 }
 
+#[test]
+fn each_branch_takes_the_colour_of_the_lane_its_commit_is_on() {
+    let l = |kind, name: &str| RefLabel { kind, name: name.into(), current: false };
+    let c = |sha: &str, parents: &[&str], refs: Vec<RefLabel>| Commit { sha: sha.into(), parents: parents.iter().map(|p| p.to_string()).collect(), refs, ..Default::default() };
+    // main and side part at "base"; the tag has no lane colour of its own.
+    let commits = [
+        c("m", &["base"], vec![l(RefKind::Branch, "main"), l(RefKind::Remote, "origin/main")]),
+        c("s", &["base"], vec![l(RefKind::Branch, "side"), l(RefKind::Tag, "v1")]),
+        c("base", &[], vec![]),
+    ];
+    let rows = graph::layout_rows(&commits);
+    let lanes = lane_colors(&commits, &rows);
+    assert_eq!(lanes.len(), 3, "branches and remotes, not tags: {lanes:?}");
+    assert_eq!((lanes["main"], lanes["origin/main"], lanes["side"]), (rows.row(0).color, rows.row(0).color, rows.row(1).color));
+    assert_ne!(lanes["main"], lanes["side"], "two lanes, two colours");
+}
+
 fn build_query(f: &Filters, limit: usize, stash_shas: &[String], cur: Option<&str>) -> LogQuery {
     let mut q = LogQuery { limit, exclude_stash: true, no_merges: f.no_merges, first_parent: f.first_parent, date_order: true, ..Default::default() };
     if let Some(s) = &f.solo {
@@ -293,7 +324,8 @@ impl GraphView {
             let rows = if f.first_parent || f.no_merges { graph::layout_rows(&graph::parents_for_filters(&commits, f.first_parent, hidden_merges.as_ref())) } else { graph::layout_rows(&commits) };
             let max_width = rows.max_width().unwrap_or(1);
             let index = commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect();
-            Ok(Graph { commits, rows, index, max_width, more, loaded })
+            let lanes = Arc::new(lane_colors(&commits, &rows));
+            Ok(Graph { commits, rows, index, max_width, more, loaded, lanes })
         });
     }
 
@@ -543,6 +575,11 @@ impl GraphView {
             spinner_row(ui, "Loading commits…", cx.pal);
             return;
         };
+        if !Arc::ptr_eq(&cx.data.lanes.borrow(), &g.lanes) {
+            *cx.data.lanes.borrow_mut() = g.lanes.clone();
+            // The sidebar may have been drawn already this frame, with the old colours.
+            ui.ctx().request_repaint();
+        }
         // A repository with no commits has no columns worth showing.
         if g.commits.is_empty() && cx.status().is_some_and(|st| st.head_sha.is_empty()) {
             empty_state(ui, "No commits yet", "Add files to this folder, then commit them. Publishing needs a remote.", cx.pal);
@@ -831,7 +868,8 @@ impl GraphView {
                             }
                             // With its remote twin at the same commit, it says so and takes one badge.
                             let shown = RefLabel { name: if *both { format!("{} {}", lab.name, icon::CLOUD_CHECK) } else { lab.name.clone() }, ..lab.clone() };
-                            let br = paint_badge(&child, pos2(x, rect.top() + 3.0), ROW_H - 6.0, &shown, &p);
+                            let lane = matches!(lab.kind, RefKind::Branch | RefKind::Remote).then(|| p.lane(r.color));
+                            let br = paint_badge(&child, pos2(x, rect.top() + 3.0), ROW_H - 6.0, &shown, lane, &p);
                             let id = ui.id().with(("badge", i, &lab.name));
                             let bresp = ui.interact(br.intersect(clip), id, Sense::drag());
                             if lab.kind != RefKind::Stash {
