@@ -130,3 +130,34 @@ fn the_release_workflow_runs_only_what_it_checked_and_writes_only_where_it_must(
         assert!(at.len() >= 40 && at[..40].chars().all(|c| c.is_ascii_hexdigit()), "pinned to a commit: {line}");
     }
 }
+
+/// The updater downloads a release's files by name, so the names the workflow gives them and the
+/// names it asks for have to be the same ones.
+#[test]
+fn the_updater_asks_for_the_files_the_release_workflow_makes() {
+    use gitem_core::update::{Install, asset_name};
+    let y = release_workflow();
+    // The archives are named in two steps there: a folder's name, then that with its ending.
+    let made = |name: &str| {
+        let (stem, ending) = [".zip", ".tar.gz"].iter().find_map(|e| name.strip_suffix(e).map(|s| (s, *e))).unwrap_or((name, ""));
+        let pattern = stem.replace("9.9.9", "$VERSION").replace("x64", "${{ matrix.arch }}").replace("arm64", "${{ matrix.arch }}");
+        let pwsh = pattern.replace("$VERSION", "$env:VERSION");
+        assert!(y.contains(&pattern) || y.contains(&pwsh), "{name}: neither {pattern} nor {pwsh} is in release.yml");
+        assert!(ending.is_empty() || y.contains(&format!("$name{ending}")), "{name}: nothing is packed as {ending}");
+    };
+    for (kind, os, arch) in [
+        (Install::Installer, "windows", "x86_64"),
+        (Install::Program, "windows", "x86_64"),
+        (Install::Program, "windows", "aarch64"),
+        (Install::Program, "linux", "x86_64"),
+        (Install::Program, "linux", "aarch64"),
+        (Install::Program, "macos", "aarch64"),
+        (Install::AppImage("x".into()), "linux", "x86_64"),
+    ] {
+        made(&asset_name("9.9.9", &kind, os, arch).expect("a file for it"));
+    }
+    assert!(y.contains("sha256sum * > SHA256SUMS"), "what the updater checks a download against");
+    // The installer is run without its pages, so it mustn't start gitem itself or need a click.
+    let s = iss();
+    assert!(s.contains("skipifsilent") && s.contains("PrivilegesRequired=lowest"));
+}

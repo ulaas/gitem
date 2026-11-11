@@ -34,4 +34,15 @@ To try the builds without releasing, run the workflow by hand from **Actions > R
 
 `crates/gitem/tests/packaging.rs` reads these scripts and the workflow and checks what they promise.
 
-The update check needs a published release to ask about: `DEFAULT_RELEASE_URL` in `crates/gitem-core/src/update.rs` stays empty until there is one, and Settings has a field for the address meanwhile.
+## Updates from inside gitem
+
+gitem asks `DEFAULT_RELEASE_URL` (in `crates/gitem-core/src/update.rs`) once a day for the latest published release, and Update and restart installs it. What it downloads depends on how the running copy got there:
+
+| The running copy | What's downloaded | How it's put in place |
+| --- | --- | --- |
+| Installed by the Windows installer (`unins000.exe` is beside it) | `-windows-x64-setup.exe` | The running program is renamed to `gitem.exe.old`, the installer runs with `/VERYSILENT`, and the old file is put back if it fails |
+| From a zip or tar.gz, in a folder the user can write to | the zip or tar.gz for the system | Unpacked beside the program with the system's `tar`, then renamed into place (on Windows after moving the running one aside) |
+| An AppImage (`$APPIMAGE`) | the `.AppImage` for the system | Renamed over the old file |
+| Under Scoop, winget, Homebrew, `/usr`, or anywhere not writable | nothing | gitem names the command that updates it and links to the release |
+
+So the names of the release's files are part of the updater: `asset_name` in `update.rs` has to change with them. A download is installed only if its SHA-256 is the one in the release's `SHA256SUMS`, and the one GitHub reports for the file when it reports one. Only files under `DOWNLOAD_PREFIX` are installed, and only when the address asked is the default one. A draft release isn't seen by any of this: the update reaches people when the release is published.

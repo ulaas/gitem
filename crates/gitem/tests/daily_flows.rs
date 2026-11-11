@@ -349,8 +349,19 @@ fn nothing_asks_about_updates_unless_it_was_turned_on() {
         s.check_updates = false;
         s.update_url = url;
     });
+    h.state_mut().allow_scheduled_update_check_for_test();
     settle(&mut h);
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn the_check_is_on_unless_turned_off_and_an_old_settings_file_gets_it_too() {
+    assert!(Settings::default().check_updates);
+    // Before 0.8 the setting was off unless turned on, under another name.
+    let old: Settings = serde_json::from_str(r#"{"check_updates": false}"#).unwrap();
+    assert!(old.check_updates);
+    let off: Settings = serde_json::from_str(r#"{"update_check": false}"#).unwrap();
+    assert!(!off.check_updates);
 }
 
 #[test]
@@ -361,6 +372,7 @@ fn a_scheduled_check_says_what_it_found_once_a_day_only() {
         s.check_updates = true;
         s.update_url = url.clone();
     });
+    h.state_mut().allow_scheduled_update_check_for_test();
     // Not by its toast, which can come and go while the window's still settling on a busy machine.
     wait_for(&mut h, "the check's answer", |h| h.state().update_found_version() == Some("99.0.0"));
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -372,6 +384,7 @@ fn a_scheduled_check_says_what_it_found_once_a_day_only() {
         s.update_url = url2;
         s.last_update_check = gitem_core::util::now_ts() - 60;
     });
+    h.state_mut().allow_scheduled_update_check_for_test();
     settle(&mut h);
     assert_eq!(asked2.load(std::sync::atomic::Ordering::SeqCst), 0, "asked a minute ago");
 }
@@ -392,6 +405,8 @@ fn asking_from_about_answers_either_way_and_opens_nothing_by_itself() {
     click(&mut h, "Check for updates");
     wait_for_label(&mut h, "Open its page");
     assert!(h.query_by_label_contains("Version 99.0.0 is available").is_some());
+    // An address from Settings can say there's a release. Only gitem's own releases are installed.
+    assert!(h.query_by_label("Update and restart").is_none());
 
     // A broken address is said in the box and isn't an error window.
     let mut h = f.harness(|s| s.update_url = "http://example.invalid/latest".to_string());
@@ -399,6 +414,152 @@ fn asking_from_about_answers_either_way_and_opens_nothing_by_itself() {
     click(&mut h, "Check for updates");
     wait_for_text(&mut h, "Couldn't find out");
     assert!(h.state().errors_showing().is_empty());
+}
+
+// ---- installing an update, from a mock of the releases on this machine
+
+/// Serves `files` by path, and counts what was asked for.
+fn file_server(files: impl Fn(&str) -> Vec<(String, Vec<u8>)> + Send + 'static) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (log, served) = (asked.clone(), files(&base));
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            let mut b = [0u8; 4096];
+            let n = s.read(&mut b).unwrap_or(0);
+            let request = String::from_utf8_lossy(&b[..n]).to_string();
+            let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+            log.lock().unwrap().push(path.clone());
+            match served.iter().find(|(p, _)| *p == path) {
+                Some((_, body)) => {
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let _ = s.write_all(body);
+                }
+                None => {
+                    let _ = write!(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                }
+            }
+        }
+    });
+    (base, asked)
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A release's archive for this system as the release workflow makes it: one folder, with the
+/// program in it. Made by the system's tar, which is also what unpacks it.
+fn release_archive(dir: &std::path::Path, version: &str, program: &str, contents: &str) -> (String, Vec<u8>) {
+    let kind = gitem_core::update::Install::Program;
+    let name = gitem_core::update::asset_name(version, &kind, std::env::consts::OS, std::env::consts::ARCH).expect("a build for this system");
+    let folder = name.trim_end_matches(".zip").trim_end_matches(".tar.gz").to_string();
+    std::fs::create_dir_all(dir.join(&folder)).unwrap();
+    std::fs::write(dir.join(&folder).join(program), contents).unwrap();
+    let tar = if cfg!(windows) { std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("tar.exe") } else { "tar".into() };
+    let made = std::process::Command::new(tar).current_dir(dir).args(["-a", "-cf", &name, &folder]).output().unwrap();
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    let bytes = std::fs::read(dir.join(&name)).unwrap();
+    (name, bytes)
+}
+
+struct UpdateFx {
+    _dir: tempfile::TempDir,
+    exe: PathBuf,
+    base: String,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// A copy of gitem in a folder of its own, and releases that offer 99.0.0 for it. `sums` is what
+/// the release's SHA256SUMS says the archive hashes to, given what it really does.
+fn update_fx(sums: impl Fn(&str) -> String + Send + 'static) -> UpdateFx {
+    let dir = tempfile::tempdir().unwrap();
+    let program = if cfg!(windows) { "gitem.exe" } else { "gitem" };
+    let exe = dir.path().join("app").join(program);
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, "the old program").unwrap();
+    let (name, archive) = release_archive(&dir.path().join("made"), "99.0.0", program, "the new program");
+    let (base, asked) = file_server(move |base| {
+        let release = serde_json::json!({"tag_name":"v99.0.0","html_url":"http://127.0.0.1:9/r","assets":[
+            {"name": name, "browser_download_url": format!("{base}/dl/{name}"), "size": archive.len()},
+            {"name": "SHA256SUMS", "browser_download_url": format!("{base}/dl/SHA256SUMS")},
+        ]});
+        vec![
+            ("/releases/latest".to_string(), release.to_string().into_bytes()),
+            ("/dl/SHA256SUMS".to_string(), format!("{}  {name}\n", sums(&sha256(&archive))).into_bytes()),
+            (format!("/dl/{name}"), archive.clone()),
+        ]
+    });
+    UpdateFx { _dir: dir, exe, base, asked }
+}
+
+impl UpdateFx {
+    fn harness(&self, f: &Fx) -> Harness<'static, GitemApp> {
+        let url = format!("{}/releases/latest", self.base);
+        let mut h = f.harness(|s| s.update_url = url);
+        h.state_mut().update_target_for_test(self.exe.clone(), format!("{}/dl/", self.base));
+        h.state_mut().allow_scheduled_update_check_for_test();
+        h
+    }
+
+    fn downloads(&self) -> usize {
+        self.asked.lock().unwrap().iter().filter(|p| p.starts_with("/dl/")).count()
+    }
+}
+
+#[test]
+fn an_update_is_offered_downloads_nothing_until_asked_and_then_replaces_the_program() {
+    let u = update_fx(|real| real.to_string());
+    let f = Fx::new();
+    let mut h = u.harness(&f);
+    // Found by the daily look: offered in the corner, with nothing fetched yet.
+    wait_for_label(&mut h, "Update and restart");
+    settle(&mut h);
+    assert_eq!(u.downloads(), 0, "{:?}", u.asked.lock().unwrap());
+    assert_eq!(std::fs::read_to_string(&u.exe).unwrap(), "the old program");
+
+    click(&mut h, "Update and restart");
+    wait_for(&mut h, "the install", |h| h.state().update_installed_for_test().is_some() || h.state().update_error_for_test().is_some());
+    assert_eq!(h.state().update_error_for_test(), None);
+    assert_eq!(std::fs::read_to_string(&u.exe).unwrap(), "the new program");
+    assert_eq!(h.state().update_installed_for_test(), Some(u.exe.as_path()), "what the restart starts");
+    assert_eq!(u.downloads(), 2, "the checksums and the archive");
+    let left: Vec<String> = std::fs::read_dir(u.exe.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let expected = if cfg!(windows) { vec!["gitem.exe".to_string(), "gitem.exe.old".to_string()] } else { vec!["gitem".to_string()] };
+    assert_eq!({ let mut l = left; l.sort(); l }, expected, "nothing else is left beside it");
+}
+
+#[test]
+fn a_download_the_checksums_dont_describe_is_not_installed() {
+    let u = update_fx(|_| "0".repeat(64));
+    let f = Fx::new();
+    let mut h = u.harness(&f);
+    click(&mut h, "Update and restart");
+    wait_for(&mut h, "the refusal", |h| h.state().update_error_for_test().is_some());
+    assert!(h.state().update_error_for_test().unwrap().contains("checksums"), "{:?}", h.state().update_error_for_test());
+    wait_for_text(&mut h, "The update wasn't installed");
+    assert_eq!(std::fs::read_to_string(&u.exe).unwrap(), "the old program");
+    assert_eq!(h.state().update_installed_for_test(), None);
+    assert_eq!(std::fs::read_dir(u.exe.parent().unwrap()).unwrap().count(), 1, "the download is gone too");
+    // And it can be tried again.
+    assert!(h.query_by_label("Update and restart").is_some());
+}
+
+#[test]
+fn later_puts_the_offer_away_and_about_still_has_it() {
+    let u = update_fx(|real| real.to_string());
+    let f = Fx::new();
+    let mut h = u.harness(&f);
+    click(&mut h, "Later");
+    settle(&mut h);
+    assert!(h.query_by_label("Update and restart").is_none());
+    h.state_mut().apply_about_for_test();
+    wait_for_label(&mut h, "Update and restart");
+    assert_eq!(u.downloads(), 0);
 }
 
 // ---- workspaces

@@ -14,6 +14,7 @@ gitem opens repositories you didn't write, so these matter most:
 - Tokens, passwords or keys leaving the system credential store, showing up in logs, the Console view, crash reports or AI requests.
 - Files outside the repository being read or written through a crafted path, link or patch.
 - The `gitem://` deep links or the read-only MCP server (`gitem --mcp`) doing more than they say.
+- The updater installing anything other than a file from gitem's own releases that matches that release's checksums, or downloading before you ask.
 
 Bugs that need someone to change their own settings to something unsafe first, or that only crash the app, are welcome as ordinary issues.
 

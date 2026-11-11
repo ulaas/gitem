@@ -652,8 +652,8 @@ impl SettingsView {
             g.switch(&mut s.single_window, "Use one window", "Opening a folder from a terminal or Explorer goes to the window already open, once it's been restarted with this on.");
         });
         group(ui, "Updates", p, |g| {
-            g.switch(&mut s.check_updates, "Check for updates", "Asks once a day whether there's a newer release, and tells you. Nothing is downloaded. About has a button for asking now.");
-            g.row("Where to ask", "A releases/latest address in GitHub's format.", |ui| {
+            g.switch(&mut s.check_updates, "Check for updates", "Asks GitHub once a day whether there's a newer release, and offers it. Nothing is downloaded until you say so, and nothing about you or your repositories is sent. About has a button for asking now.");
+            g.row("Where to ask", "A releases/latest address in GitHub's format. gitem installs updates only from its own releases: another address gets a link to the release's page.", |ui| {
                 field(ui, &mut s.update_url, "https://…/releases/latest", 320.0);
             });
         });
