@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "gitem"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "eframe",
@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "gitem-core"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "directories",
@@ -1730,11 +1730,11 @@ dependencies = [
 
 [[package]]
 name = "gitem-testenv"
-version = "0.7.3"
+version = "0.8.0"
 
 [[package]]
 name = "gitem-text"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "encoding_rs",
  "proptest",
