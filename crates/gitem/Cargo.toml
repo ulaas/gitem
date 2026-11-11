@@ -30,7 +30,7 @@ regex = "1"
 ignore = "0.4.33"
 memmap2 = "0.9.12"
 # Drawing SVG files, with their text. No picture decoding and no compressed SVG: see `svg.rs`.
-resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts"] }
+resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts"] }
 roxmltree = "0.21"
 # Syntax trees for the editor's outline and folding, behind the `tree-sitter` feature: each
 # grammar is C to compile, which not every machine building gitem has.
