@@ -1,7 +1,8 @@
 name: Release
 
-# On a version tag: builds for every system, then a draft release with all of them, checksums,
-# and the changelog's section for that version, for a person to read and publish.
+# On a version tag: builds for every system, then publishes a release with all of them, checksums,
+# and the changelog's section for that version (a tag with a hyphen, such as v1.0.0-rc.1, as a
+# pre-release). Package manifests follow from package-manifests.yml.
 # Run by hand (Actions > Release > Run workflow), it builds everything and keeps the files as
 # the run's artifacts, without releasing anything: a dry run.
 #
@@ -12,7 +13,7 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# Read-only by default; only the release job writes, and only to create the draft.
+# Read-only by default; only the release job writes, and only to create the release.
 permissions:
   contents: read
 
@@ -108,7 +109,7 @@ jobs:
         with:
           toolchain: stable
       - name: Libraries
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+        run: sudo apt-get -o Acquire::Retries=5 update && sudo apt-get -o Acquire::Retries=5 install -y libxkbcommon-dev libwayland-dev
       - name: Build
         run: cargo build --locked --profile dist -p gitem
       - name: Archive
@@ -198,5 +199,8 @@ jobs:
           ' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
           printf '\n---\nUnsigned builds: Windows SmartScreen and macOS Gatekeeper will warn before the first run. Check downloads against SHA256SUMS.\n' >> notes.md
-      - name: Draft release
-        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "gitem $VERSION" --notes-file notes.md
+      - name: Publish the release
+        run: |
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "gitem $VERSION" --notes-file notes.md "${flags[@]}"

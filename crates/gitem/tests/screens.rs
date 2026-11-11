@@ -279,6 +279,25 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         );
         settle_a_moment(&mut h);
         out.save(&mut h, "norepo-welcome");
+        h.state_mut().apply_about_for_test();
+        settle_a_moment(&mut h);
+        out.save(&mut h, "norepo-about");
+        h.key_press(egui::Key::Escape);
+        settle_a_moment(&mut h);
+        let ctx = h.ctx.clone();
+        h.state_mut().apply_action(&ctx, gitem::action::Action::OpenTab(Tab::Settings(Box::new(gitem::views::settings::SettingsView::on_page("Workflow")))));
+        settle_a_moment(&mut h);
+        h.get_by_label("Check now").scroll_to_me();
+        settle_a_moment(&mut h);
+        out.save(&mut h, "norepo-settings-workflow");
+        // Under the pointer, the mark in the title bar answers like the buttons beside it.
+        let at = h.get_by_label("About gitem").rect().center();
+        h.event(egui::Event::PointerMoved(at));
+        settle_a_moment(&mut h);
+        out.save(&mut h, "norepo-logo-hover");
+        h.event(egui::Event::PointerMoved(egui::pos2(640.0, 400.0)));
+        h.get_by_label_contains("Back to the start").click();
+        settle_a_moment(&mut h);
         h.state_mut().open_palette_with("");
         settle_a_moment(&mut h);
         out.save(&mut h, "norepo-palette");

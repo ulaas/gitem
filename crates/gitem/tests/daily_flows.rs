@@ -416,6 +416,31 @@ fn asking_from_about_answers_either_way_and_opens_nothing_by_itself() {
     assert!(h.state().errors_showing().is_empty());
 }
 
+#[test]
+fn settings_ask_now_and_carry_the_offer_like_about() {
+    let workflow = || Tab::Settings(Box::new(gitem::views::settings::SettingsView::on_page("Workflow")));
+    let (url, asked) = release_server(serde_json::json!({"tag_name":"v0.0.1","html_url":"http://127.0.0.1:9/r"}).to_string());
+    let f = Fx::new();
+    let mut h = f.harness(|s| s.update_url = url);
+    open(&mut h, workflow());
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "opening the page asks nothing");
+    h.get_by_label("Check now").scroll_to_me();
+    settle(&mut h);
+    click(&mut h, "Check now");
+    wait_for_text(&mut h, "This is the newest release.");
+
+    let (url, _) = release_server(newer_release());
+    let mut h = f.harness(|s| s.update_url = url);
+    open(&mut h, workflow());
+    h.get_by_label("Check now").scroll_to_me();
+    settle(&mut h);
+    click(&mut h, "Check now");
+    wait_for_label(&mut h, "Open its page");
+    assert!(h.query_by_label_contains("Version 99.0.0 is available").is_some());
+    // Asked for here, so it's answered here and not in the corner as well.
+    assert!(h.query_by_label("Later").is_none());
+}
+
 // ---- installing an update, from a mock of the releases on this machine
 
 /// Serves `files` by path, and counts what was asked for.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2 (2026-11-12)
+
+Changed:
+
+- About lists more of the build (build kind, platform, renderer, the settings folder, next to the commit and Git) under a larger header, says the license, and has Copy info, which puts all of it on the clipboard for a bug report. It replaces the button that copied only the commit.
+- Settings, Workflow, Updates has what About has for updates: Check now, with the answer beside it, and the offer of a release that was found with Update and restart and its progress.
+- The gitem mark in the title bar answers to the pointer like the buttons beside it: a fill behind it, and the mark a little larger.
+- A release is published by the release workflow as soon as every build is done, instead of waiting as a draft, and the package manifests are attached right after.
+
 ## 0.8.1 (2026-11-11)
 
 A small release, and the first one gitem 0.8.0 can install by itself with Update and restart.
