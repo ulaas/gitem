@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 (2026-11-11)
+
+Added:
+
+- Update and restart. When a newer release is out, gitem offers it in the corner of the window and in About, and one click downloads it, checks it against the release's SHA-256 checksums, replaces this copy and starts the new one. Nothing is downloaded before the click, unsaved work still gets its question, and a failed update leaves the version you have. It works for the Windows installer, the zip and tar.gz builds and the AppImage. A copy installed by Scoop, winget, Homebrew or a Linux package is left to that, with the command that updates it.
+
+Changed:
+
+- Check for updates is on unless you turn it off in Settings, Workflow, for everyone: it used to be off unless turned on. Once a day gitem asks GitHub for the latest release, and the request carries nothing but gitem's name and version. Setting `GITEM_NO_UPDATE_CHECK` in the environment also stops it.
+
 ## 0.7.3 (2026-11-11)
 
 Fixed:

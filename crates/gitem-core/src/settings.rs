@@ -200,8 +200,10 @@ pub struct Settings {
     /// A notification from the system as well. Off unless turned on.
     #[serde(default)]
     pub notify_when_done: bool,
-    /// Ask once a day whether there's a newer release. Off unless turned on.
-    #[serde(default)]
+    /// Ask once a day whether there's a newer release. On unless turned off. Kept under a new
+    /// name since 0.8: the old one was off unless turned on, and a file can't say which of those
+    /// its `false` was.
+    #[serde(default = "yes", rename = "update_check")]
     pub check_updates: bool,
     /// Where to ask.
     #[serde(default)]
@@ -364,7 +366,7 @@ impl Default for Settings {
             terminal: String::new(),
             external_diff_tool: String::new(),
             external_merge_tool: String::new(),
-            check_updates: false,
+            check_updates: true,
             update_url: crate::update::DEFAULT_RELEASE_URL.to_string(),
             last_update_check: 0,
             prune_on_fetch: true,

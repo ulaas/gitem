@@ -51,6 +51,8 @@ fn scratch_env(dir: &Path) -> Vec<(&'static str, PathBuf)> {
         ("GIT_TERMINAL_PROMPT", "0".into()),
         ("GCM_INTERACTIVE", "never".into()),
         ("GITEM_CONFIG_DIR", dir.join("config")),
+        // The check for updates is on unless turned off, and a test mustn't ask GitHub.
+        ("GITEM_NO_UPDATE_CHECK", "1".into()),
         ("HOME", home.clone()),
         ("USERPROFILE", home.clone()),
         ("XDG_CONFIG_HOME", home.join(".config")),

@@ -1097,13 +1097,28 @@ pub struct GitemApp {
     /// Later launches hand their paths over through this, when that's turned on.
     instance: Option<gitem_core::instance::Instance>,
     /// A look for a newer release, by schedule or from About.
-    update_task: crate::task::Task<Option<gitem_core::update::Release>>,
+    update_task: crate::task::Task<Option<(gitem_core::update::Release, gitem_core::update::Install)>>,
     /// From About, so its answer is shown even when that's "no".
     update_asked: bool,
     /// Whether this run has looked at the schedule. Once is enough.
     update_scheduled: bool,
     update_found: Option<gitem_core::update::Release>,
+    /// How this copy got here, which says whether gitem can replace it. Known once a look found
+    /// something.
+    update_kind: gitem_core::update::Install,
     update_answer: Option<String>,
+    /// The offer in the corner of the window, until it's answered.
+    update_notice: bool,
+    /// A download and install the user asked for.
+    update_install: crate::task::Task<()>,
+    update_progress: Arc<gitem_core::update::Progress>,
+    update_error: Option<String>,
+    /// The new version is in place, and what to start to run it.
+    update_installed: Option<PathBuf>,
+    /// This close is for the update: start the new version once the window's gone.
+    update_restart: bool,
+    /// For a test: the program to replace, and where its files may come from.
+    update_target: Option<(PathBuf, String)>,
     pub shot: Option<Shot>,
     pub shot_tabs: Vec<Tab>,
     pub shot_inspect: Option<String>,
@@ -1259,9 +1274,19 @@ impl GitemApp {
             instance: None,
             update_task: Default::default(),
             update_asked: false,
-            update_scheduled: false,
+            // `GITEM_NO_UPDATE_CHECK` is for where nothing should ask by itself: a managed
+            // machine, a package's build, and gitem's own tests.
+            update_scheduled: std::env::var_os("GITEM_NO_UPDATE_CHECK").is_some(),
             update_found: None,
+            update_kind: gitem_core::update::Install::Managed(None),
             update_answer: None,
+            update_notice: false,
+            update_install: Default::default(),
+            update_progress: Default::default(),
+            update_error: None,
+            update_installed: None,
+            update_restart: false,
+            update_target: None,
             shot: None,
             shot_tabs: Vec::new(),
             shot_inspect: None,
@@ -1326,6 +1351,25 @@ impl GitemApp {
     /// The version a look for updates found, if any.
     pub fn update_found_version(&self) -> Option<&str> {
         self.update_found.as_ref().map(|r| r.version.as_str())
+    }
+
+    /// For a test of the scheduled look, which tests otherwise never make.
+    pub fn allow_scheduled_update_check_for_test(&mut self) {
+        self.update_scheduled = false;
+    }
+
+    /// For a test: `exe` stands in for the running program, and its files may come from `from`.
+    pub fn update_target_for_test(&mut self, exe: PathBuf, from: String) {
+        self.update_target = Some((exe, from));
+    }
+
+    /// What an update that's been installed would start, if one has.
+    pub fn update_installed_for_test(&self) -> Option<&Path> {
+        self.update_installed.as_deref()
+    }
+
+    pub fn update_error_for_test(&self) -> Option<&str> {
+        self.update_error.as_deref()
     }
 
     /// Opens About, as its button would. For tests.
@@ -1864,6 +1908,7 @@ impl GitemApp {
             }
         } else if stay {
             self.close_guard = None;
+            self.update_restart = false;
         }
     }
 
@@ -2448,14 +2493,10 @@ impl GitemApp {
                 ui.label(RichText::new("Built with uncommitted changes, so this commit doesn't fully describe it.").small().color(p.warn));
             }
             ui.add_space(8.0);
-            if let Some(r) = self.update_found.clone() {
-                ui.horizontal(|ui| {
-                    ui.colored_label(p.good, format!("Version {} is available.", r.version));
-                    if ui.button("Open its page").on_hover_text("Nothing is downloaded or run from here.").clicked() {
-                        out.push(Action::OpenUrl(r.page.clone()));
-                    }
-                });
-            } else if let Some(answer) = &self.update_answer {
+            self.update_ui(ui, ctx, out, false);
+            if self.update_found.is_none()
+                && let Some(answer) = &self.update_answer
+            {
                 ui.label(RichText::new(answer).small().color(p.dim));
             }
             let url = self.settings.update_url.trim().to_string();
@@ -2463,7 +2504,7 @@ impl GitemApp {
             if ui.add_enabled(!url.is_empty() && !self.update_task.busy(), egui::Button::new("Check for updates")).on_disabled_hover_text(reason).clicked() {
                 self.update_asked = true;
                 self.update_answer = None;
-                self.update_task.spawn(ctx, move || gitem_core::update::check(&url, env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string()));
+                self.spawn_update_check(ctx, url);
             }
             ui.add_space(10.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -3163,6 +3204,18 @@ impl GitemApp {
                 self.toasts.iter_mut().for_each(|(_, t)| *t = now);
             }
         }
+        // The offer of an update, which stays until it's answered. About has the same.
+        if self.update_notice && self.update_found.is_some() && !self.about_open && self.shot.is_none() {
+            let mut out = Vec::new();
+            egui::Area::new("update-notice".into()).anchor(Align2::RIGHT_BOTTOM, [-14.0, -34.0 - 34.0 * self.toasts.len() as f32]).order(egui::Order::Foreground).show(ctx, |ui| {
+                egui::Frame::new().fill(p.panel2).stroke(egui::Stroke::new(1.0, p.accent)).inner_margin(egui::Margin::symmetric(10, 7)).corner_radius(4.0).show(ui, |ui| {
+                    self.update_ui(ui, ctx, &mut out, true);
+                });
+            });
+            for a in out {
+                self.apply_action(ctx, a);
+            }
+        }
     }
 
     /// Off the UI thread: the file can be on a drive that's slow to answer, and typing a path
@@ -3521,6 +3574,151 @@ impl GitemApp {
         }
     }
 
+    /// Asks for the latest release, and how this copy could be replaced by it. Both off the UI
+    /// thread: the second looks at the disk.
+    fn spawn_update_check(&mut self, ctx: &egui::Context, url: String) {
+        let target = self.update_target.as_ref().map(|(exe, _)| exe.clone());
+        self.update_task.spawn(ctx, move || {
+            let found = gitem_core::update::check(&url, env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())?;
+            Ok::<_, String>(found.map(|r| {
+                let kind = match target.or_else(running_program) {
+                    Some(exe) => gitem_core::update::install_kind(&exe, std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref()),
+                    None => gitem_core::update::Install::Managed(None),
+                };
+                (r, kind)
+            }))
+        });
+    }
+
+    /// Where an update's files may come from: the releases, and only when that's also who was
+    /// asked. An address typed or imported into Settings can point at a release's page, not
+    /// hand over a program.
+    fn update_source(&self) -> Option<String> {
+        match &self.update_target {
+            Some((_, from)) => Some(from.clone()),
+            None => (self.settings.update_url.trim() == gitem_core::update::DEFAULT_RELEASE_URL).then(|| gitem_core::update::DOWNLOAD_PREFIX.to_string()),
+        }
+    }
+
+    /// Downloads the release that was found, checks it and puts it in place of this copy.
+    fn start_update(&mut self, ctx: &egui::Context) {
+        let (Some(release), Some(from)) = (self.update_found.clone(), self.update_source()) else { return };
+        let Some(exe) = self.update_target.as_ref().map(|(exe, _)| exe.clone()).or_else(running_program) else {
+            self.update_error = Some("gitem couldn't tell where it's running from.".to_string());
+            return;
+        };
+        let kind = self.update_kind.clone();
+        let progress = Arc::new(gitem_core::update::Progress::default());
+        self.update_progress = progress.clone();
+        self.update_error = None;
+        let wake = ctx.clone();
+        std::thread::spawn({
+            // The bar moves while it downloads.
+            let progress = Arc::downgrade(&progress);
+            move || {
+                while progress.strong_count() > 0 {
+                    wake.request_repaint();
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+        });
+        self.update_install.spawn(ctx, move || gitem_core::update::download_and_install(&release, &kind, &exe, &from, env!("CARGO_PKG_VERSION"), &progress));
+    }
+
+    /// What a finished install leaves to do: close for the new version, or say what went wrong.
+    fn finish_update_install(&mut self, ctx: &egui::Context) {
+        if !self.update_install.poll() {
+            return;
+        }
+        // Lets go of the thread that keeps the bar moving.
+        self.update_progress = Default::default();
+        if self.update_install.value.take().is_some() {
+            self.update_installed = match &self.update_kind {
+                gitem_core::update::Install::AppImage(image) => Some(image.clone()),
+                _ => self.update_target.as_ref().map(|(exe, _)| exe.clone()).or_else(running_program),
+            };
+            self.restart_for_update(ctx);
+        }
+        if let Some(e) = self.update_install.error.take() {
+            self.update_error = (e != "Stopped.").then_some(e);
+        }
+    }
+
+    /// Closes the window so the new version can start. Unsaved work still gets its question, and
+    /// keeping the window open then means the new version waits for the next start.
+    fn restart_for_update(&mut self, ctx: &egui::Context) {
+        self.update_restart = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// The offer of an update and how it's going, in About and in the notice in the corner.
+    fn update_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, out: &mut Vec<Action>, notice: bool) {
+        use gitem_core::update::Install;
+        use std::sync::atomic::Ordering;
+        let p = self.pal.clone();
+        let Some(r) = self.update_found.clone() else { return };
+        if self.update_installed.is_some() {
+            ui.horizontal(|ui| {
+                ui.colored_label(p.good, format!("Version {} is installed. It starts the next time gitem does.", r.version));
+                if ui.button("Restart now").clicked() {
+                    self.restart_for_update(ctx);
+                }
+                if notice && ui.button("Later").clicked() {
+                    self.update_notice = false;
+                }
+            });
+            return;
+        }
+        if self.update_install.busy() {
+            let (done, total) = (self.update_progress.done.load(Ordering::Relaxed), self.update_progress.total.load(Ordering::Relaxed));
+            let installing = self.update_progress.installing.load(Ordering::Relaxed);
+            ui.horizontal(|ui| {
+                let mb = |n: u64| n as f64 / (1024.0 * 1024.0);
+                let text = if installing {
+                    format!("Installing version {}…", r.version)
+                } else if total > 0 {
+                    format!("Downloading version {}: {:.1} of {:.1} MB", r.version, mb(done), mb(total))
+                } else {
+                    format!("Downloading version {}…", r.version)
+                };
+                ui.label(text);
+                if !installing && ui.button("Stop").clicked() {
+                    self.update_progress.cancel.store(true, Ordering::Relaxed);
+                }
+            });
+            if !installing && total > 0 {
+                ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_width(260.0).desired_height(4.0));
+            }
+            return;
+        }
+        let source = self.update_source();
+        ui.horizontal(|ui| {
+            ui.colored_label(p.good, format!("Version {} is available.", r.version));
+            let can = source.is_some() && !matches!(self.update_kind, Install::Managed(_));
+            if can && ui.button("Update and restart").on_hover_text("Downloads it from the release, checks it against the release's checksums, replaces this copy and starts it again.").clicked() {
+                self.start_update(ctx);
+            }
+            if ui.button("Open its page").on_hover_text("The release's page, in the browser.").clicked() {
+                out.push(Action::OpenUrl(r.page.clone()));
+            }
+            if notice && ui.button("Later").on_hover_text("About has it until then.").clicked() {
+                self.update_notice = false;
+            }
+        });
+        let why_not = match (&self.update_kind, &source) {
+            (Install::Managed(Some(how)), _) => Some(format!("This copy was installed by a package manager. Update it with: {how}")),
+            (Install::Managed(None), _) => Some("gitem can't write where this copy is, or a package owns it. Update it the way it was installed.".to_string()),
+            (_, None) => Some("Installed from here only when Settings asks gitem's own releases.".to_string()),
+            _ => None,
+        };
+        if let Some(why) = why_not {
+            ui.label(RichText::new(why).small().color(p.dim));
+        }
+        if let Some(e) = &self.update_error {
+            ui.add(egui::Label::new(RichText::new(format!("The update wasn't installed: {e}")).small().color(p.warn)).wrap());
+        }
+    }
+
     /// A scheduled look, if the user turned that on, and what any look found. A screenshot and a
     /// helper window never get here with the setting doing anything: neither saves, or asks.
     fn look_for_updates(&mut self, ctx: &egui::Context) {
@@ -3531,18 +3729,25 @@ impl GitemApp {
                 self.settings.last_update_check = now;
                 self.settings_dirty = true;
                 let url = self.settings.update_url.trim().to_string();
-                self.update_task.spawn(ctx, move || gitem_core::update::check(&url, env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string()));
+                self.spawn_update_check(ctx, url);
             }
         }
+        self.finish_update_install(ctx);
         if !self.update_task.poll() {
             return;
         }
         let asked = std::mem::take(&mut self.update_asked);
         if let Some(found) = self.update_task.value.take() {
             match found {
-                Some(r) => {
-                    self.toasts.push((format!("gitem {} is available. About has a link to it.", r.version), Instant::now()));
-                    self.update_found = Some(r);
+                Some((r, kind)) => {
+                    // Not while one is being installed, or already has been.
+                    if !self.update_install.busy() && self.update_installed.is_none() {
+                        // Asked for from About, the answer is in About. Found by itself, it's offered.
+                        self.update_notice = !asked;
+                        self.update_error = None;
+                        self.update_found = Some(r);
+                        self.update_kind = kind;
+                    }
                 }
                 None if asked => self.update_answer = Some("This is the newest release.".to_string()),
                 None => {}
@@ -3995,7 +4200,29 @@ impl eframe::App for GitemApp {
     fn on_exit(&mut self) {
         crate::notify::clear();
         self.save_settings();
+        if self.update_restart
+            && let Some(start) = self.update_installed.take()
+        {
+            // Or the new one would hand its launch to this one, which is on its way out.
+            self.instance = None;
+            *RESTART_AS.lock().unwrap_or_else(|e| e.into_inner()) = Some(start);
+        }
     }
+}
+
+/// The program to start once the window has closed and everything's saved: the version an update
+/// just installed. `main` takes it.
+pub static RESTART_AS: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// The running program's real path, through any link to it.
+pub fn running_program() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let real = std::fs::canonicalize(&exe).unwrap_or(exe);
+    // Windows answers with its long-path form, which not everything takes.
+    Some(match real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(plain) if !plain.starts_with("UNC") => PathBuf::from(plain),
+        _ => real,
+    })
 }
 
 /// A long job finishing, or anything failing, while you're working elsewhere is worth a mention.
