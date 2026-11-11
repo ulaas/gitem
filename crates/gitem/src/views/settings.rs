@@ -373,7 +373,7 @@ impl SettingsView {
                     match self.page {
                         Page::Appearance => self.appearance(ui, &mut s, &p),
                         Page::Git => self.git(ui, cx, &mut s, &p),
-                        Page::Workflow => self.workflow(ui, &mut s, &p),
+                        Page::Workflow => self.workflow(ui, cx, &mut s, &p),
                         Page::Editor => self.editor(ui, &mut s, &p),
                         Page::Blame => self.blame(ui, &mut s, &p),
                         Page::Hosting => self.hosting(ui, &mut s, &p),
@@ -567,7 +567,7 @@ impl SettingsView {
         });
     }
 
-    fn workflow(&mut self, ui: &mut Ui, s: &mut Settings, p: &Palette) {
+    fn workflow(&mut self, ui: &mut Ui, cx: &mut Cx, s: &mut Settings, p: &Palette) {
         group(ui, "Sync", p, |g| {
             g.row("Pull button", "How the toolbar's Pull integrates commits.", |ui| {
                 let options = [("default".to_string(), "Git default"), ("ff-only".to_string(), "Fast-forward"), ("rebase".to_string(), "Rebase"), ("merge".to_string(), "Merge")];
@@ -652,9 +652,15 @@ impl SettingsView {
             g.switch(&mut s.single_window, "Use one window", "Opening a folder from a terminal or Explorer goes to the window already open, once it's been restarted with this on.");
         });
         group(ui, "Updates", p, |g| {
-            g.switch(&mut s.check_updates, "Check for updates", "Asks GitHub once a day whether there's a newer release, and offers it. Nothing is downloaded until you say so, and nothing about you or your repositories is sent. About has a button for asking now.");
+            g.switch(&mut s.check_updates, "Check for updates", "Asks GitHub once a day whether there's a newer release, and offers it. Nothing is downloaded until you say so, and nothing about you or your repositories is sent.");
             g.row("Where to ask", "A releases/latest address in GitHub's format. gitem installs updates only from its own releases: another address gets a link to the release's page.", |ui| {
                 field(ui, &mut s.update_url, "https://…/releases/latest", 320.0);
+            });
+            g.row(&format!("gitem {}", env!("CARGO_PKG_VERSION")), "Asks now, whatever the switch says, and says what it found here.", |ui| {
+                ui.vertical(|ui| {
+                    crate::update_view::offer(ui, cx.update, p, cx.out, false);
+                    crate::update_view::check(ui, cx.update, p, cx.out, "Check now");
+                });
             });
         });
         group(ui, "Safety and speed", p, |g| {

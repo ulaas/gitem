@@ -18,6 +18,16 @@ use crate::views::Tab;
 pub enum Action {
     /// Show the About box.
     About,
+    /// Look for a newer release now, and say what was found either way.
+    UpdateCheck,
+    /// Download the release that was found and put it in place of this copy.
+    UpdateStart,
+    /// Stop downloading it.
+    UpdateStop,
+    /// Start the copy that was installed.
+    UpdateRestart,
+    /// Put the offer in the corner away.
+    UpdateLater,
     /// Open settings, with or without a repository.
     OpenSettings,
     /// Run a write op on this repo's queue.
@@ -156,6 +166,8 @@ pub struct Cx<'a> {
     pub data: &'a RepoData,
     pub settings: &'a Settings,
     pub pal: &'a Palette,
+    /// Where the update is, for Settings.
+    pub update: &'a crate::update_view::UpdateStatus,
     pub out: &'a mut Vec<Action>,
     /// A dialog is showing, drawn after the views and with its own keyboard shortcuts.
     pub dialog_open: bool,

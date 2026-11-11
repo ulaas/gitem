@@ -2490,14 +2490,23 @@ fn settings_and_about_are_reachable_from_the_titlebar() {
     settle(&mut h);
     click(&mut h, "About gitem");
     // Not the commit rows: a build from a source tarball has no git history.
-    pump_for_label(&mut h, "Version");
-    pump_for_label(&mut h, env!("CARGO_PKG_VERSION"));
+    pump_for_label(&mut h, &format!("Version {}", env!("CARGO_PKG_VERSION")));
+    for fact in ["Build", "Platform", "Renderer", "Git", "Settings folder", "Copy info"] {
+        pump_for_label(&mut h, fact);
+    }
+    let text = gitem::app::about_copy_text(&gitem::app::about_facts("git version 2"));
+    assert!(text.starts_with(&format!("gitem
+Version: {}
+Commit: ", env!("CARGO_PKG_VERSION"))), "{text}");
+    assert!(text.contains("
+Git: git version 2
+"), "{text}");
     // New windows spend their first frames measuring themselves.
     for _ in 0..3 {
         h.step();
     }
     click(&mut h, "Close");
-    assert!(h.query_by_label("Version").is_none(), "the About box stays open");
+    assert!(h.query_by_label("Renderer").is_none(), "the About box stays open");
     assert!(!h.state().repos[0].dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Settings(_))));
     let ctx = h.ctx.clone();
     h.state_mut().apply_action(&ctx, Action::OpenSettings);

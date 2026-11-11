@@ -5,9 +5,15 @@ name: Package manifests
 # release as gitem-<version>-package-manifests.tar.gz. It submits nothing anywhere: a person takes the
 # files to winget-pkgs, a Scoop bucket, a Homebrew tap and the AUR.
 # Run by hand with a tag to make them again for a release that's already out.
+#
+# release.yml publishes with GITHUB_TOKEN, which fires no `release` event for other workflows, so
+# this also runs when the Release workflow finishes for a version tag.
 on:
   release:
     types: [published]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -21,13 +27,17 @@ permissions:
 jobs:
   manifests:
     runs-on: ubuntu-latest
+    # After a Release run: only one that succeeded for a version tag (not a dry run by hand).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag || github.event.workflow_run.head_branch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.event.workflow_run.head_branch }}
           persist-credentials: false
 
       - name: Version from the tag

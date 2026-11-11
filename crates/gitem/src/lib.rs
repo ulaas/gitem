@@ -21,5 +21,6 @@ pub mod svg;
 pub mod syntax;
 pub mod task;
 pub mod theme;
+pub mod update_view;
 pub mod views;
 pub mod widgets;

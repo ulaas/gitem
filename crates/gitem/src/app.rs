@@ -970,6 +970,28 @@ impl TabViewer for Viewer<'_> {
 const DIALOG_SETTLES: f64 = 0.2;
 
 /// How every dialog is put on screen. They sit above the backdrop that dims the app.
+/// What About says about this build, as `(name, value)`, the version first. `git` is what
+/// `git --version` answered.
+pub fn about_facts(git: &str) -> Vec<(&'static str, String)> {
+    let or_unknown = |s: &str| if s.is_empty() { "Unknown".to_string() } else { s.to_string() };
+    let mut facts = vec![("Version", env!("CARGO_PKG_VERSION").to_string()), ("Commit", or_unknown(env!("GITEM_BUILD_SHA")))];
+    if !env!("GITEM_BUILD_DATE").is_empty() {
+        facts.push(("Commit date", env!("GITEM_BUILD_DATE").to_string()));
+    }
+    facts.push(("Build", if cfg!(debug_assertions) { "debug" } else { "release" }.to_string()));
+    facts.push(("Platform", format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH)));
+    facts.push(("Renderer", "wgpu".to_string()));
+    facts.push(("Git", git.to_string()));
+    facts.push(("Settings folder", gitem_core::settings::config_dir().display().to_string()));
+    facts
+}
+
+/// The text "Copy info" puts on the clipboard: `gitem` and a `Name: value` line for each fact.
+pub fn about_copy_text(facts: &[(&'static str, String)]) -> String {
+    let lines: Vec<String> = facts.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+    format!("gitem\n{}", lines.join("\n"))
+}
+
 fn dialog_window<'a>(title: impl Into<egui::WidgetText>, settled: bool) -> egui::Window<'a> {
     egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).order(egui::Order::Foreground).interactable(settled)
 }
@@ -1107,6 +1129,8 @@ pub struct GitemApp {
     /// something.
     update_kind: gitem_core::update::Install,
     update_answer: Option<String>,
+    /// Where the update is, as of the start of this frame: what the views draw from.
+    update_status: crate::update_view::UpdateStatus,
     /// The offer in the corner of the window, until it's answered.
     update_notice: bool,
     /// A download and install the user asked for.
@@ -1280,6 +1304,7 @@ impl GitemApp {
             update_found: None,
             update_kind: gitem_core::update::Install::Managed(None),
             update_answer: None,
+            update_status: Default::default(),
             update_notice: false,
             update_install: Default::default(),
             update_progress: Default::default(),
@@ -1833,7 +1858,7 @@ impl GitemApp {
             let mut saved = true;
             if let Some(r) = self.repos.iter_mut().find(|r| r.repo.root == g.root) {
                 let RepoTab { repo, data, dock, zoom, .. } = r;
-                let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, out: &mut out, dialog_open: true, in_front: false };
+                let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, update: &self.update_status, out: &mut out, dialog_open: true, in_front: false };
                 for (_, t) in dock.iter_all_tabs_mut().chain(zoom.iter_mut().flat_map(|z| z.full.iter_all_tabs_mut())) {
                     if let Tab::Editor(e) = t
                         && e.is_dirty()
@@ -2121,6 +2146,18 @@ impl GitemApp {
                 }
             }
             Action::About => self.about_open = true,
+            Action::UpdateCheck => {
+                let url = self.settings.update_url.trim().to_string();
+                if !url.is_empty() && !self.update_task.busy() {
+                    self.update_asked = true;
+                    self.update_answer = None;
+                    self.spawn_update_check(ctx, url);
+                }
+            }
+            Action::UpdateStart => self.start_update(ctx),
+            Action::UpdateStop => self.update_progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed),
+            Action::UpdateRestart => self.restart_for_update(ctx),
+            Action::UpdateLater => self.update_notice = false,
             Action::OpenSettings => {
                 if self.repos.is_empty() {
                     self.no_repo_tab = if matches!(self.no_repo_tab, Some(Tab::Settings(_))) { None } else { Some(Tab::Settings(Box::default())) };
@@ -2192,7 +2229,7 @@ impl GitemApp {
                     if let Some(path) = path {
                         let _ = dock.set_active_tab(path);
                         if let Some((_, Tab::Editor(e))) = dock.iter_all_tabs_mut().find(|(p, _)| *p == path) {
-                            let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, out: &mut out, dialog_open: false, in_front: true };
+                            let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, update: &self.update_status, out: &mut out, dialog_open: false, in_front: true };
                             e.request(&mut cx, req);
                             found = true;
                         }
@@ -2221,7 +2258,7 @@ impl GitemApp {
                 let mut out = Vec::new();
                 for r in self.repos.iter_mut() {
                     let RepoTab { repo, data, dock, zoom, .. } = r;
-                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, out: &mut out, dialog_open: false, in_front: false };
+                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &self.pal, update: &self.update_status, out: &mut out, dialog_open: false, in_front: false };
                     for (_, t) in dock.iter_all_tabs_mut().chain(zoom.iter_mut().flat_map(|z| z.full.iter_all_tabs_mut())) {
                         if let Tab::Editor(e) = t
                             && e.is_dirty()
@@ -2357,10 +2394,15 @@ impl GitemApp {
             ui.set_clip_rect(left.intersect(ui.clip_rect()));
             ui.add_space(9.0);
             let (rect, logo) = ui.allocate_exact_size(egui::vec2(20.0, chrome::TITLE_BAR_HEIGHT), Sense::click());
-            chrome::paint_logo(ui.painter(), egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0)));
+            // Like the buttons beside it: a fill under the pointer, and the mark a little larger.
+            let hover = ui.ctx().animate_bool_with_time(logo.id, logo.hovered(), 0.12);
+            if hover > 0.0 {
+                ui.painter().rect_filled(egui::Rect::from_center_size(rect.center(), egui::vec2(26.0, 26.0)), 4.0, p.hover.gamma_multiply(hover));
+            }
+            chrome::paint_logo(ui.painter(), egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(18.0 + 2.0 * hover)));
             logo.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "About gitem"));
             crate::widgets::focus_ring(ui, &logo, &p);
-            if logo.on_hover_text("About gitem").clicked() {
+            if logo.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("About gitem").clicked() {
                 out.push(Action::About);
             }
             ui.add_space(8.0);
@@ -2446,70 +2488,46 @@ impl GitemApp {
         let mut dismiss = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         // Asked once each time the box opens: it starts a process.
         let git = self.about_git.get_or_insert_with(|| self.git.as_ref().map(|g| g.version()).unwrap_or_else(|e| e.clone())).clone();
-        dialog_window("About gitem", self.dialogs_settled).open(&mut open).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).default_width(340.0).show(ctx, |ui| {
+        let facts = about_facts(git.trim());
+        dialog_window("About gitem", self.dialogs_settled).open(&mut open).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).default_width(440.0).show(ctx, |ui| {
+            ui.set_width(440.0);
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 52.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(72.0, 72.0), Sense::hover());
                 chrome::paint_logo(ui.painter(), rect);
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 ui.vertical(|ui| {
                     ui.add_space(6.0);
-                    ui.label(RichText::new("gitem").size(20.0).strong());
-                    ui.label(RichText::new("A visual Git client").color(p.dim));
+                    ui.label(RichText::new("gitem").size(22.0).strong());
+                    ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(p.dim));
+                    ui.label(RichText::new("A visual Git client").small().color(p.dim));
                 });
             });
-            ui.add_space(10.0);
-            egui::Grid::new("about-grid").num_columns(2).spacing(egui::vec2(14.0, 6.0)).show(ui, |ui| {
-                let key = |ui: &mut Ui, t: &str| {
-                    ui.label(RichText::new(t).color(p.dim));
-                };
-                key(ui, "Version");
-                ui.label(env!("CARGO_PKG_VERSION"));
-                ui.end_row();
-                key(ui, "Commit");
-                let sha = env!("GITEM_BUILD_SHA");
-                if sha.is_empty() {
-                    ui.label("Unknown");
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(sha).monospace());
-                        if chrome::icon_button(ui, chrome::icon::COPY, "Copy commit", "", false, &p).clicked() {
-                            out.push(Action::Copy(sha.to_string()));
-                        }
-                    });
-                }
-                ui.end_row();
-                if !env!("GITEM_BUILD_DATE").is_empty() {
-                    key(ui, "Commit date");
-                    ui.label(env!("GITEM_BUILD_DATE"));
+            ui.add_space(12.0);
+            egui::Grid::new("about-grid").num_columns(2).spacing(egui::vec2(16.0, 6.0)).show(ui, |ui| {
+                // The version is in the header.
+                for (k, v) in facts.iter().skip(1) {
+                    ui.label(RichText::new(*k).color(p.dim));
+                    ui.add(egui::Label::new(v.as_str()).truncate());
                     ui.end_row();
                 }
-                key(ui, "Git");
-                ui.label(git.trim());
-                ui.end_row();
             });
             if !env!("GITEM_BUILD_DIRTY").is_empty() {
                 ui.add_space(6.0);
                 ui.label(RichText::new("Built with uncommitted changes, so this commit doesn't fully describe it.").small().color(p.warn));
             }
+            ui.add_space(10.0);
+            ui.label(RichText::new("Free software under the MIT license.").small().color(p.dim));
             ui.add_space(8.0);
-            self.update_ui(ui, ctx, out, false);
-            if self.update_found.is_none()
-                && let Some(answer) = &self.update_answer
-            {
-                ui.label(RichText::new(answer).small().color(p.dim));
-            }
-            let url = self.settings.update_url.trim().to_string();
-            let reason = if url.is_empty() { "Give an address to ask in Settings > Workflow." } else { "Already asking." };
-            if ui.add_enabled(!url.is_empty() && !self.update_task.busy(), egui::Button::new("Check for updates")).on_disabled_hover_text(reason).clicked() {
-                self.update_asked = true;
-                self.update_answer = None;
-                self.spawn_update_check(ctx, url);
-            }
+            crate::update_view::offer(ui, &self.update_status, &p, out, false);
+            crate::update_view::check(ui, &self.update_status, &p, out, "Check for updates");
             ui.add_space(10.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 if ui.button("Close").clicked() {
                     dismiss = true;
+                }
+                if ui.button("Copy info").on_hover_text("These facts as text, for a bug report.").clicked() {
+                    out.push(Action::Copy(about_copy_text(&facts)));
                 }
             });
         });
@@ -3209,7 +3227,7 @@ impl GitemApp {
             let mut out = Vec::new();
             egui::Area::new("update-notice".into()).anchor(Align2::RIGHT_BOTTOM, [-14.0, -34.0 - 34.0 * self.toasts.len() as f32]).order(egui::Order::Foreground).show(ctx, |ui| {
                 egui::Frame::new().fill(p.panel2).stroke(egui::Stroke::new(1.0, p.accent)).inner_margin(egui::Margin::symmetric(10, 7)).corner_radius(4.0).show(ui, |ui| {
-                    self.update_ui(ui, ctx, &mut out, true);
+                    crate::update_view::offer(ui, &self.update_status, &p, &mut out, true);
                 });
             });
             for a in out {
@@ -3651,71 +3669,27 @@ impl GitemApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    /// The offer of an update and how it's going, in About and in the notice in the corner.
-    fn update_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, out: &mut Vec<Action>, notice: bool) {
+    /// Where the update is right now, for About, Settings and the notice in the corner.
+    fn update_status_now(&self) -> crate::update_view::UpdateStatus {
         use gitem_core::update::Install;
         use std::sync::atomic::Ordering;
-        let p = self.pal.clone();
-        let Some(r) = self.update_found.clone() else { return };
-        if self.update_installed.is_some() {
-            ui.horizontal(|ui| {
-                ui.colored_label(p.good, format!("Version {} is installed. It starts the next time gitem does.", r.version));
-                if ui.button("Restart now").clicked() {
-                    self.restart_for_update(ctx);
-                }
-                if notice && ui.button("Later").clicked() {
-                    self.update_notice = false;
-                }
-            });
-            return;
-        }
-        if self.update_install.busy() {
-            let (done, total) = (self.update_progress.done.load(Ordering::Relaxed), self.update_progress.total.load(Ordering::Relaxed));
-            let installing = self.update_progress.installing.load(Ordering::Relaxed);
-            ui.horizontal(|ui| {
-                let mb = |n: u64| n as f64 / (1024.0 * 1024.0);
-                let text = if installing {
-                    format!("Installing version {}…", r.version)
-                } else if total > 0 {
-                    format!("Downloading version {}: {:.1} of {:.1} MB", r.version, mb(done), mb(total))
-                } else {
-                    format!("Downloading version {}…", r.version)
-                };
-                ui.label(text);
-                if !installing && ui.button("Stop").clicked() {
-                    self.update_progress.cancel.store(true, Ordering::Relaxed);
-                }
-            });
-            if !installing && total > 0 {
-                ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_width(260.0).desired_height(4.0));
-            }
-            return;
-        }
         let source = self.update_source();
-        ui.horizontal(|ui| {
-            ui.colored_label(p.good, format!("Version {} is available.", r.version));
-            let can = source.is_some() && !matches!(self.update_kind, Install::Managed(_));
-            if can && ui.button("Update and restart").on_hover_text("Downloads it from the release, checks it against the release's checksums, replaces this copy and starts it again.").clicked() {
-                self.start_update(ctx);
-            }
-            if ui.button("Open its page").on_hover_text("The release's page, in the browser.").clicked() {
-                out.push(Action::OpenUrl(r.page.clone()));
-            }
-            if notice && ui.button("Later").on_hover_text("About has it until then.").clicked() {
-                self.update_notice = false;
-            }
-        });
-        let why_not = match (&self.update_kind, &source) {
-            (Install::Managed(Some(how)), _) => Some(format!("This copy was installed by a package manager. Update it with: {how}")),
-            (Install::Managed(None), _) => Some("gitem can't write where this copy is, or a package owns it. Update it the way it was installed.".to_string()),
-            (_, None) => Some("Installed from here only when Settings asks gitem's own releases.".to_string()),
-            _ => None,
-        };
-        if let Some(why) = why_not {
-            ui.label(RichText::new(why).small().color(p.dim));
-        }
-        if let Some(e) = &self.update_error {
-            ui.add(egui::Label::new(RichText::new(format!("The update wasn't installed: {e}")).small().color(p.warn)).wrap());
+        let pr = &self.update_progress;
+        crate::update_view::UpdateStatus {
+            found: self.update_found.as_ref().map(|r| crate::update_view::Found { version: r.version.clone(), page: r.page.clone() }),
+            installed: self.update_installed.is_some(),
+            progress: self.update_install.busy().then(|| crate::update_view::Progress { done: pr.done.load(Ordering::Relaxed), total: pr.total.load(Ordering::Relaxed), installing: pr.installing.load(Ordering::Relaxed) }),
+            can_install: source.is_some() && !matches!(self.update_kind, Install::Managed(_)),
+            why_not: match (&self.update_kind, &source) {
+                (Install::Managed(Some(how)), _) => Some(format!("This copy was installed by a package manager. Update it with: {how}")),
+                (Install::Managed(None), _) => Some("gitem can't write where this copy is, or a package owns it. Update it the way it was installed.".to_string()),
+                (_, None) => Some("Installed from here only when Settings asks gitem's own releases.".to_string()),
+                _ => None,
+            },
+            error: self.update_error.clone(),
+            answer: self.update_answer.clone(),
+            checking: self.update_task.busy(),
+            can_check: !self.settings.update_url.trim().is_empty(),
         }
     }
 
@@ -3767,6 +3741,7 @@ impl GitemApp {
         self.apply_theme(&ctx);
         self.apply_ca_file(&ctx);
         self.look_for_updates(&ctx);
+        self.update_status = self.update_status_now();
         self.take_handed_over(&ctx);
         self.handle_shot(ui);
         // The window flashes in the taskbar until it's looked at. No more than that: a pop-up on
@@ -4042,7 +4017,7 @@ impl GitemApp {
             }
             if *show_sidebar && !squeeze.sidebar {
                 egui::Panel::left("sidebar").resizable(true).default_size(SIDEBAR_WIDTH).size_range(180.0..=600.0).show(ui, |ui| {
-                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
+                    let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true };
                     ui.push_id(&cx.repo.root, |ui| sidebar.ui(ui, &mut cx));
                 });
             }
@@ -4068,11 +4043,11 @@ impl GitemApp {
                             empty_state(ui, "Changes is showing", "Its commit box is beside this.", &pal);
                         } else if let Some(view) = dock.iter_all_tabs_mut().find_map(|(_, t)| if let Tab::Changes(v) = t { Some(v) } else { None }) {
                             // The keyboard stays with the graph.
-                            let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: false };
+                            let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: false };
                             ui.push_id((&cx.repo.root, "wip"), |ui| view.details_ui(ui, &mut cx));
                         }
                     } else {
-                        let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
+                        let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true };
                         ui.push_id(&cx.repo.root, |ui| inspect.ui(ui, &mut cx));
                     }
                 });
@@ -4092,7 +4067,7 @@ impl GitemApp {
                     });
                 });
             }
-            let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true }, front, pane_sizes, panes, zoomed };
+            let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true }, front, pane_sizes, panes, zoomed };
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 DockArea::new(dock).id(egui::Id::new(DOCK_ID)).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_leaf_close_all_buttons(false).show_inside(ui, &mut viewer);
                 paint_active_tab_markers(ui, dock, &pal);
@@ -4112,7 +4087,7 @@ impl GitemApp {
                     egui::Frame::popup(ui.style()).fill(pal.panel).show(ui, |ui| {
                         ui.set_width(width);
                         ui.set_height(ctx.content_rect().height() - top - 40.0);
-                        let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: false };
+                        let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: false };
                         ui.push_id(&cx.repo.root, |ui| if which == Peek::Details { inspect.ui(ui, &mut cx) } else { sidebar.ui(ui, &mut cx) });
                     });
                 });
@@ -4122,7 +4097,7 @@ impl GitemApp {
             }
             if let Some(pl) = &mut self.palette {
                 pl.outside = None;
-                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
+                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true };
                 if pl.show(&ctx, &mut cx) {
                     self.palette = None;
                 }
@@ -4139,7 +4114,7 @@ impl GitemApp {
                 let settings = &self.settings;
                 egui::CentralPanel::default().show(ui, |ui| {
                     let NoRepo { repo, data } = &**s;
-                    let mut cx = Cx { repo, data, settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
+                    let mut cx = Cx { repo, data, settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true };
                     tab.ui(ui, &mut cx);
                 });
                 if back {
@@ -4151,7 +4126,7 @@ impl GitemApp {
             if let (Some(pl), Some(s)) = (&mut self.palette, &self.no_repo) {
                 pl.outside = Some(self.git.is_ok());
                 let NoRepo { repo, data } = &**s;
-                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, out: &mut out, dialog_open, in_front: true };
+                let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true };
                 if pl.show(&ctx, &mut cx) {
                     self.palette = None;
                 }
