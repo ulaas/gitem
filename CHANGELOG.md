@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 (2026-11-11)
+
+A small release, and the first one gitem 0.8.0 can install by itself with Update and restart.
+
+Changed:
+
+- SQLite, which keeps gitem's own data, is updated (rusqlite 0.42) for a security fix in the bundled library (RUSTSEC-2026-0459).
+
 ## 0.8.0 (2026-11-11)
 
 Added:
