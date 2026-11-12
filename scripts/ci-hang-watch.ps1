@@ -33,9 +33,15 @@ while (-not $tests.HasExited) {
     Start-Sleep -Seconds 30
     if (-not $deps) { $deps = (Resolve-Path 'target\debug\deps' -ErrorAction SilentlyContinue) }
     if (-not $deps) { continue }
+    # A process can end between being listed and being asked about: its path and start time are
+    # then null, or reading them throws. Each is read once, and one that's gone isn't stuck.
     $stuck = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -and $_.Path.StartsWith($deps.Path, [StringComparison]::OrdinalIgnoreCase) -and
-        ((Get-Date) - $_.StartTime).TotalMinutes -gt $Limit
+        try {
+            $path = $_.Path
+            $started = $_.StartTime
+            $path -and $started -and $path.StartsWith($deps.Path, [StringComparison]::OrdinalIgnoreCase) -and
+                ((Get-Date) - $started).TotalMinutes -gt $Limit
+        } catch { $false }
     }
     foreach ($p in $stuck) {
         $name = [IO.Path]::GetFileNameWithoutExtension($p.Path)
