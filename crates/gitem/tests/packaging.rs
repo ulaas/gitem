@@ -99,10 +99,11 @@ fn release_workflow() -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml")).unwrap().replace("\r\n", "\n")
 }
 
-/// What `release.yml` promises: every system built, nothing released without a tag, and a draft
-/// for a person to publish. Whether GitHub's runners agree is only known from a run.
+/// What `release.yml` promises: every system built, nothing released without a tag, and the
+/// release published (a tag with a hyphen as a pre-release). Whether GitHub's runners agree is
+/// only known from a run.
 #[test]
-fn the_release_workflow_builds_every_system_and_drafts_a_release_from_a_tag() {
+fn the_release_workflow_builds_every_system_and_publishes_a_release_from_a_tag() {
     let y = release_workflow();
     for artefact in ["windows-${{ matrix.arch }}", "-setup.exe", "linux-${{ matrix.arch }}.AppImage", "macos-universal", "SHA256SUMS"] {
         assert!(y.contains(artefact), "{artefact}");
@@ -111,7 +112,9 @@ fn the_release_workflow_builds_every_system_and_drafts_a_release_from_a_tag() {
         assert!(y.contains(&format!("runner: {runner}")) || y.contains(&format!("runs-on: {runner}")), "{runner}");
     }
     assert!(y.contains("lipo -create"), "one binary for Apple silicon and Intel");
-    assert!(y.contains("--draft") && y.contains("if: github.ref_type == 'tag'"), "a draft, and only for a tag");
+    assert!(y.contains("gh release create") && y.contains("--verify-tag") && y.contains("if: github.ref_type == 'tag'"), "a release, and only for a tag");
+    assert!(!y.contains("--draft"), "published, not left as a draft");
+    assert!(y.contains("*-*) flags+=(--prerelease)"), "a tag with a hyphen is a pre-release");
     assert!(y.contains("doesn't match Cargo.toml's version"), "the tag has to be the version");
     assert!(y.contains("build-appimage.sh") && y.contains("APPIMAGE_EXTRACT_AND_RUN"));
 }
