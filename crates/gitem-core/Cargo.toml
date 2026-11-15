@@ -23,6 +23,10 @@ grep-matcher = "0.1.9"
 ignore = "0.4.34"
 sha2 = "0.11.1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# renamex_np, to swap gitem.app for its update in one step, and kill, to tell whether a process lives.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Threading"] }
 

@@ -413,6 +413,12 @@ pub fn aside(exe: &Path) -> PathBuf {
 /// Takes away what an earlier update left. The program it replaced may still be closing, so this
 /// tries for a few seconds, from a thread of its own.
 pub fn clean_up_after_update(exe: &Path) {
+    #[cfg(target_os = "macos")]
+    if let Some(app) = exe.ancestors().nth(3).filter(|a| a.extension().is_some_and(|e| e == "app")) {
+        let app = app.to_path_buf();
+        std::thread::spawn(move || mac::clean_up_leftovers(&app));
+        return;
+    }
     let (old, stage) = (aside(exe), staging_dir(exe));
     if !old.exists() && !stage.exists() {
         return;
@@ -654,9 +660,31 @@ mod mac {
         app.with_file_name(format!(".{name}.{what}-{}", std::process::id()))
     }
 
-    /// Puts the app at `staged` where `app` is, by two renames on the same disk, and takes the
-    /// old one away. If the second rename fails, the old app is put back.
+    /// Exchanges what's at `a` and `b` in one step, so neither name is ever missing.
+    pub fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::other);
+        let (a, b) = (c(a)?, c(b)?);
+        // SAFETY: both are NUL-terminated paths that live through the call.
+        if unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
+
+    /// Puts the app at `staged` where `app` is and takes the old one away. Swapped in one step
+    /// where the disk can; elsewhere by two renames, the old app put back if the second fails.
     pub fn swap_app(staged: &Path, app: &Path) -> Result<(), String> {
+        swap_app_with(staged, app, exchange)
+    }
+
+    pub fn swap_app_with(staged: &Path, app: &Path, exchange: impl FnOnce(&Path, &Path) -> std::io::Result<()>) -> Result<(), String> {
+        if exchange(staged, app).is_ok() {
+            // The old app is where the copy was.
+            let _ = std::fs::remove_dir_all(staged);
+            return Ok(());
+        }
+        swap_by_renames(staged, app)
+    }
+
+    fn swap_by_renames(staged: &Path, app: &Path) -> Result<(), String> {
         let old = beside(app, "old");
         let _ = std::fs::remove_dir_all(&old);
         std::fs::rename(app, &old).map_err(|e| super::io(app, e))?;
@@ -666,6 +694,31 @@ mod mac {
         }
         let _ = std::fs::remove_dir_all(&old);
         Ok(())
+    }
+
+    /// Whether process `pid` is still running: only "no such process" says it isn't.
+    pub fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 sends nothing; it only asks whether the process is there.
+        pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+    }
+
+    /// Takes away the copies and old apps an update left beside `app` when it was stopped half
+    /// way: `.gitem.app.update-<pid>` and `.gitem.app.old-<pid>`, unless that process still runs.
+    pub fn clean_up_leftovers(app: &Path) {
+        let (Some(dir), Some(name)) = (app.parent(), app.file_name()) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let name = name.to_string_lossy();
+        for e in entries.flatten() {
+            let file = e.file_name();
+            let file = file.to_string_lossy();
+            let pid = ["update", "old"].iter().find_map(|what| file.strip_prefix(&format!(".{name}.{what}-"))).and_then(|p| p.parse::<i32>().ok());
+            if let Some(pid) = pid
+                && !alive(pid)
+                && e.file_type().is_ok_and(|t| t.is_dir())
+            {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
     }
 
     /// Copies `new` beside `app`, has `check` look at the copy, and swaps it in. Whatever fails,
@@ -951,7 +1004,8 @@ mod tests {
         assert_eq!(beside(), ["gitem.app"]);
 
         // The second rename failing puts the old app back.
-        assert!(mac::swap_app(&d.path().join("gone.app"), &app).is_err());
+        let refuse = |_: &Path, _: &Path| Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        assert!(mac::swap_app_with(&d.path().join("gone.app"), &app, refuse).is_err());
         assert_eq!(std::fs::read_to_string(&program).unwrap(), "old");
         assert_eq!(beside(), ["gitem.app"]);
 
@@ -959,6 +1013,61 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&program).unwrap(), "new");
         assert_eq!(beside(), ["gitem.app"], "neither the copy nor the old app is left");
         assert!(new.exists(), "the image is only read");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_swap_is_one_step_and_two_renames_where_it_cant_be() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("gitem.app");
+        let program = app.join("Contents/MacOS/gitem");
+        let beside = || {
+            let mut v: Vec<String> = std::fs::read_dir(d.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        fake_app(&app, "dev.gitem.gitem", "1.0.0", "old");
+        let staged = mac::beside(&app, "update");
+        fake_app(&staged, "dev.gitem.gitem", "2.0.0", "new");
+        mac::exchange(&staged, &app).unwrap();
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(staged.join("Contents/MacOS/gitem")).unwrap(), "old", "swapped, not moved");
+        std::fs::remove_dir_all(&staged).unwrap();
+
+        // Through swap_app: the old app is gone after.
+        fake_app(&staged, "dev.gitem.gitem", "3.0.0", "newer");
+        mac::swap_app(&staged, &app).unwrap();
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "newer");
+        assert_eq!(beside(), ["gitem.app"]);
+
+        // A disk that can't swap: two renames, with the same end.
+        fake_app(&staged, "dev.gitem.gitem", "4.0.0", "newest");
+        let refuse = |_: &Path, _: &Path| Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        mac::swap_app_with(&staged, &app, refuse).unwrap();
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "newest");
+        assert_eq!(beside(), ["gitem.app"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn what_a_stopped_update_left_goes_unless_its_process_still_runs() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("gitem.app");
+        fake_app(&app, "dev.gitem.gitem", "1.0.0", "x");
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let dead = child.id() as i32;
+        child.wait().unwrap();
+        assert!(!mac::alive(dead) && !mac::alive(i32::MAX) && mac::alive(std::process::id() as i32));
+        let me = std::process::id();
+        for name in [format!(".gitem.app.update-{dead}"), format!(".gitem.app.old-{}", i32::MAX), format!(".gitem.app.update-{me}"), format!(".gitem.app.old-{me}"), ".other.app.old-1".to_string(), ".gitem.app.old-x".to_string()] {
+            std::fs::create_dir_all(d.path().join(name)).unwrap();
+        }
+        mac::clean_up_leftovers(&app);
+        let mut left: Vec<String> = std::fs::read_dir(d.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        let mut want = vec![".gitem.app.old-x".to_string(), format!(".gitem.app.old-{me}"), format!(".gitem.app.update-{me}"), ".other.app.old-1".to_string(), "gitem.app".to_string()];
+        want.sort();
+        assert_eq!(left, want, "a live process's, and what isn't an update's, stay");
     }
 
     #[cfg(target_os = "macos")]

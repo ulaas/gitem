@@ -1709,6 +1709,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "libc",
  "md5",
  "proptest",
  "rcgen",
