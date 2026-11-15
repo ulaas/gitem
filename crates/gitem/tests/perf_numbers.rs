@@ -452,7 +452,9 @@ fn pf11_ignored_churn() {
 /// A git that takes `ms` longer for the named subcommands, and logs when each ran.
 fn slow_git(names: &str, ms: u64, log: &Path) -> GitExe {
     let me = std::env::current_exe().unwrap();
-    let exe = me.parent().unwrap().parent().unwrap().join("examples").join(if cfg!(windows) { "slowgit.exe" } else { "slowgit" });
+    // Upwards from the test's executable: how deep it sits depends on the Rust version (slow_git.rs).
+    let name = if cfg!(windows) { "slowgit.exe" } else { "slowgit" };
+    let exe = me.ancestors().skip(1).map(|dir| dir.join("examples").join(name)).find(|exe| exe.exists()).unwrap_or_else(|| me.parent().unwrap().parent().unwrap().join("examples").join(name));
     assert!(exe.exists(), "build the slowgit example first: {}", exe.display());
     let real = real_git();
     // These run with --test-threads=1, and nothing else reads them until a child starts.
