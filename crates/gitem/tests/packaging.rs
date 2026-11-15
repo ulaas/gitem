@@ -164,3 +164,32 @@ fn the_updater_asks_for_the_files_the_release_workflow_makes() {
     let s = iss();
     assert!(s.contains("skipifsilent") && s.contains("PrivilegesRequired=lowest"));
 }
+
+fn macos(file: &str) -> String {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/macos").join(file)).unwrap()
+}
+
+/// Not whether hdiutil and codesign accept it, which is only known once someone runs it on a Mac.
+#[test]
+fn the_macos_image_is_for_apple_silicon_alone_signed_and_installs_nothing() {
+    let s = macos("build-dmg.sh");
+    assert!(s.starts_with("#!/usr/bin/env bash") && s.contains("set -euo pipefail") && !s.contains('\r'));
+    assert!(s.contains("Cargo.toml") && s.contains("gitem-$version-macos-arm64.dmg"), "{s}");
+    assert!(s.contains("target=aarch64-apple-darwin") && s.contains("--profile dist") && !s.contains("x86_64") && !s.contains("lipo -create"));
+    assert!(s.contains("lipo -archs") && s.contains("= arm64"), "it checks there's one architecture");
+    assert!(s.contains("--options runtime") && s.contains("MACOS_SIGN_IDENTITY") && s.contains("codesign --verify --deep --strict"));
+    assert!(s.contains("ln -s /Applications") && s.contains("hdiutil create"));
+    assert!(!s.contains("sudo") && !s.contains("/usr/local") && !s.lines().any(|l| l.trim_start().starts_with("open ")), "it installs and runs nothing");
+    for file in ["Info.plist", "icon.rs", "gitem.entitlements"] {
+        assert!(s.contains(&format!("\"$here/{file}\"")), "{file}");
+    }
+    let plist = macos("Info.plist");
+    for key in ["<key>CFBundleIdentifier</key>\n\t<string>dev.gitem.gitem</string>", "<key>CFBundleExecutable</key>\n\t<string>gitem</string>", "<key>LSMinimumSystemVersion</key>", "<key>NSHighResolutionCapable</key>\n\t<true/>"] {
+        assert!(plist.replace("\r\n", "\n").contains(key), "{key}");
+    }
+    assert!(plist.contains("<key>LSArchitecturePriority</key>") && plist.contains("<string>arm64</string>") && !plist.contains("x86_64"));
+    assert!(plist.contains("<string>@VERSION@</string>"), "the version comes from the build");
+    let y = release_workflow();
+    assert!(y.contains("bash packaging/macos/build-dmg.sh") && y.contains("runs-on: macos-15") && y.contains("needs: [version, windows, linux, macos, macos-dmg]"), "a release has the image too");
+    assert!(!plist.contains("CFBundleURLTypes") && !plist.contains("CFBundleDocumentTypes"), "macOS would hand those over as Apple events, which gitem doesn't read");
+}

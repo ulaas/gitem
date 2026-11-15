@@ -2,3 +2,4 @@
 packaging/linux/AppRun text eol=lf
 packaging/linux/*.sh text eol=lf
 packaging/linux/*.desktop text eol=lf
+packaging/macos/*.sh text eol=lf

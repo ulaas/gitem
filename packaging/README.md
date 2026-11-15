@@ -9,6 +9,7 @@
 | `gitem-<version>-linux-x64.tar.gz`, `-linux-arm64.tar.gz` | The program, built on Ubuntu 22.04 so it starts on that glibc or newer |
 | `gitem-<version>-linux-x64.AppImage`, `-linux-arm64.AppImage` | The same, as an AppImage, from `linux/build-appimage.sh` |
 | `gitem-<version>-macos-universal.tar.gz` | One binary for Apple silicon and Intel Macs |
+| `gitem-<version>-macos-arm64.dmg` | `gitem.app` for Apple silicon, from `macos/build-dmg.sh`, signed ad hoc |
 | `SHA256SUMS` | Checksums of all of the above |
 
 Every archive also holds `README.md`, `LICENSE` and `THIRD-PARTY-NOTICES.md`.
@@ -23,7 +24,7 @@ To try the builds without releasing, run the workflow by hand from **Actions > R
 
 ## What it doesn't do
 
-- **Signing.** Nothing is signed, so Windows SmartScreen and macOS Gatekeeper warn before the first run. On macOS, `xattr -d com.apple.quarantine gitem` after unpacking lets it start. Signing needs certificates as repository secrets.
+- **Signing.** Nothing is signed with a certificate, so Windows SmartScreen and macOS Gatekeeper warn before the first run. On macOS, `xattr -d com.apple.quarantine gitem` after unpacking lets it start; for `gitem.app`, Control-click it and choose Open the first time (on macOS 15 and later, open it once, then allow it in System Settings > Privacy & Security), or run `xattr -dr com.apple.quarantine /Applications/gitem.app`. Signing needs certificates as repository secrets.
 - **Store listings.** `winget/`, `scoop/`, `homebrew/` (a cask, for a tap of the owner's own) and `aur/` (`gitem-bin`) are templates. When a release is published, `.github/workflows/package-manifests.yml` fills them with its version and checksums and attaches them to the release as `gitem-<version>-package-manifests.tar.gz`. Submitting them to winget-pkgs, a Scoop bucket, a Homebrew tap or the AUR is left to a person.
 - **Bundled libraries.** The Linux builds and the AppImage use git, GTK and the graphics libraries already on the system, and nothing registers `gitem://` links or a menu entry; Settings does that on request.
 
@@ -31,6 +32,13 @@ To try the builds without releasing, run the workflow by hand from **Actions > R
 
 - `windows/build.ps1` builds the binary and the installer into `target\dist`. It needs Inno Setup 6 (`iscc`) on `PATH`.
 - `linux/build-appimage.sh` builds the binary and wraps it with `appimagetool`, named by `APPIMAGETOOL`.
+- `macos/build-dmg.sh` builds for Apple silicon (`aarch64-apple-darwin`, macOS 11 or newer), makes `gitem.app` with its icon drawn from `logo.rs`, signs it and leaves `target/dist/gitem-<version>-macos-arm64.dmg`: the app and a link to Applications. It needs only the Xcode command line tools and rustup. Signing is ad hoc unless `MACOS_SIGN_IDENTITY` names a Developer ID certificate in the keychain; with one, `MACOS_NOTARY_PROFILE` (a `xcrun notarytool store-credentials` profile) also notarizes and staples the image. `DMG_FORMAT` picks the compression (`ULFO` by default, or `UDZO`).
+
+### gitem.app
+
+- Started from Finder, the Dock or Spotlight, an app gets only `/usr/bin:/bin:/usr/sbin:/sbin` on `PATH`. gitem inside an app bundle adds Homebrew's folders (`/opt/homebrew/bin`, `/usr/local/bin`) and those in `/etc/paths` and `/etc/paths.d` that are missing, so it finds the same git, git-lfs and editors as a terminal, and so do the hooks git runs. Without any git, `/usr/bin/git` offers to install Apple's command line tools.
+- For the command line, link the binary inside the app: `ln -s /Applications/gitem.app/Contents/MacOS/gitem /usr/local/bin/gitem` (or into any folder on your `PATH`). **Credentials > Git integration** registers that same binary as git's difftool, mergetool and editors, so they keep working from inside the app.
+- `gitem://` links aren't registered: macOS hands a link to an app as an Apple event, which gitem doesn't read.
 
 `crates/gitem/tests/packaging.rs` reads these scripts and the workflow and checks what they promise.
 
@@ -44,5 +52,6 @@ gitem asks `DEFAULT_RELEASE_URL` (in `crates/gitem-core/src/update.rs`) once a d
 | From a zip or tar.gz, in a folder the user can write to | the zip or tar.gz for the system | Unpacked beside the program with the system's `tar`, then renamed into place (on Windows after moving the running one aside) |
 | An AppImage (`$APPIMAGE`) | the `.AppImage` for the system | Renamed over the old file |
 | Under Scoop, winget, Homebrew, `/usr`, or anywhere not writable | nothing | gitem names the command that updates it and links to the release |
+| Inside a macOS app (`gitem.app`) | nothing | Replacing the program would break the app's signature, so gitem links to the release's `.dmg` |
 
 So the names of the release's files are part of the updater: `asset_name` in `update.rs` has to change with them. A download is installed only if its SHA-256 is the one in the release's `SHA256SUMS`, and the one GitHub reports for the file when it reports one. Only files under `DOWNLOAD_PREFIX` are installed, and only when the address asked is the default one. A draft release isn't seen by any of this: the update reaches people when the release is published.

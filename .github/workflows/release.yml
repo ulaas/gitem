@@ -169,10 +169,32 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  # gitem.app for Apple silicon in a disk image, signed ad hoc. Beside the universal tar.gz, which
+  # the updater and the Homebrew cask still use.
+  macos-dmg:
+    needs: version
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+      - name: App and disk image
+        run: |
+          bash packaging/macos/build-dmg.sh
+          mkdir -p out
+          mv "target/dist/gitem-${{ needs.version.outputs.version }}-macos-arm64.dmg" out/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-arm64-dmg
+          path: out/*
+          if-no-files-found: error
+
   release:
     # Only for a tag. A run by hand stops at the artifacts above.
     if: github.ref_type == 'tag'
-    needs: [version, windows, linux, macos]
+    needs: [version, windows, linux, macos, macos-dmg]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -72,7 +72,7 @@ On Linux, install the development packages for the windowing libraries first, fo
 
 - `cargo build --profile dist` makes a smaller binary in `target/dist`, and takes longer.
 - `--features tree-sitter` gives the editor's outline and folding real syntax trees for Rust, Python, JavaScript and Go. It needs a C compiler.
-- `packaging/` has scripts for a Windows installer and a Linux AppImage. See [packaging/README.md](packaging/README.md).
+- `packaging/` has scripts for a Windows installer, a Linux AppImage and a macOS disk image (`packaging/macos/build-dmg.sh`, for Apple silicon). See [packaging/README.md](packaging/README.md).
 
 With no path, gitem reopens the repositories from your last session.
 
