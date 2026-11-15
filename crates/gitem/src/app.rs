@@ -3690,9 +3690,10 @@ impl GitemApp {
             found: self.update_found.as_ref().map(|r| crate::update_view::Found { version: r.version.clone(), page: r.page.clone() }),
             installed: self.update_installed.is_some(),
             progress: self.update_install.busy().then(|| crate::update_view::Progress { done: pr.done.load(Ordering::Relaxed), total: pr.total.load(Ordering::Relaxed), installing: pr.installing.load(Ordering::Relaxed) }),
-            can_install: source.is_some() && !matches!(self.update_kind, Install::Managed(_)),
+            can_install: source.is_some() && !matches!(self.update_kind, Install::Managed(_) | Install::AppBundle),
             why_not: match (&self.update_kind, &source) {
                 (Install::Managed(Some(how)), _) => Some(format!("This copy was installed by a package manager. Update it with: {how}")),
+                (Install::AppBundle, _) => Some(gitem_core::update::APP_BUNDLE.to_string()),
                 (Install::Managed(None), _) => Some("gitem can't write where this copy is, or a package owns it. Update it the way it was installed.".to_string()),
                 (_, None) => Some("Installed from here only when Settings asks gitem's own releases.".to_string()),
                 _ => None,

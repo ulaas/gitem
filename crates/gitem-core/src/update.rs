@@ -142,6 +142,9 @@ pub enum Install {
     Program,
     /// An AppImage, which is one file to replace.
     AppImage(PathBuf),
+    /// The program inside a macOS app bundle. Replacing it would break the app's signature, and
+    /// the program in the release's tar.gz isn't the app's, so the release's .dmg is the way.
+    AppBundle,
     /// Something else looks after it, or the folder can't be written to. With what to run to
     /// update it, when that's known.
     Managed(Option<&'static str>),
@@ -167,6 +170,9 @@ pub fn install_kind(exe: &Path, appimage: Option<&Path>) -> Install {
     if let Some((_, how)) = managers.iter().find(|(part, _)| path.contains(part)) {
         return Install::Managed(Some(how));
     }
+    if cfg!(target_os = "macos") && path.contains(".app/contents/macos/") {
+        return Install::AppBundle;
+    }
     if let Some(image) = appimage {
         return match image.parent() {
             Some(dir) if image.is_file() && can_write_in(dir) => Install::AppImage(image.to_path_buf()),
@@ -183,6 +189,9 @@ pub fn install_kind(exe: &Path, appimage: Option<&Path>) -> Install {
     }
     if cfg!(windows) && dir.join("unins000.exe").is_file() { Install::Installer } else { Install::Program }
 }
+
+/// Why gitem.app isn't updated in place, and what to do instead.
+pub const APP_BUNDLE: &str = "This is gitem.app. Download the release's gitem-<version>-macos-arm64.dmg and drag gitem to Applications again.";
 
 /// The name of the release file that replaces this kind of copy on this system.
 pub fn asset_name(version: &str, kind: &Install, os: &str, arch: &str) -> Option<String> {
@@ -203,6 +212,9 @@ pub fn asset_name(version: &str, kind: &Install, os: &str, arch: &str) -> Option
 
 /// The file of `release` that updates this copy, or why there's none to install.
 pub fn asset_for<'a>(release: &'a Release, kind: &Install) -> std::result::Result<&'a Asset, String> {
+    if *kind == Install::AppBundle {
+        return Err(APP_BUNDLE.to_string());
+    }
     if let Install::Managed(how) = kind {
         return Err(match how {
             Some(how) => format!("This copy was installed by a package manager. Update it with: {how}"),
@@ -424,7 +436,7 @@ fn run_installer(setup: &Path, exe: &Path) -> std::result::Result<(), String> {
 /// Installs the checked download `file` over the copy at `exe`. On failure that copy still starts.
 pub fn install(kind: &Install, file: &Path, exe: &Path) -> std::result::Result<(), String> {
     match kind {
-        Install::Managed(_) => Err("This copy isn't gitem's to replace.".to_string()),
+        Install::Managed(_) | Install::AppBundle => Err("This copy isn't gitem's to replace.".to_string()),
         Install::AppImage(image) => swap(file, image),
         Install::Installer => run_installer(file, exe),
         Install::Program => {
@@ -543,6 +555,19 @@ mod tests {
             assert!(install(&kind, &dir.join("x"), &dir.join("gitem.exe")).is_err());
         }
         assert_eq!(install_kind(&d.path().join("missing").join("gitem"), None), Install::Managed(None), "a folder that can't be written to");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_app_bundle_is_left_to_its_disk_image() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("gitem.app/Contents/MacOS");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kind = install_kind(&dir.join("gitem"), None);
+        assert_eq!(kind, Install::AppBundle);
+        let release = Release { version: "9.0.0".into(), page: String::new(), notes: String::new(), assets: vec![] };
+        assert!(asset_for(&release, &kind).unwrap_err().contains(".dmg"));
+        assert!(install(&kind, &dir.join("x"), &dir.join("gitem")).is_err());
     }
 
     #[test]
