@@ -588,7 +588,7 @@ mod mac {
     use std::process::{Command, Stdio};
 
     /// Waits for the process `$1` to end, then opens the app `$2`, with any options after it.
-    pub const RELAUNCH: &str = r#"pid=$1 app=$2; shift 2; while kill -0 "$pid" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open -n "$@" "$app""#;
+    pub const RELAUNCH: &str = r#"pid=$1 app=$2; shift 2; n=0; while kill -0 "$pid" 2>/dev/null; do [ $n -ge 3000 ] && exit 0; n=$((n+1)); /bin/sleep 0.2; done; exec /usr/bin/open -n "$@" "$app""#;
 
     fn run(tool: &str, args: &[&std::ffi::OsStr]) -> Result<String, String> {
         let out = Command::new(tool).args(args).stdin(Stdio::null()).output().map_err(|e| format!("Couldn't run {tool}: {e}"))?;
