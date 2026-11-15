@@ -1143,6 +1143,8 @@ pub struct GitemApp {
     update_restart: bool,
     /// For a test: the program to replace, and where its files may come from.
     update_target: Option<(PathBuf, String)>,
+    /// For a test of a real copy: an update that's found is taken at once, as if asked for.
+    update_take_for_test: bool,
     pub shot: Option<Shot>,
     pub shot_tabs: Vec<Tab>,
     pub shot_inspect: Option<String>,
@@ -1312,6 +1314,7 @@ impl GitemApp {
             update_installed: None,
             update_restart: false,
             update_target: None,
+            update_take_for_test: false,
             shot: None,
             shot_tabs: Vec::new(),
             shot_inspect: None,
@@ -1386,6 +1389,18 @@ impl GitemApp {
     /// For a test: `exe` stands in for the running program, and its files may come from `from`.
     pub fn update_target_for_test(&mut self, exe: PathBuf, from: String) {
         self.update_target = Some((exe, from));
+    }
+
+    /// For a test of a real copy, run in a debug build with `GITEM_TEST_UPDATE` naming where its
+    /// files may come from (a release build never reads it): the running copy is the one to
+    /// replace, and a release that's found is installed without being asked, then started.
+    pub fn update_from_env_for_test(&mut self) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let (Some(from), Some(exe)) = (std::env::var_os("GITEM_TEST_UPDATE"), running_program()) else { return };
+        self.update_target = Some((exe, from.to_string_lossy().into_owned()));
+        self.update_take_for_test = true;
     }
 
     /// What an update that's been installed would start, if one has.
@@ -3664,6 +3679,8 @@ impl GitemApp {
         if self.update_install.value.take().is_some() {
             self.update_installed = match &self.update_kind {
                 gitem_core::update::Install::AppImage(image) => Some(image.clone()),
+                // Started again as an app, by `open`.
+                gitem_core::update::Install::AppBundle { app, .. } => Some(app.clone()),
                 _ => self.update_target.as_ref().map(|(exe, _)| exe.clone()).or_else(running_program),
             };
             self.restart_for_update(ctx);
@@ -3690,10 +3707,10 @@ impl GitemApp {
             found: self.update_found.as_ref().map(|r| crate::update_view::Found { version: r.version.clone(), page: r.page.clone() }),
             installed: self.update_installed.is_some(),
             progress: self.update_install.busy().then(|| crate::update_view::Progress { done: pr.done.load(Ordering::Relaxed), total: pr.total.load(Ordering::Relaxed), installing: pr.installing.load(Ordering::Relaxed) }),
-            can_install: source.is_some() && !matches!(self.update_kind, Install::Managed(_) | Install::AppBundle),
+            can_install: source.is_some() && !matches!(self.update_kind, Install::Managed(_) | Install::AppBundleByHand(_)),
             why_not: match (&self.update_kind, &source) {
                 (Install::Managed(Some(how)), _) => Some(format!("This copy was installed by a package manager. Update it with: {how}")),
-                (Install::AppBundle, _) => Some(gitem_core::update::APP_BUNDLE.to_string()),
+                (Install::AppBundleByHand(why), _) => Some(why.clone()),
                 (Install::Managed(None), _) => Some("gitem can't write where this copy is, or a package owns it. Update it the way it was installed.".to_string()),
                 (_, None) => Some("Installed from here only when Settings asks gitem's own releases.".to_string()),
                 _ => None,
@@ -3733,6 +3750,9 @@ impl GitemApp {
                         self.update_error = None;
                         self.update_found = Some(r);
                         self.update_kind = kind;
+                        if std::mem::take(&mut self.update_take_for_test) {
+                            self.start_update(ctx);
+                        }
                     }
                 }
                 None if asked => self.update_answer = Some("This is the newest release.".to_string()),

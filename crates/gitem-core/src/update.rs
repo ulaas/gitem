@@ -142,9 +142,13 @@ pub enum Install {
     Program,
     /// An AppImage, which is one file to replace.
     AppImage(PathBuf),
-    /// The program inside a macOS app bundle. Replacing it would break the app's signature, and
-    /// the program in the release's tar.gz isn't the app's, so the release's .dmg is the way.
-    AppBundle,
+    /// gitem.app, signed with a Developer ID, in a folder this user can write to. It's replaced
+    /// as a whole by the app in the release's disk image, once that's signed by the same team
+    /// (`team`) and macOS takes it as notarized. Never only its program: that would break the
+    /// app's signature, and the program in the release's tar.gz isn't the app's.
+    AppBundle { app: PathBuf, team: String },
+    /// gitem.app where it isn't replaced in place, and why, with what to do instead.
+    AppBundleByHand(String),
     /// Something else looks after it, or the folder can't be written to. With what to run to
     /// update it, when that's known.
     Managed(Option<&'static str>),
@@ -171,7 +175,15 @@ pub fn install_kind(exe: &Path, appimage: Option<&Path>) -> Install {
         return Install::Managed(Some(how));
     }
     if cfg!(target_os = "macos") && path.contains(".app/contents/macos/") {
-        return Install::AppBundle;
+        return match exe.ancestors().nth(3) {
+            Some(app) if app.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")) => {
+                let folder = app.parent().map_or(Folder::NotWritable, folder_state);
+                // Only asked of codesign when the answer could matter.
+                let team = if folder == Folder::Writable && !is_translocated(app) { team_of(app) } else { None };
+                app_bundle_kind(app, folder, team)
+            }
+            _ => Install::AppBundleByHand(APP_BUNDLE.to_string()),
+        };
     }
     if let Some(image) = appimage {
         return match image.parent() {
@@ -190,8 +202,71 @@ pub fn install_kind(exe: &Path, appimage: Option<&Path>) -> Install {
     if cfg!(windows) && dir.join("unins000.exe").is_file() { Install::Installer } else { Install::Program }
 }
 
-/// Why gitem.app isn't updated in place, and what to do instead.
-pub const APP_BUNDLE: &str = "This is gitem.app. Download the release's gitem-<version>-macos-arm64.dmg and drag gitem to Applications again.";
+/// What to do when gitem.app isn't updated in place.
+pub const APP_BUNDLE: &str = "Download the release's gitem-<version>-macos-arm64.dmg and drag gitem to Applications again.";
+
+/// Whether a folder can be written to, and if not, whether that's because its disk can't be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Folder {
+    Writable,
+    /// A disk image, or another disk mounted read-only.
+    ReadOnlyVolume,
+    NotWritable,
+}
+
+fn folder_state(dir: &Path) -> Folder {
+    let probe = dir.join(format!(".gitem-write-test-{}", std::process::id()));
+    let made = std::fs::File::create(&probe);
+    let _ = std::fs::remove_file(&probe);
+    match made {
+        Ok(_) => Folder::Writable,
+        Err(e) if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem => Folder::ReadOnlyVolume,
+        Err(_) => Folder::NotWritable,
+    }
+}
+
+/// Run straight from Downloads with the quarantine on it, macOS starts the app from a
+/// read-only copy somewhere else, and replacing that would change nothing.
+fn is_translocated(app: &Path) -> bool {
+    app.to_string_lossy().to_lowercase().contains("/apptranslocation/")
+}
+
+/// How gitem.app at `app` is updated, given its folder and the team its signature names: in
+/// place, or by hand and why.
+pub fn app_bundle_kind(app: &Path, folder: Folder, team: Option<String>) -> Install {
+    let by_hand = |why: String| Install::AppBundleByHand(format!("{why} {APP_BUNDLE}"));
+    if is_translocated(app) {
+        return Install::AppBundleByHand("macOS is running gitem.app from where it was downloaded, so it can't update itself. Move gitem to Applications and open it from there.".to_string());
+    }
+    let dir = app.parent().unwrap_or(Path::new("/"));
+    match (folder, team) {
+        (Folder::ReadOnlyVolume, _) => Install::AppBundleByHand("gitem.app is running from its disk image or another read-only disk. Drag gitem to Applications and open it from there.".to_string()),
+        (Folder::NotWritable, _) => by_hand(format!("This user can't write in {}, and gitem doesn't ask for an administrator's password.", dir.display())),
+        (Folder::Writable, None) => by_hand("This gitem.app isn't signed with a Developer ID, so gitem can't tell that an update comes from the same developer.".to_string()),
+        (Folder::Writable, Some(team)) => Install::AppBundle { app: app.to_path_buf(), team },
+    }
+}
+
+/// The team a Developer ID signature names, from what `codesign -dv` says. Nothing for an ad hoc
+/// signature, or for none: `TeamIdentifier=not set`, or no such line.
+pub fn team_in(codesign_says: &str) -> Option<String> {
+    let team = codesign_says.lines().find_map(|l| l.trim().strip_prefix("TeamIdentifier="))?.trim();
+    (!team.is_empty() && team.len() <= 20 && team.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())).then(|| team.to_string())
+}
+
+/// The team that signed the app at `app`, if it was signed with a Developer ID.
+fn team_of(app: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("/usr/bin/codesign").arg("-dv").arg("--verbose=2").arg(app).stdin(std::process::Stdio::null()).output().ok()?;
+        out.status.success().then(|| team_in(&String::from_utf8_lossy(&out.stderr))).flatten()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        None
+    }
+}
 
 /// The name of the release file that replaces this kind of copy on this system.
 pub fn asset_name(version: &str, kind: &Install, os: &str, arch: &str) -> Option<String> {
@@ -205,6 +280,7 @@ pub fn asset_name(version: &str, kind: &Install, os: &str, arch: &str) -> Option
         (Install::Program, "windows") => format!("gitem-{version}-windows-{arch}.zip"),
         (Install::Program, "linux") => format!("gitem-{version}-linux-{arch}.tar.gz"),
         (Install::Program, "macos") => format!("gitem-{version}-macos-universal.tar.gz"),
+        (Install::AppBundle { .. }, "macos") if arch == "arm64" => format!("gitem-{version}-macos-arm64.dmg"),
         (Install::AppImage(_), "linux") => format!("gitem-{version}-linux-{arch}.AppImage"),
         _ => return None,
     })
@@ -212,8 +288,8 @@ pub fn asset_name(version: &str, kind: &Install, os: &str, arch: &str) -> Option
 
 /// The file of `release` that updates this copy, or why there's none to install.
 pub fn asset_for<'a>(release: &'a Release, kind: &Install) -> std::result::Result<&'a Asset, String> {
-    if *kind == Install::AppBundle {
-        return Err(APP_BUNDLE.to_string());
+    if let Install::AppBundleByHand(why) = kind {
+        return Err(why.clone());
     }
     if let Install::Managed(how) = kind {
         return Err(match how {
@@ -433,10 +509,18 @@ fn run_installer(setup: &Path, exe: &Path) -> std::result::Result<(), String> {
     Err(failed)
 }
 
-/// Installs the checked download `file` over the copy at `exe`. On failure that copy still starts.
-pub fn install(kind: &Install, file: &Path, exe: &Path) -> std::result::Result<(), String> {
+/// Installs the checked download `file`, of release `version`, over the copy at `exe`. On
+/// failure that copy still starts.
+pub fn install(kind: &Install, file: &Path, exe: &Path, version: &str) -> std::result::Result<(), String> {
     match kind {
-        Install::Managed(_) | Install::AppBundle => Err("This copy isn't gitem's to replace.".to_string()),
+        Install::Managed(_) | Install::AppBundleByHand(_) => Err("This copy isn't gitem's to replace.".to_string()),
+        #[cfg(target_os = "macos")]
+        Install::AppBundle { app, team } => mac::install_app(file, app, team, version),
+        #[cfg(not(target_os = "macos"))]
+        Install::AppBundle { .. } => {
+            let _ = version;
+            Err("This copy isn't gitem's to replace.".to_string())
+        }
         Install::AppImage(image) => swap(file, image),
         Install::Installer => run_installer(file, exe),
         Install::Program => {
@@ -451,20 +535,197 @@ pub fn install(kind: &Install, file: &Path, exe: &Path) -> std::result::Result<(
 /// the old program on Windows, which the next start removes.
 pub fn download_and_install(release: &Release, kind: &Install, exe: &Path, from: &str, current: &str, progress: &Progress) -> std::result::Result<(), String> {
     let asset = asset_for(release, kind)?;
-    let target = match kind {
-        Install::AppImage(image) => image.as_path(),
-        _ => exe,
+    let stage = match kind {
+        Install::AppImage(image) => staging_dir(image),
+        // Nothing is written inside an app: that would break its signature.
+        Install::AppBundle { .. } => std::env::temp_dir().join(format!("gitem-update-{}", std::process::id())),
+        _ => staging_dir(exe),
     };
-    let stage = staging_dir(target);
     let done = fetch(release, asset, from, &stage, current, progress).and_then(|file| {
         if progress.cancel.load(Ordering::Relaxed) {
             return Err("Stopped.".to_string());
         }
         progress.installing.store(true, Ordering::Relaxed);
-        install(kind, &file, exe)
+        install(kind, &file, exe, &release.version)
     });
     let _ = std::fs::remove_dir_all(&stage);
     done
+}
+
+/// What an update starts once this process has ended and everything's saved: the program it
+/// installed, or on macOS the app, through `open` so it starts as any app does. The app's started
+/// once this process is gone, by a small shell that waits for it, without a terminal.
+pub fn start_after_exit(start: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if start.extension().is_some_and(|e| e == "app") {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new("/bin/sh");
+        c.arg("-c").arg(mac::RELAUNCH).arg("sh").arg(std::process::id().to_string()).arg(start);
+        // Where this copy keeps its settings, for a copy started with its own.
+        if let Some(dir) = crate::settings::config_dir_override() {
+            let mut env = std::ffi::OsString::from("GITEM_CONFIG_DIR=");
+            env.push(dir);
+            c.arg("--env").arg(env);
+        }
+        let null = std::process::Stdio::null;
+        c.stdin(null()).stdout(null()).stderr(null()).process_group(0);
+        return c.spawn().map(|_| ());
+    }
+    std::process::Command::new(start).spawn().map(|_| ())
+}
+
+/// gitem.app replaced by the app in a release's disk image, with Apple's own tools, by their
+/// full paths: an app started from Finder has little on its `PATH`.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    /// Waits for the process `$1` to end, then opens the app `$2`, with any options after it.
+    pub const RELAUNCH: &str = r#"pid=$1 app=$2; shift 2; while kill -0 "$pid" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open -n "$@" "$app""#;
+
+    fn run(tool: &str, args: &[&std::ffi::OsStr]) -> Result<String, String> {
+        let out = Command::new(tool).args(args).stdin(Stdio::null()).output().map_err(|e| format!("Couldn't run {tool}: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            let said = String::from_utf8_lossy(&out.stderr);
+            let name = Path::new(tool).file_name().unwrap_or_default().to_string_lossy();
+            Err(format!("{name} said: {}", said.trim()))
+        }
+    }
+
+    /// What a signature has to satisfy: Apple's Developer ID chain, ending in a certificate of
+    /// `team`. The running app's own team, so a copy built and signed by someone else updates
+    /// from their releases and not from gitem's.
+    pub fn requirement(team: &str) -> String {
+        format!(r#"anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "{team}""#)
+    }
+
+    fn unescape(s: &str) -> String {
+        s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+    }
+
+    /// Each string that follows `<key>key</key>` in an XML property list.
+    pub fn plist_strings(xml: &str, key: &str) -> Vec<String> {
+        let tag = format!("<key>{key}</key>");
+        xml.match_indices(&tag)
+            .filter_map(|(at, _)| {
+                let rest = xml[at + tag.len()..].trim_start();
+                let rest = rest.strip_prefix("<string>")?;
+                Some(unescape(&rest[..rest.find("</string>")?]))
+            })
+            .collect()
+    }
+
+    /// A value from an app's Info.plist, which may be stored in binary.
+    fn info(app: &Path, key: &str) -> Result<String, String> {
+        let plist = app.join("Contents/Info.plist");
+        let xml = run("/usr/bin/plutil", &["-convert".as_ref(), "xml1".as_ref(), "-o".as_ref(), "-".as_ref(), plist.as_os_str()])?;
+        plist_strings(&xml, key).into_iter().next().ok_or_else(|| format!("{} doesn't say its {key}.", app.display()))
+    }
+
+    /// Whether the app at `new` is the release `version` of the app at `app`.
+    pub fn same_app(new: &Path, app: &Path, version: &str) -> Result<(), String> {
+        let (id, ours) = (info(new, "CFBundleIdentifier")?, info(app, "CFBundleIdentifier")?);
+        if id != ours {
+            return Err(format!("The app in the update is {id}, not {ours}."));
+        }
+        let says = info(new, "CFBundleShortVersionString")?;
+        if says != version {
+            return Err(format!("The app in the update says it's version {says}, not {version}."));
+        }
+        Ok(())
+    }
+
+    /// Whether the app at `new` is whole, signed by `team` with a Developer ID, and notarized.
+    fn trusted(new: &Path, team: &str) -> Result<(), String> {
+        let app = new.as_os_str();
+        run("/usr/bin/codesign", &["--verify".as_ref(), "--deep".as_ref(), "--strict".as_ref(), app]).map_err(|e| format!("The update's signature doesn't hold: {e}"))?;
+        let req = format!("-R={}", requirement(team));
+        run("/usr/bin/codesign", &["--verify".as_ref(), req.as_ref(), app]).map_err(|e| format!("The update isn't signed by the team that signed this copy ({team}): {e}"))?;
+        run("/usr/sbin/spctl", &["--assess".as_ref(), "--type".as_ref(), "execute".as_ref(), app]).map_err(|e| format!("macOS doesn't accept the update as notarized: {e}"))?;
+        Ok(())
+    }
+
+    /// A hidden name beside `app`, in the same folder, so moving it is a rename.
+    pub fn beside(app: &Path, what: &str) -> PathBuf {
+        let name = app.file_name().unwrap_or_default().to_string_lossy();
+        app.with_file_name(format!(".{name}.{what}-{}", std::process::id()))
+    }
+
+    /// Puts the app at `staged` where `app` is, by two renames on the same disk, and takes the
+    /// old one away. If the second rename fails, the old app is put back.
+    pub fn swap_app(staged: &Path, app: &Path) -> Result<(), String> {
+        let old = beside(app, "old");
+        let _ = std::fs::remove_dir_all(&old);
+        std::fs::rename(app, &old).map_err(|e| super::io(app, e))?;
+        if let Err(e) = std::fs::rename(staged, app) {
+            let _ = std::fs::rename(&old, app);
+            return Err(super::io(staged, e));
+        }
+        let _ = std::fs::remove_dir_all(&old);
+        Ok(())
+    }
+
+    /// Copies `new` beside `app`, has `check` look at the copy, and swaps it in. Whatever fails,
+    /// `app` is as it was and the copy is gone.
+    pub fn place(new: &Path, app: &Path, check: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
+        let staged = beside(app, "update");
+        let _ = std::fs::remove_dir_all(&staged);
+        let done = run("/usr/bin/ditto", &[new.as_os_str(), staged.as_os_str()]).map_err(|e| format!("Couldn't copy the new app beside this one: {e}")).and_then(|_| check(&staged)).and_then(|_| swap_app(&staged, app));
+        if done.is_err() {
+            let _ = std::fs::remove_dir_all(&staged);
+        }
+        done
+    }
+
+    /// The one app at the top of a mounted disk image.
+    pub fn app_in(mount: &Path) -> Result<PathBuf, String> {
+        let apps: Vec<PathBuf> = std::fs::read_dir(mount)
+            .map_err(|e| super::io(mount, e))?
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "app"))
+            .collect();
+        match apps.as_slice() {
+            [one] => Ok(one.clone()),
+            [] => Err("The update's disk image has no app in it.".to_string()),
+            _ => Err("The update's disk image has more than one app in it.".to_string()),
+        }
+    }
+
+    /// Mounts `dmg` read-only, out of sight, somewhere of its own under `dir`.
+    fn attach(dmg: &Path, dir: &Path) -> Result<PathBuf, String> {
+        let plist = run("/usr/bin/hdiutil", &["attach".as_ref(), "-nobrowse".as_ref(), "-readonly".as_ref(), "-noautoopen".as_ref(), "-plist".as_ref(), "-mountrandom".as_ref(), dir.as_os_str(), dmg.as_os_str()])
+            .map_err(|e| format!("Couldn't open the update's disk image: {e}"))?;
+        plist_strings(&plist, "mount-point").into_iter().next().map(PathBuf::from).ok_or_else(|| "The update's disk image mounted nowhere.".to_string())
+    }
+
+    fn detach(mount: &Path) {
+        if run("/usr/bin/hdiutil", &["detach".as_ref(), "-quiet".as_ref(), mount.as_os_str()]).is_err() {
+            let _ = run("/usr/bin/hdiutil", &["detach".as_ref(), "-force".as_ref(), "-quiet".as_ref(), mount.as_os_str()]);
+        }
+    }
+
+    /// Replaces gitem.app at `app` with the one in the checked disk image `dmg`, if that's
+    /// release `version` of the same app, signed by `team` and notarized.
+    pub fn install_app(dmg: &Path, app: &Path, team: &str, version: &str) -> Result<(), String> {
+        let mounts = dmg.with_file_name("mount");
+        std::fs::create_dir_all(&mounts).map_err(|e| super::io(&mounts, e))?;
+        let done = attach(dmg, &mounts).and_then(|mount| {
+            let done = app_in(&mount).and_then(|new| {
+                same_app(&new, app, version)?;
+                place(&new, app, |staged| trusted(staged, team))
+            });
+            detach(&mount);
+            done
+        });
+        // Only empty folders by now: a mount that's still there is left alone.
+        let _ = std::fs::remove_dir(&mounts);
+        done
+    }
 }
 
 #[cfg(test)]
@@ -552,22 +813,168 @@ mod tests {
             assert_eq!(kind, Install::Managed(Some(how)), "{folder}");
             let release = Release { version: "9.0.0".into(), page: String::new(), notes: String::new(), assets: vec![] };
             assert!(asset_for(&release, &kind).unwrap_err().contains(how));
-            assert!(install(&kind, &dir.join("x"), &dir.join("gitem.exe")).is_err());
+            assert!(install(&kind, &dir.join("x"), &dir.join("gitem.exe"), "9.0.0").is_err());
         }
         assert_eq!(install_kind(&d.path().join("missing").join("gitem"), None), Install::Managed(None), "a folder that can't be written to");
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn an_app_bundle_is_left_to_its_disk_image() {
+    fn an_unsigned_app_bundle_is_left_to_its_disk_image() {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("gitem.app/Contents/MacOS");
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("gitem"), "x").unwrap();
         let kind = install_kind(&dir.join("gitem"), None);
-        assert_eq!(kind, Install::AppBundle);
+        let Install::AppBundleByHand(why) = &kind else { panic!("{kind:?}") };
+        assert!(why.contains("isn't signed with a Developer ID") && why.contains(".dmg"), "{why}");
         let release = Release { version: "9.0.0".into(), page: String::new(), notes: String::new(), assets: vec![] };
-        assert!(asset_for(&release, &kind).unwrap_err().contains(".dmg"));
-        assert!(install(&kind, &dir.join("x"), &dir.join("gitem")).is_err());
+        assert_eq!(asset_for(&release, &kind).unwrap_err(), *why);
+        assert!(install(&kind, &dir.join("x"), &dir.join("gitem"), "9.0.0").is_err());
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1, "the test for writing leaves nothing");
+        // Not the program of an app, if it isn't three folders down in a .app.
+        let odd = d.path().join("x.app/Contents/MacOS/sub/gitem");
+        assert_eq!(install_kind(&odd, None), Install::AppBundleByHand(APP_BUNDLE.to_string()));
+    }
+
+    #[test]
+    fn which_app_bundle_is_updated_in_place_and_which_by_hand() {
+        let team = || Some("N6FA79GV97".to_string());
+        let app = Path::new("/Users/me/Applications/gitem.app");
+        assert_eq!(app_bundle_kind(app, Folder::Writable, team()), Install::AppBundle { app: app.to_path_buf(), team: "N6FA79GV97".into() });
+        let by_hand = |app: &Path, folder, team| match app_bundle_kind(app, folder, team) {
+            Install::AppBundleByHand(why) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(by_hand(app, Folder::Writable, None).contains("isn't signed with a Developer ID"), "ad hoc or unsigned");
+        assert!(by_hand(app, Folder::NotWritable, team()).contains("can't write in /Users/me/Applications"));
+        assert!(by_hand(app, Folder::ReadOnlyVolume, team()).contains("read-only disk"));
+        let moved = Path::new("/private/var/folders/xy/abc/T/AppTranslocation/1234-ABCD/d/gitem.app");
+        assert!(by_hand(moved, Folder::ReadOnlyVolume, team()).contains("Move gitem to Applications"));
+        assert!(by_hand(moved, Folder::Writable, team()).contains("Move gitem to Applications"));
+        // Homebrew's own, linked from Applications or not, is Homebrew's to update.
+        assert_eq!(install_kind(Path::new("/opt/homebrew/Caskroom/gitem/1.0/gitem.app/Contents/MacOS/gitem"), None), Install::Managed(Some("brew upgrade --cask gitem")));
+        assert_eq!(install_kind(Path::new("/usr/local/Caskroom/gitem/1.0/gitem.app/Contents/MacOS/gitem"), None), Install::Managed(Some("brew upgrade --cask gitem")));
+    }
+
+    #[test]
+    fn the_team_comes_from_a_developer_id_signature_only() {
+        let says = "Executable=/A/gitem.app/Contents/MacOS/gitem\nIdentifier=dev.gitem.gitem\nAuthority=Developer ID Application: A (N6FA79GV97)\nTeamIdentifier=N6FA79GV97\n";
+        assert_eq!(team_in(says).as_deref(), Some("N6FA79GV97"));
+        assert_eq!(team_in("Signature=adhoc\nTeamIdentifier=not set\n"), None);
+        assert_eq!(team_in("gitem.app: code object is not signed at all\n"), None);
+        assert_eq!(team_in("TeamIdentifier=AB\" or anchor apple\n"), None, "nothing that could change the requirement");
+    }
+
+    #[test]
+    fn an_app_bundle_takes_the_disk_image_on_apple_silicon_only() {
+        let kind = Install::AppBundle { app: "/A/gitem.app".into(), team: "T".into() };
+        assert_eq!(asset_name("1.2.3", &kind, "macos", "aarch64").as_deref(), Some("gitem-1.2.3-macos-arm64.dmg"));
+        assert_eq!(asset_name("1.2.3", &kind, "macos", "x86_64"), None);
+        assert_eq!(asset_name("1.2.3", &Install::AppBundleByHand(String::new()), "macos", "aarch64"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_signature_has_to_be_a_developer_ids_of_the_same_team() {
+        assert_eq!(
+            mac::requirement("N6FA79GV97"),
+            r#"anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "N6FA79GV97""#
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_property_list_is_read_for_its_strings() {
+        let xml = "<dict>\n\t<key>CFBundleIdentifier</key>\n\t<string>dev.gitem.gitem</string>\n\t<key>system-entities</key><array><dict><key>mount-point</key>\n<string>/private/tmp/x/dmg.a &amp; b</string></dict><dict><key>mount-point</key><string>/b</string></dict></array>\n\t<key>CFBundleVersion</key><integer>3</integer></dict>";
+        assert_eq!(mac::plist_strings(xml, "CFBundleIdentifier"), ["dev.gitem.gitem"]);
+        assert_eq!(mac::plist_strings(xml, "mount-point"), ["/private/tmp/x/dmg.a & b", "/b"]);
+        assert!(mac::plist_strings(xml, "CFBundleVersion").is_empty(), "not a string");
+        assert!(mac::plist_strings(xml, "missing").is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fake_app(at: &Path, id: &str, version: &str, program: &str) {
+        std::fs::create_dir_all(at.join("Contents/MacOS")).unwrap();
+        std::fs::write(at.join("Contents/MacOS/gitem"), program).unwrap();
+        let plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleShortVersionString</key><string>{version}</string></dict></plist>"#);
+        std::fs::write(at.join("Contents/Info.plist"), plist).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_app_in_the_image_has_to_be_this_app_at_the_releases_version() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, new) = (d.path().join("gitem.app"), d.path().join("image/gitem.app"));
+        fake_app(&app, "dev.gitem.gitem", "1.0.0", "old");
+        fake_app(&new, "dev.gitem.gitem", "2.0.0", "new");
+        mac::same_app(&new, &app, "2.0.0").unwrap();
+        assert!(mac::same_app(&new, &app, "2.0.1").unwrap_err().contains("version 2.0.0, not 2.0.1"));
+        fake_app(&new, "dev.other.app", "2.0.0", "new");
+        assert!(mac::same_app(&new, &app, "2.0.0").unwrap_err().contains("dev.other.app"));
+        assert_eq!(mac::app_in(&d.path().join("image")).unwrap(), new);
+        std::os::unix::fs::symlink("/Applications", d.path().join("image/Applications")).unwrap();
+        assert_eq!(mac::app_in(&d.path().join("image")).unwrap(), new, "the link to Applications isn't an app");
+        fake_app(&d.path().join("image/second.app"), "x", "1", "x");
+        assert!(mac::app_in(&d.path().join("image")).unwrap_err().contains("more than one"));
+        assert!(mac::app_in(&d.path().join("gitem.app/Contents/MacOS")).unwrap_err().contains("no app"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_app_is_swapped_whole_or_left_as_it_was() {
+        let d = tempfile::tempdir().unwrap();
+        let (app, new) = (d.path().join("Apps/gitem.app"), d.path().join("image/gitem.app"));
+        fake_app(&app, "dev.gitem.gitem", "1.0.0", "old");
+        fake_app(&new, "dev.gitem.gitem", "2.0.0", "new");
+        let program = app.join("Contents/MacOS/gitem");
+        let beside = || std::fs::read_dir(app.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
+
+        // A check that fails: nothing changes, and the copy is gone.
+        let mut seen = None;
+        let e = mac::place(&new, &app, |staged| {
+            assert_eq!(staged.parent(), app.parent(), "staged on the same disk, beside it");
+            assert!(staged.file_name().unwrap().to_string_lossy().starts_with(".gitem.app.update-"));
+            assert_eq!(std::fs::read_to_string(staged.join("Contents/MacOS/gitem")).unwrap(), "new");
+            seen = Some(staged.to_path_buf());
+            Err("not signed".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(e, "not signed");
+        assert!(!seen.unwrap().exists());
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "old");
+        assert_eq!(beside(), ["gitem.app"]);
+
+        // Nothing to copy: the same.
+        assert!(mac::place(&d.path().join("missing.app"), &app, |_| Ok(())).is_err());
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "old");
+        assert_eq!(beside(), ["gitem.app"]);
+
+        // The second rename failing puts the old app back.
+        assert!(mac::swap_app(&d.path().join("gone.app"), &app).is_err());
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "old");
+        assert_eq!(beside(), ["gitem.app"]);
+
+        mac::place(&new, &app, |_| Ok(())).unwrap();
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "new");
+        assert_eq!(beside(), ["gitem.app"], "neither the copy nor the old app is left");
+        assert!(new.exists(), "the image is only read");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_disk_image_that_isnt_one_installs_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let app = d.path().join("gitem.app");
+        fake_app(&app, "dev.gitem.gitem", "1.0.0", "old");
+        let dmg = d.path().join("dl/gitem-2.0.0-macos-arm64.dmg");
+        std::fs::create_dir_all(dmg.parent().unwrap()).unwrap();
+        std::fs::write(&dmg, "not a disk image").unwrap();
+        let kind = Install::AppBundle { app: app.clone(), team: "N6FA79GV97".into() };
+        let e = install(&kind, &dmg, &app.join("Contents/MacOS/gitem"), "2.0.0").unwrap_err();
+        assert!(e.contains("disk image"), "{e}");
+        assert_eq!(std::fs::read_to_string(app.join("Contents/MacOS/gitem")).unwrap(), "old");
+        assert!(!d.path().join("dl/mount").exists());
     }
 
     #[test]

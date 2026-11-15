@@ -175,6 +175,9 @@ fn the_macos_image_is_for_apple_silicon_alone_signed_and_installs_nothing() {
     let s = macos("build-dmg.sh");
     assert!(s.starts_with("#!/usr/bin/env bash") && s.contains("set -euo pipefail") && !s.contains('\r'));
     assert!(s.contains("Cargo.toml") && s.contains("gitem-$version-macos-arm64.dmg"), "{s}");
+    // The name Update and restart asks for, inside gitem.app.
+    let app = gitem_core::update::Install::AppBundle { app: "/Applications/gitem.app".into(), team: "TEAM".into() };
+    assert_eq!(gitem_core::update::asset_name("9.9.9", &app, "macos", "aarch64").as_deref(), Some("gitem-9.9.9-macos-arm64.dmg"));
     assert!(s.contains("target=aarch64-apple-darwin") && s.contains("--profile dist") && !s.contains("x86_64") && !s.contains("lipo -create"));
     assert!(s.contains("lipo -archs") && s.contains("= arm64"), "it checks there's one architecture");
     assert!(s.contains("--options runtime") && s.contains("MACOS_SIGN_IDENTITY") && s.contains("codesign --verify --deep --strict"));

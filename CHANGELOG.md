@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+Changed:
+
+- On a Mac, Update and restart updates gitem.app too. It downloads the release's disk image, checks it against the release's checksums, and replaces gitem.app with the app inside only if that's the same app at the release's version, signed with a Developer ID by the same team and notarized by Apple. The old app stays if anything fails, and the new one starts once gitem has closed. A copy that's ad hoc signed, run from its disk image or straight from Downloads, or in a folder you can't write to, says why and what to do instead. Homebrew's is still updated by `brew upgrade --cask gitem`.
+
 ## 0.8.2 (2026-11-16)
 
 Added:

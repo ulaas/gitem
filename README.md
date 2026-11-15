@@ -179,7 +179,7 @@ gitem treats repositories as untrusted, because a folder can arrive with a `.git
 - Destructive commands ask first and show the exact git command. Force with lease adds `--force-if-includes`, and any force push of the default branch asks, lease or not.
 - Tokens and passwords live in the Windows Credential Manager, or a private file (mode 0600) elsewhere, and are masked wherever a URL is shown.
 - No telemetry, and AI requests go only to the provider you configured. Once a day gitem asks GitHub whether there's a newer release, a request that carries nothing but gitem's name and version; Settings, Workflow turns it off, and so does setting `GITEM_NO_UPDATE_CHECK`.
-- An update is downloaded only when you click Update and restart, only from gitem's own releases over HTTPS, and installed only if it matches the release's SHA-256 checksums. A copy installed by Scoop, winget, Homebrew or a Linux package is left to that, and gitem says which command updates it.
+- An update is downloaded only when you click Update and restart, only from gitem's own releases over HTTPS, and installed only if it matches the release's SHA-256 checksums. On a Mac, gitem.app is replaced as a whole by the app in the release's disk image, and only if that's signed by the same Developer ID team and notarized by Apple. A copy installed by Scoop, winget, Homebrew or a Linux package is left to that, and gitem says which command updates it.
 - A crash writes a local report and offers it to you on the next launch. Nothing leaves the machine.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).

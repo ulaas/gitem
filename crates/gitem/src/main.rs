@@ -222,6 +222,8 @@ fn run_app(args: &[String]) -> i32 {
             a.shot_inspect = inspect;
             if is_shot {
                 a.crash_reports.clear();
+            } else {
+                a.update_from_env_for_test();
             }
             if let Some(q) = &palette {
                 a.open_palette_with(q);
@@ -239,7 +241,7 @@ fn run_app(args: &[String]) -> i32 {
     standalone::forget_shot_storage(storage.as_deref(), is_shot);
     // An update was installed and the window closed for it: the new version takes over.
     if let Some(start) = app::RESTART_AS.lock().unwrap_or_else(|e| e.into_inner()).take()
-        && let Err(e) = std::process::Command::new(&start).spawn()
+        && let Err(e) = gitem_core::update::start_after_exit(&start)
     {
         eprintln!("gitem: couldn't start {}: {e}", start.display());
     }
