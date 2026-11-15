@@ -47,9 +47,26 @@ fn main() {
     if std::env::args_os().nth(1).is_some_and(|a| a == gitem::svg::CHILD_ARG) {
         std::process::exit(gitem::svg::child_main());
     }
+    #[cfg(target_os = "macos")]
+    app_bundle_path();
     gitem::crash::install_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     std::process::exit(dispatch(&args));
+}
+
+/// Started as gitem.app from Finder, the Dock or Spotlight, PATH is only the system's folders, so
+/// Homebrew's git, git-lfs, editors and what hooks run wouldn't be found. Only inside an app bundle:
+/// a terminal's PATH is the user's own. Before any thread starts, as setting a variable must be.
+#[cfg(target_os = "macos")]
+fn app_bundle_path() {
+    let in_bundle = std::env::current_exe().is_ok_and(|e| e.to_string_lossy().contains(".app/Contents/MacOS/"));
+    if !in_bundle {
+        return;
+    }
+    if let Some(path) = gitem_core::util::app_path(std::env::var_os("PATH").as_deref(), &gitem_core::util::system_paths(), |d| d.is_dir()) {
+        // SAFETY: nothing else is running yet.
+        unsafe { std::env::set_var("PATH", path) };
+    }
 }
 
 fn dispatch(args: &[String]) -> i32 {

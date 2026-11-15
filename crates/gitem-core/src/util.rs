@@ -157,6 +157,60 @@ pub fn unwrap_paragraphs(text: &str) -> String {
 /// written: the bytes go to a scratch file beside it, which then takes its place. Where
 /// that can't be done (a read-only folder, a file another program holds open on Windows),
 /// it's written in place. Returns whether it had to be.
+/// What `PATH` should be for an app started from Finder, the Dock or Spotlight, which get only
+/// `/usr/bin:/bin:/usr/sbin:/sbin`: Homebrew's folders first, as its shell setup puts them, then
+/// what's there, then the folders `/etc/paths` and `/etc/paths.d` list, as a login shell has them.
+/// Only folders that exist and aren't there yet are added. `None` when nothing is missing.
+#[cfg(target_os = "macos")]
+pub fn app_path(current: Option<&std::ffi::OsStr>, system: &[std::path::PathBuf], exists: impl Fn(&std::path::Path) -> bool) -> Option<std::ffi::OsString> {
+    use std::path::PathBuf;
+    let have: Vec<PathBuf> = current.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    let mut added = false;
+    let mut missing = |dirs: &mut dyn Iterator<Item = PathBuf>, have: &[PathBuf], into: &mut Vec<PathBuf>| {
+        for d in dirs {
+            if !have.contains(&d) && !into.contains(&d) && exists(&d) {
+                into.push(d);
+                added = true;
+            }
+        }
+    };
+    let mut front = Vec::new();
+    missing(&mut ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"].into_iter().map(PathBuf::from), &have, &mut front);
+    let mut back = Vec::new();
+    let seen: Vec<PathBuf> = have.iter().chain(&front).cloned().collect();
+    missing(&mut system.iter().cloned(), &seen, &mut back);
+    if !added {
+        return None;
+    }
+    std::env::join_paths(front.into_iter().chain(have).chain(back)).ok()
+}
+
+/// The folders `/etc/paths` and `/etc/paths.d/*` list, in the order `path_helper` reads them.
+#[cfg(target_os = "macos")]
+pub fn system_paths() -> Vec<std::path::PathBuf> {
+    let mut files = vec![std::path::PathBuf::from("/etc/paths")];
+    let mut more: Vec<std::path::PathBuf> = std::fs::read_dir("/etc/paths.d").map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    more.sort();
+    files.extend(more);
+    files.iter().filter_map(|f| std::fs::read_to_string(f).ok()).flat_map(|t| t.lines().map(str::trim).filter(|l| l.starts_with('/')).map(std::path::PathBuf::from).collect::<Vec<_>>()).collect()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn an_app_finds_homebrew_and_the_system_paths_and_a_full_path_is_left_alone() {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    let all = |_: &Path| true;
+    let system = [PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/Library/Apple/usr/bin")];
+    let got = app_path(Some(OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin")), &system, all).unwrap();
+    assert_eq!(got, "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Library/Apple/usr/bin");
+    let full = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Library/Apple/usr/bin";
+    assert_eq!(app_path(Some(OsStr::new(full)), &system, all), None);
+    let only_intel = |p: &Path| !p.starts_with("/opt/homebrew");
+    assert_eq!(app_path(Some(OsStr::new("/usr/bin:/bin")), &[], only_intel).unwrap(), "/usr/local/bin:/usr/bin:/bin");
+    assert_eq!(app_path(None, &[], all).unwrap(), "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin");
+}
+
 pub fn write_file_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<bool> {
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

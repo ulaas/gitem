@@ -314,7 +314,15 @@ impl GitExe {
                 }
             }
         }
-        Err(Error::Other("git executable not found. Install Git, or set its path in Settings.".into()))
+        // Homebrew's, for a copy started some other way than from a terminal or the app.
+        #[cfg(target_os = "macos")]
+        for p in ["/opt/homebrew/bin/git", "/usr/local/bin/git"].map(PathBuf::from) {
+            if p.exists() && works(&p) {
+                return Ok(make(p, GitSource::System));
+            }
+        }
+        let how = if cfg!(target_os = "macos") { "Install Git (xcode-select --install, or brew install git)" } else { "Install Git" };
+        Err(Error::Other(format!("git executable not found. {how}, or set its path in Settings.")))
     }
 
     pub fn version(&self) -> String {
