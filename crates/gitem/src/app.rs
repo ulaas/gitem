@@ -3335,6 +3335,14 @@ impl GitemApp {
             }
         }
         let (next, prev) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::Tab), i.consume_key(CS, Key::Tab)));
+        // Cmd+Tab is the system's app switcher on a Mac, so Ctrl+Tab itself does it there, as in
+        // other Mac apps with tabs.
+        #[cfg(target_os = "macos")]
+        let (next, prev) = {
+            // The one with Shift first: egui lets an extra Shift by.
+            let (p, n) = ctx.input_mut(|i| (i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab), i.consume_key(Modifiers::CTRL, Key::Tab)));
+            (next || n, prev || p)
+        };
         if undo {
             out.push(Action::UndoLast);
         }
@@ -3460,6 +3468,9 @@ impl GitemApp {
             let r = ui.add(crate::widgets::input(query).hint_text("Search").desired_width(f32::INFINITY));
             if !ui.memory(|m| m.focused().is_some()) {
                 r.request_focus();
+            }
+            if cfg!(target_os = "macos") {
+                ui.label(RichText::new("On a Mac, Ctrl here means Cmd. Ctrl+Tab is Ctrl itself, as Cmd+Tab switches apps.").small().color(p.dim));
             }
             let needle = query.to_lowercase();
             egui::ScrollArea::vertical().max_height(ctx.content_rect().height() - 220.0).show(ui, |ui| {

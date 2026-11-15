@@ -3443,7 +3443,7 @@ fn ctrl_enter_in_a_form_submits_only_the_form() {
     assert!(!h.get_by_role(egui::accesskit::Role::MultilineTextInput).is_focused(), "this test is about focus being in the form");
     h.event(egui::Event::Text("hello".into()));
     h.step();
-    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
     wait_for(&mut h, "the stash", || f.git(&["stash", "list"]).contains("hello"));
     wait_until_quiet(&mut h);
     assert_eq!(f.subjects(), ["second", "first"], "the commit box must not fire too");
@@ -3462,7 +3462,7 @@ fn ctrl_enter_goes_to_an_open_form_even_with_a_message_written() {
     wait_until_quiet(&mut h);
     // A dialog sits on top of the app, and the keyboard goes with it.
     assert!(!h.get_by_role(egui::accesskit::Role::MultilineTextInput).is_focused(), "the box lost the keyboard");
-    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
     wait_for(&mut h, "the stash", || f.git(&["stash", "list"]).contains("WIP") || f.git(&["stash", "list"]).contains("On main"));
     wait_until_quiet(&mut h);
     assert_eq!(f.subjects(), ["second", "first"], "the commit box must not fire too");
@@ -3475,7 +3475,7 @@ fn ctrl_enter_still_commits_with_no_dialog_open() {
     let mut h = harness(&f);
     settle(&mut h);
     changes_with_message(&mut h, "plain commit");
-    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Enter);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
     wait_for(&mut h, "the commit", || f.subjects()[0] == "plain commit");
     wait_until_quiet(&mut h);
     assert_eq!(f.subjects().len(), 3, "exactly one commit");

@@ -886,7 +886,7 @@ impl ChangesView {
             let b = egui::Button::new(RichText::new(label).color(if can { p.on_accent } else { p.faint })).fill(fill);
             // Dialogs draw after this and have the same shortcut. It belongs to them,
             // unless the commit box is where the typing is.
-            let shortcut = can && (box_focused || !cx.dialog_open) && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
+            let shortcut = can && (box_focused || !cx.dialog_open) && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
             let why = if counts.conflicts > 0 {
                 "Resolve the conflicts first."
             } else if self.message.trim().is_empty() {

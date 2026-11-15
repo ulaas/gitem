@@ -305,7 +305,7 @@ impl FormDialog {
                 *closed = true;
             }
         });
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter)) {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
             submit = true;
         }
         // With nothing in focus, as in a form that only asks a question.

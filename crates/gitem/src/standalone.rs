@@ -237,7 +237,7 @@ impl HelperApp {
                             if *not_utf8 && ui.button("Keep it as it is and continue").clicked() {
                                 self.result = Some((0, None));
                             }
-                            let save = !*not_utf8 && (ui.add(egui::Button::new(RichText::new("Save and continue").color(p.on_accent)).fill(p.accent)).clicked() || ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter)));
+                            let save = !*not_utf8 && (ui.add(egui::Button::new(RichText::new("Save and continue").color(p.on_accent)).fill(p.accent)).clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)));
                             if save {
                                 match std::fs::write(&*path, text.as_bytes()) {
                                     Ok(()) => self.result = Some((0, None)),
