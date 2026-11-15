@@ -9,7 +9,7 @@
 | `gitem-<version>-linux-x64.tar.gz`, `-linux-arm64.tar.gz` | The program, built on Ubuntu 22.04 so it starts on that glibc or newer |
 | `gitem-<version>-linux-x64.AppImage`, `-linux-arm64.AppImage` | The same, as an AppImage, from `linux/build-appimage.sh` |
 | `gitem-<version>-macos-universal.tar.gz` | One binary for Apple silicon and Intel Macs |
-| `gitem-<version>-macos-arm64.dmg` | `gitem.app` for Apple silicon, from `macos/build-dmg.sh`, signed ad hoc |
+| `gitem-<version>-macos-arm64.dmg` | `gitem.app` for Apple silicon, from `macos/build-dmg.sh`, signed with a Developer ID and notarized |
 | `SHA256SUMS` | Checksums of all of the above |
 
 Every archive also holds `README.md`, `LICENSE` and `THIRD-PARTY-NOTICES.md`.
@@ -24,7 +24,7 @@ To try the builds without releasing, run the workflow by hand from **Actions > R
 
 ## What it doesn't do
 
-- **Signing.** Nothing is signed with a certificate, so Windows SmartScreen and macOS Gatekeeper warn before the first run. On macOS, `xattr -d com.apple.quarantine gitem` after unpacking lets it start; for `gitem.app`, Control-click it and choose Open the first time (on macOS 15 and later, open it once, then allow it in System Settings > Privacy & Security), or run `xattr -dr com.apple.quarantine /Applications/gitem.app`. Signing needs certificates as repository secrets.
+- **Signing.** The macOS disk image is signed with a Developer ID, notarized and stapled, so `gitem.app` opens without a warning. The release workflow does this when the repository has the `MACOS_CERTIFICATE_P12`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_CODESIGN_IDENTITY` and `MACOS_NOTARY_KEY_P8` / `_KEY_ID` / `_ISSUER` (App Store Connect API key) secrets, and signs ad hoc without them. The Windows builds and the universal macOS tar.gz are not signed, so SmartScreen and Gatekeeper warn before their first run; after unpacking the tar.gz, `xattr -d com.apple.quarantine gitem` lets it start.
 - **Store listings.** `winget/`, `scoop/`, `homebrew/` (a cask, for a tap of the owner's own) and `aur/` (`gitem-bin`) are templates. When a release is published, `.github/workflows/package-manifests.yml` fills them with its version and checksums and attaches them to the release as `gitem-<version>-package-manifests.tar.gz`. Submitting them to winget-pkgs, a Scoop bucket, a Homebrew tap or the AUR is left to a person.
 - **Bundled libraries.** The Linux builds and the AppImage use git, GTK and the graphics libraries already on the system, and nothing registers `gitem://` links or a menu entry; Settings does that on request.
 

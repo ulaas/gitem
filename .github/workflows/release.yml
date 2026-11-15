@@ -169,22 +169,68 @@ jobs:
           path: out/*
           if-no-files-found: error
 
-  # gitem.app for Apple silicon in a disk image, signed ad hoc. Beside the universal tar.gz, which
+  # gitem.app for Apple silicon in a disk image, signed with the Developer ID and notarized when
+  # the secrets exist (ad hoc otherwise). Beside the universal tar.gz, which
   # the updater and the Homebrew cask still use.
   macos-dmg:
     needs: version
     runs-on: macos-15
+    env:
+      # secrets can't be read in step conditions; this can.
+      HAS_MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
         with:
           toolchain: stable
           targets: aarch64-apple-darwin
+      # Developer ID signing and notarization when the repository has the secrets (forks and
+      # pull requests don't); without them the app is signed ad hoc. The certificate and an App
+      # Store Connect API key go into a temporary keychain, as the notarytool profile ci-notary.
+      - name: Import the Developer ID certificate and the notary key
+        if: env.HAS_MACOS_SIGNING == 'true'
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kc_pw="$(uuidgen)"
+          security create-keychain -p "$kc_pw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kc_pw" "$kc"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$kc" | grep -qF "$IDENTITY"
+          printf '%s\n' "$NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials ci-notary --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --keychain "$kc"
+          rm -f "$RUNNER_TEMP/notary.p8"
+          {
+            echo "MACOS_SIGN_IDENTITY=$IDENTITY"
+            echo "MACOS_NOTARY_PROFILE=ci-notary"
+          } >> "$GITHUB_ENV"
       - name: App and disk image
         run: |
           bash packaging/macos/build-dmg.sh
           mkdir -p out
           mv "target/dist/gitem-${{ needs.version.outputs.version }}-macos-arm64.dmg" out/
+      - name: Gatekeeper accepts the notarized disk image
+        if: env.HAS_MACOS_SIGNING == 'true'
+        shell: bash
+        run: spctl --assess --type open --context context:primary-signature --verbose=2 out/*.dmg
+      - name: Remove the temporary keychain
+        if: always() && env.HAS_MACOS_SIGNING == 'true'
+        shell: bash
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-arm64-dmg
@@ -220,7 +266,7 @@ jobs:
             found { print }
           ' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
-          printf '\n---\nUnsigned builds: Windows SmartScreen and macOS Gatekeeper will warn before the first run. Check downloads against SHA256SUMS.\n' >> notes.md
+          printf '\n---\nThe Windows builds and the macOS tar.gz are unsigned, so SmartScreen and Gatekeeper warn before their first run; the macOS disk image is signed with a Developer ID and notarized. Check downloads against SHA256SUMS.\n' >> notes.md
       - name: Publish the release
         run: |
           flags=()
