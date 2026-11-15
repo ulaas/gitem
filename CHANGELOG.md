@@ -1,13 +1,24 @@
 # Changelog
 
-## 0.8.2 (2026-11-12)
+## 0.8.2 (2026-11-16)
+
+Added:
+
+- A disk image for Macs with Apple silicon, `gitem-0.8.2-macos-arm64.dmg`: gitem.app with its icon, signed with a Developer ID and notarized by Apple, so it opens without a warning. Open it and drag gitem to Applications. The universal tar.gz is still there.
 
 Changed:
 
+- On a Mac, gitem.app finds Git, Git LFS and other tools from Homebrew when it's started from Finder, the Dock or Spotlight, as it does from a terminal. Without Git it says how to get it (`xcode-select --install` or `brew install git`).
+- On a Mac, Cmd+Enter sends forms and the commit box (Ctrl+Enter on Windows and Linux), and Ctrl+Tab and Ctrl+Shift+Tab change tabs, because Cmd+Tab switches apps.
+- Update and restart leaves gitem.app alone: on a Mac it says to download the release's disk image and drag gitem to Applications again.
 - About lists more of the build (build kind, platform, renderer, the settings folder, next to the commit and Git) under a larger header, says the license, and has Copy info, which puts all of it on the clipboard for a bug report. It replaces the button that copied only the commit.
 - Settings, Workflow, Updates has what About has for updates: Check now, with the answer beside it, and the offer of a release that was found with Update and restart and its progress.
 - The gitem mark in the title bar answers to the pointer like the buttons beside it: a fill behind it, and the mark a little larger.
 - A release is published by the release workflow as soon as every build is done, instead of waiting as a draft, and the package manifests are attached right after.
+
+Fixed:
+
+- On a Mac, Quit and Cmd+Q ask about unsaved edits like closing the window does, instead of ending gitem at once. As Git's merge tool, ending at once also told Git the merge was done.
 
 ## 0.8.1 (2026-11-11)
 
