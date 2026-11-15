@@ -48,6 +48,13 @@ tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-pytho
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
+# Quit going through the window's close, as its close button does. See `macos.rs`.
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder", "NSView", "NSWindow"] }
+
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu"] }
 gitem-testenv = { path = "../gitem-testenv" }

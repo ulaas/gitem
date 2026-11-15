@@ -308,7 +308,11 @@ pub fn run(mode: Mode, title: &str, size: [f32; 2]) -> i32 {
     // Its own file: a helper mustn't overwrite the main window's state.
     let storage = eframe_storage("helper.ron", is_shot);
     let options = eframe::NativeOptions { viewport: chrome::viewport(title, size), persist_window: false, persistence_path: storage.clone(), ..Default::default() };
-    let result = eframe::run_native(title, options, Box::new(move |_cc| Ok(Box::new(HelperApp::new(mode)))));
+    let result = eframe::run_native(title, options, Box::new(move |_cc| {
+        #[cfg(target_os = "macos")]
+        crate::macos::quit_through_close(_cc);
+        Ok(Box::new(HelperApp::new(mode)))
+    }));
     forget_shot_storage(storage.as_deref(), is_shot);
     if let Err(e) = result {
         eprintln!("gitem: {e}");

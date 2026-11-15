@@ -213,6 +213,8 @@ fn run_app(args: &[String]) -> i32 {
         "gitem",
         options,
         Box::new(move |cc| {
+            #[cfg(target_os = "macos")]
+            gitem::macos::quit_through_close(cc);
             let mut a = app::GitemApp::new(&cc.egui_ctx, &paths);
             // A screenshot must leave the saved session as it found it.
             a.persist = a.persist && !is_shot;

@@ -7,6 +7,8 @@ pub mod app;
 pub mod chrome;
 pub mod crash;
 pub mod logo;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod notify;
 pub mod data;
 pub mod editor;
