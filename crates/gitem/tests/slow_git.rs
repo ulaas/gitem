@@ -33,8 +33,13 @@ fn run(g: &GitExe, root: &Path, args: &[&str]) -> String {
 }
 
 fn proxy_path() -> PathBuf {
+    // The example sits in `examples` of the profile folder. The test's own executable is one
+    // folder below that (`deps`) up to Rust 1.99 and deeper (`build/<package>/<hash>/out`) from
+    // 1.100 on, so look upwards instead of counting folders.
     let me = std::env::current_exe().unwrap();
-    me.parent().unwrap().parent().unwrap().join("examples").join(if cfg!(windows) { "slowgit.exe" } else { "slowgit" })
+    let name = if cfg!(windows) { "slowgit.exe" } else { "slowgit" };
+    let found = me.ancestors().skip(1).map(|dir| dir.join("examples").join(name)).find(|exe| exe.exists());
+    found.unwrap_or_else(|| me.parent().unwrap().parent().unwrap().join("examples").join(name))
 }
 
 impl Fx {
