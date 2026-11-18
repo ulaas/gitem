@@ -40,6 +40,14 @@ pub struct Sidebar {
     /// Bumped when `expanded` changes.
     expanded_gen: u64,
     lists: Option<Lists>,
+    /// The row clicked last, which stays lit. One of `row_key`'s.
+    clicked: Option<egui::Id>,
+}
+
+/// What a row is known by once it's been clicked. A commit listed in two places is two rows,
+/// so `key` says where as well as what.
+fn row_key(key: impl std::hash::Hash + std::fmt::Debug) -> egui::Id {
+    egui::Id::new(("sidebar clicked", key))
 }
 
 /// What's listed, by position in the refs. Worked out when the refs, the filter or what's
@@ -134,7 +142,7 @@ struct Lists {
 
 impl Default for Sidebar {
     fn default() -> Self {
-        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), searching: false, find: crate::views::find::FindView::compact(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None }
+        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), searching: false, find: crate::views::find::FindView::compact(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None, clicked: None }
     }
 }
 
@@ -296,11 +304,13 @@ impl Sidebar {
                     if !self.matches(&c.subject) {
                         continue;
                     }
-                    let (rect, resp) = row(ui, ROW, false, &p);
+                    let key = row_key(("commit", &c.sha));
+                    let (rect, resp) = row(ui, ROW, self.clicked == Some(key), &p);
                     paint_avatar(ui, pos2(rect.left() + 12.0, rect.center().y), 7.0, &c.author_name, &c.author_email, &p, cx.settings.gravatar);
                     paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(24.0, 0.0), rect.max), &c.subject, prop(12.5), p.text);
                     let resp = resp.on_hover_ui(|ui| commit_card(ui, &c.sha, &c.author_name, &c.author_email, c.author_time, &c.subject, &p, cx.settings.gravatar));
                     if resp.clicked() {
+                        self.clicked = Some(key);
                         cx.inspect(&c.sha);
                     }
                     resp.context_menu(|ui| menus::commit_menu(ui, cx, c));
@@ -381,7 +391,8 @@ impl Sidebar {
     fn branch_row(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch, label: &str) {
         let p = cx.pal.clone();
         let picked = !b.is_remote && self.picked.contains(&b.name);
-        let (rect, resp) = keyed_row(ui, ROW, b.is_current || picked, &p, ("sidebar branch", b.is_remote, &b.name));
+        let key = row_key(("branch", b.is_remote, &b.name));
+        let (rect, resp) = keyed_row(ui, ROW, picked || self.clicked == Some(key), &p, ("sidebar branch", b.is_remote, &b.name));
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, picked, label));
         // Coloured as its lane is in the graph, where it's there to be.
         let lane = cx.data.lane_of(&b.name);
@@ -409,13 +420,15 @@ impl Sidebar {
         }
         if picked {
             ui.painter().text(pos2(rect.left() + 21.0, rect.center().y), egui::Align2::CENTER_CENTER, crate::chrome::icon::CHECK, prop(12.0), p.accent);
+        } else if b.is_current {
+            // The current branch has a mark where the others have a dot. The row's background is
+            // for what was clicked.
+            let color = lane.map_or(p.accent, |l| p.series_text(l as usize));
+            ui.painter().text(pos2(rect.left() + 21.0, rect.center().y), egui::Align2::CENTER_CENTER, crate::chrome::icon::CHECK_CIRCLE, prop(13.5), color);
         } else {
-            // The current branch's dot is ringed, as its commit is in the graph.
-            let (fill, ring) = match (lane, b.is_current) {
-                (Some(l), true) => (p.lane(l), egui::Stroke::new(1.5, p.text)),
-                (Some(l), false) => (p.lane(l), egui::Stroke::NONE),
-                (None, true) => (p.accent, egui::Stroke::new(1.0, p.accent)),
-                (None, false) => (p.panel, egui::Stroke::new(1.0, p.faint)),
+            let (fill, ring) = match lane {
+                Some(l) => (p.lane(l), egui::Stroke::NONE),
+                None => (p.panel, egui::Stroke::new(1.0, p.faint)),
             };
             ui.painter().circle(pos2(rect.left() + 21.0, rect.center().y), 3.5, fill, ring);
         }
@@ -440,7 +453,7 @@ impl Sidebar {
             right -= 4.0;
         }
         paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), pos2(right, rect.bottom())), label, prop(12.5), text_color);
-        let resp = resp.on_hover_text(format!("{}\n{}\n{} · {}", b.name, b.subject, b.author, gitem_core::util::relative_time(b.date, gitem_core::util::now_ts())));
+        let resp = resp.on_hover_text(format!("{}{}\n{}\n{} · {}", b.name, if b.is_current { " (current branch)" } else { "" }, b.subject, b.author, gitem_core::util::relative_time(b.date, gitem_core::util::now_ts())));
         let picking = !b.is_remote && ui.input(|i| i.modifiers.command);
         if resp.clicked() && picking {
             // Those that can't be deleted can't be picked, and say so only by not changing.
@@ -448,6 +461,7 @@ impl Sidebar {
                 self.picked.insert(b.name.clone());
             }
         } else if resp.clicked() {
+            self.clicked = Some(key);
             cx.inspect(&b.sha);
         }
         if resp.double_clicked() && !b.is_current && !picking {
@@ -468,6 +482,7 @@ impl Sidebar {
     fn branch_details(&mut self, ui: &mut Ui, cx: &mut Cx, b: &Branch) {
         let p = cx.pal.clone();
         let upstream = b.upstream.clone().filter(|_| !b.is_remote && !b.upstream_gone);
+        let (clicked, under) = (&mut self.clicked, ("branch", b.is_remote, &b.name));
         let t = self.tracking.entry(b.name.clone()).or_default();
         if t.refs_gen != Some(cx.data.refs_gen) {
             t.refs_gen = Some(cx.data.refs_gen);
@@ -494,7 +509,7 @@ impl Sidebar {
                 if tracking_heading(ui, crate::chrome::icon::ARROW_DOWN, &format!("Incoming from {up}"), b.behind, p.incoming(), b.is_current.then_some("Pull")) {
                     cx.run(ops::pull(crate::app::pull_mode(&cx.settings.pull_mode), cx.settings.pull_autostash));
                 }
-                if listed_commits(ui, cx, t.incoming.get(), Some(b.behind as usize), t.incoming_limit, TRACKING_PAGE, t.incoming.busy()) {
+                if listed_commits(ui, cx, clicked, row_key((under, "incoming")), t.incoming.get(), Some(b.behind as usize), t.incoming_limit, TRACKING_PAGE, t.incoming.busy()) {
                     t.incoming_limit += TRACKING_PAGE;
                     t.refs_gen = None;
                 }
@@ -506,7 +521,7 @@ impl Sidebar {
                     let op = ops::push_to_upstream(Some(&b.name), Some(up), &names);
                     cx.run(op);
                 }
-                if listed_commits(ui, cx, t.outgoing.get(), Some(b.ahead as usize), t.outgoing_limit, TRACKING_PAGE, t.outgoing.busy()) {
+                if listed_commits(ui, cx, clicked, row_key((under, "outgoing")), t.outgoing.get(), Some(b.ahead as usize), t.outgoing_limit, TRACKING_PAGE, t.outgoing.busy()) {
                     t.outgoing_limit += TRACKING_PAGE;
                     t.refs_gen = None;
                 }
@@ -518,7 +533,7 @@ impl Sidebar {
             ui.painter().text(pos2(rect.left() + 21.0, rect.center().y), egui::Align2::CENTER_CENTER, crate::chrome::icon::GIT_COMMIT, prop(12.0), p.dim);
             paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), rect.max), "Latest commits", prop(11.5), p.dim);
         }
-        if listed_commits(ui, cx, t.commits.get(), None, t.commits_limit, BRANCH_PAGE, t.commits.busy()) {
+        if listed_commits(ui, cx, clicked, row_key((under, "latest")), t.commits.get(), None, t.commits_limit, BRANCH_PAGE, t.commits.busy()) {
             t.commits_limit += BRANCH_PAGE;
             t.refs_gen = None;
         }
@@ -581,12 +596,14 @@ impl Sidebar {
             visible_rows(ui, ROW, list.len(), |ui, range| {
                 for i in &list[range] {
                     let t = &refs.tags[*i];
-                    let (rect, resp) = keyed_row(ui, ROW, false, &p, ("sidebar tag", &t.name));
+                    let key = row_key(("tag", &t.name));
+                    let (rect, resp) = keyed_row(ui, ROW, self.clicked == Some(key), &p, ("sidebar tag", &t.name));
                     paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &format!("◆ {}", t.name), prop(12.5), p.dim);
                     // Painted, so this is how a screen reader or a test gets its name.
                     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.name.as_str()));
                     let resp = if t.subject.is_empty() { resp } else { resp.on_hover_text(&t.subject) };
                     if resp.clicked() {
+                        self.clicked = Some(key);
                         cx.inspect(&t.sha);
                     }
                     resp.context_menu(|ui| menus::tag_menu(ui, cx, t));
@@ -607,11 +624,13 @@ impl Sidebar {
         }
         let action = section(ui, "sb-stashes", crate::chrome::icon::ARCHIVE, p.series[4], "Stashes", &list.len().to_string(), false, &actions, &p, |ui| {
             for s in &list {
-                let (rect, resp) = row(ui, ROW, false, &p);
+                let key = row_key(("stash", &s.sha));
+                let (rect, resp) = row(ui, ROW, self.clicked == Some(key), &p);
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &s.message, prop(12.5), p.dim);
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, s.message.as_str()));
                 let resp = resp.on_hover_text(format!("{} on {}", s.selector, s.branch));
                 if resp.clicked() {
+                    self.clicked = Some(key);
                     cx.inspect(&s.sha);
                 }
                 resp.context_menu(|ui| menus::stash_menu(ui, cx, s));
@@ -629,11 +648,21 @@ impl Sidebar {
         let list = cx.data.worktrees().to_vec();
         let action = section(ui, "sb-worktrees", crate::chrome::icon::TREE_STRUCTURE, p.series[2], "Worktrees", &list.len().to_string(), false, &[(crate::chrome::icon::PLUS, "Add worktree")], &p, |ui| {
             for w in &list {
-                let (rect, resp) = row(ui, ROW, w.is_current, &p);
+                let key = row_key(("worktree", &w.path));
+                let (rect, resp) = row(ui, ROW, self.clicked == Some(key), &p);
                 let name = w.branch.clone().unwrap_or_else(|| "detached".to_string());
-                paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &name, prop(12.5), p.dim);
+                // The one that's open here is marked as the current branch is.
+                let mut right = rect.right();
+                if w.is_current {
+                    right -= 20.0;
+                    ui.painter().text(pos2(rect.right() - 11.0, rect.center().y), egui::Align2::CENTER_CENTER, crate::chrome::icon::CHECK_CIRCLE, prop(13.5), p.accent);
+                }
+                paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), pos2(right, rect.bottom())), &name, prop(12.5), if w.is_current { p.text } else { p.dim });
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name.as_str()));
-                let resp = resp.on_hover_text(&w.path);
+                let resp = resp.on_hover_text(if w.is_current { format!("{}\nOpen here", w.path) } else { w.path.clone() });
+                if resp.clicked() {
+                    self.clicked = Some(key);
+                }
                 if resp.double_clicked() && !w.is_current {
                     cx.out.push(crate::action::Action::OpenRepo(w.path.clone().into()));
                 }
@@ -655,11 +684,13 @@ impl Sidebar {
             if let Some(list) = self.contributors.value.take() {
                 let matching: Vec<&Contributor> = list.iter().filter(|c| self.matches(&c.name)).collect();
                 for c in matching.iter().take(self.contributors_shown) {
-                    let (rect, resp) = row(ui, ROW, false, &p);
+                    let key = row_key(("contributor", &c.email));
+                    let (rect, resp) = row(ui, ROW, self.clicked == Some(key), &p);
                     paint_avatar(ui, pos2(rect.left() + 12.0, rect.center().y), 7.0, &c.name, &c.email, &p, cx.settings.gravatar);
                     paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(24.0, 0.0), egui::pos2(rect.right() - 40.0, rect.bottom())), &c.name, prop(12.5), p.dim);
                     paint_text(ui, egui::Rect::from_min_max(egui::pos2(rect.right() - 36.0, rect.top()), rect.max), &c.commits.to_string(), mono(11.0), p.faint);
                     if resp.on_hover_text(&c.email).clicked() {
+                        self.clicked = Some(key);
                         cx.open(Tab::search(&format!("@:{}", c.email)));
                     }
                 }
@@ -680,10 +711,12 @@ impl Sidebar {
         }
         section(ui, "sb-subs", crate::chrome::icon::PACKAGE, p.series[1], "Submodules", &list.len().to_string(), false, &[], &p, |ui| {
             for s in &list {
-                let (rect, resp) = row(ui, ROW, false, &p);
+                let key = row_key(("submodule", &s.path));
+                let (rect, resp) = row(ui, ROW, self.clicked == Some(key), &p);
                 paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(8.0, 0.0), rect.max), &s.path, prop(12.5), p.dim);
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, s.path.as_str()));
                 if resp.on_hover_text(&s.url).clicked() {
+                    self.clicked = Some(key);
                     cx.open(Tab::Tools(Box::default()));
                 }
             }
@@ -721,8 +754,10 @@ fn tracking_heading(ui: &mut Ui, glyph: &str, title: &str, count: u32, color: eg
 }
 
 /// Commits under a branch. `total` is how many exist, when that's known; otherwise there
-/// may be more whenever the list reached `limit`. Returns whether more were asked for.
-fn listed_commits(ui: &mut Ui, cx: &mut Cx, commits: Option<&Vec<Commit>>, total: Option<usize>, limit: usize, step: usize, busy: bool) -> bool {
+/// may be more whenever the list reached `limit`. `list_key` tells this list's rows from the
+/// same commits listed elsewhere. Returns whether more were asked for.
+#[allow(clippy::too_many_arguments)]
+fn listed_commits(ui: &mut Ui, cx: &mut Cx, clicked: &mut Option<egui::Id>, list_key: egui::Id, commits: Option<&Vec<Commit>>, total: Option<usize>, limit: usize, step: usize, busy: bool) -> bool {
     let p = cx.pal.clone();
     let Some(list) = commits else {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
@@ -730,12 +765,14 @@ fn listed_commits(ui: &mut Ui, cx: &mut Cx, commits: Option<&Vec<Commit>>, total
         return false;
     };
     for c in list {
-        let (rect, resp) = row(ui, ROW, false, &p);
+        let key = list_key.with(&c.sha);
+        let (rect, resp) = row(ui, ROW, *clicked == Some(key), &p);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, c.subject.as_str()));
         paint_avatar(ui, pos2(rect.left() + 37.0, rect.center().y), 7.0, &c.author_name, &c.author_email, &p, cx.settings.gravatar);
         paint_text(ui, egui::Rect::from_min_max(rect.min + vec2(49.0, 0.0), rect.max), &c.subject, prop(12.5), p.text);
         let resp = resp.on_hover_ui(|ui| commit_card(ui, &c.sha, &c.author_name, &c.author_email, c.author_time, &c.subject, &p, cx.settings.gravatar));
         if resp.clicked() {
+            *clicked = Some(key);
             cx.inspect(&c.sha);
         }
         resp.context_menu(|ui| menus::commit_menu(ui, cx, c));
