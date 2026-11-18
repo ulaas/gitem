@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.4 (2026-11-18)
+
+Changed:
+
+- In the sidebar, the row you clicked last stays lit: a commit, branch, tag, stash, worktree, contributor or submodule.
+- The current branch has a check mark in place of its dot, instead of a lit row, and so does the worktree that's open.
+
 ## 0.8.3 (2026-11-16)
 
 Changed:
