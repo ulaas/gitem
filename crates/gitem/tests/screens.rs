@@ -571,6 +571,26 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         quiet(&mut h);
         out.save(&mut h, "wrap-unified");
     }
+    if wanted("mergewide") {
+        // A conflict whose lines are wider than their panes.
+        let m = Fx::new();
+        let long = |who: &str| format!("fn {who}() {{ let value = compute_something_rather_long(alpha, beta, gamma, delta, epsilon, zeta, eta, theta, iota, kappa, lambda); println!(\"{{value}}\"); }} // {who} END\n");
+        std::fs::write(m.root.join("c.rs"), "base\n").unwrap();
+        run(&m.git, &m.root, &["add", "."]);
+        run(&m.git, &m.root, &["commit", "-q", "-m", "base"]);
+        run(&m.git, &m.root, &["switch", "-q", "-c", "other"]);
+        std::fs::write(m.root.join("c.rs"), long("theirs")).unwrap();
+        run(&m.git, &m.root, &["commit", "-q", "-am", "theirs"]);
+        run(&m.git, &m.root, &["switch", "-q", "-"]);
+        std::fs::write(m.root.join("c.rs"), long("ours")).unwrap();
+        run(&m.git, &m.root, &["commit", "-q", "-am", "ours"]);
+        let _ = m.git.run_raw(Some(&m.root), &["merge", "other"]);
+        let mut h = m.harness(set, vec![]);
+        open(&mut h, Tab::merge("c.rs"));
+        wait_for(&mut h, "Take ours");
+        quiet(&mut h);
+        out.save(&mut h, "merge-wide");
+    }
     if wanted("overflow") {
         let extras: Vec<PathBuf> = (0..12)
             .map(|i| {

@@ -5822,6 +5822,18 @@ fn long_conflict_lines_can_be_scrolled_to_their_end() {
     assert!(moved.0.x < start.0.x, "the text didn't move");
     assert_eq!(moved.1, start.1, "it stays inside its own pane");
     assert!(h.query_by_label("Take ours").is_some(), "the conflict's buttons stay where they are");
+
+    // A mouse with only an up-and-down wheel scrolls sideways with Shift held.
+    h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(4000.0, 0.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE });
+    for _ in 0..30 {
+        h.step();
+    }
+    assert_eq!(merge_view_of(&h).unwrap().text_scroll(), 0.0, "back at the start");
+    h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -400.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::SHIFT });
+    for _ in 0..30 {
+        h.step();
+    }
+    assert!(merge_view_of(&h).unwrap().text_scroll() > 0.0, "Shift and the wheel didn't scroll sideways");
 }
 
 #[test]

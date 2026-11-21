@@ -665,9 +665,17 @@ impl MergeView {
         self.text_x = self.text_x.clamp(0.0, max_x);
         if max_x > 0.0 {
             egui::Panel::bottom(ui.id().with("merge-x")).resizable(false).show_separator_line(false).show(ui, |ui| {
+                // A floating bar only shows while the pointer is over its area, and this area is
+                // only the bar: it must be drawn all the time to be found at all.
+                let s = &mut ui.spacing_mut().scroll;
+                s.floating = false;
+                s.bar_width = 10.0;
+                s.bar_inner_margin = 2.0;
+                s.dormant_background_opacity = 0.5;
+                s.dormant_handle_opacity = 0.8;
                 let w = ui.available_width();
                 let out = egui::ScrollArea::horizontal().id_salt("merge-x-bar").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).horizontal_scroll_offset(self.text_x).show(ui, |ui| {
-                    ui.allocate_exact_size(vec2(w + max_x, 10.0), Sense::hover());
+                    ui.allocate_exact_size(vec2(w + max_x, 0.0), Sense::hover());
                 });
                 self.text_x = out.state.offset.x;
             });
