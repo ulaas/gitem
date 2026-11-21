@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.5 (2026-11-21)
+
+Fixed:
+
+- In the merge tool, the scroll bar under the panes is always shown, so lines wider than their pane can be scrolled to their end. Shift and the mouse wheel scroll them sideways too.
+
 ## 0.8.4 (2026-11-18)
 
 Changed:
