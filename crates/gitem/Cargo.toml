@@ -15,7 +15,7 @@ path = "src/main.rs"
 gitem-core = { path = "../gitem-core" }
 gitem-text = { path = "../gitem-text" }
 similar = "3"
-eframe = { version = "0.36", features = ["persistence"] }
+eframe = { version = "0.37", features = ["persistence"] }
 egui = "0.36"
 egui-phosphor = "0.14"
 egui_dock = { version = "0.21", features = ["serde"] }
