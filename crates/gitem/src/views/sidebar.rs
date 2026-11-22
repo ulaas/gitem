@@ -42,6 +42,13 @@ pub struct Sidebar {
     lists: Option<Lists>,
     /// The row clicked last, which stays lit. One of `row_key`'s.
     clicked: Option<egui::Id>,
+    /// The branch every local one is counted against, by name and whether it's a remote one.
+    /// None at first: counting runs git, and most of the time nobody's asking.
+    compare: Option<(String, bool)>,
+    /// What `compare_counts` was counted against: the commit, and `refs_gen` then.
+    compare_key: Option<(String, u64)>,
+    /// Each local branch's (ahead, behind) of the compared one.
+    compare_counts: Task<HashMap<String, (u32, u32)>>,
 }
 
 /// What a row is known by once it's been clicked. A commit listed in two places is two rows,
@@ -142,7 +149,7 @@ struct Lists {
 
 impl Default for Sidebar {
     fn default() -> Self {
-        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), searching: false, find: crate::views::find::FindView::compact(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None, clicked: None }
+        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), searching: false, find: crate::views::find::FindView::compact(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None, clicked: None, compare: None, compare_key: None, compare_counts: Task::default() }
     }
 }
 
@@ -201,6 +208,7 @@ impl Sidebar {
         }
         self.commits.poll();
         self.contributors.poll();
+        self.compare_counts.poll();
         for t in self.tracking.values_mut() {
             t.incoming.poll();
             t.outgoing.poll();
@@ -330,11 +338,61 @@ impl Sidebar {
         let refs = lists.refs.clone();
         self.picked_bar(ui, cx, &refs);
         let action = section(ui, "sb-branches", crate::chrome::icon::GIT_BRANCH, p.series[0], "Branches", &lists.branch_count.to_string(), true, &[(crate::chrome::icon::PLUS, "New branch")], &p, |ui| {
+            self.compare_row(ui, cx, &refs);
             self.branch_lines(ui, cx, &refs, &lists.lines, &lists.open_lines);
         });
         self.lists = Some(lists);
         if action.is_some() {
             cx.form(forms::new_branch(None));
+        }
+    }
+
+    /// Picks a branch to count every local one against, and counts. Nothing's picked at first.
+    fn compare_row(&mut self, ui: &mut Ui, cx: &mut Cx, refs: &Refs) {
+        let p = cx.pal.clone();
+        let is = |b: &Branch, c: &(String, bool)| b.name == c.0 && b.is_remote == c.1;
+        // One that's been deleted isn't compared with any more.
+        let target = self.compare.as_ref().and_then(|c| refs.branches.iter().find(|b| is(b, c)));
+        if target.is_none() {
+            self.compare = None;
+        }
+        let sha = target.map(|b| b.sha.clone());
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Compare with").size(12.5).color(p.dim));
+            let shown = self.compare.as_ref().map_or("Nothing", |c| c.0.as_str()).to_string();
+            let mut pick = None;
+            let combo = egui::ComboBox::from_id_salt("sb-compare").selected_text(shown).width((ui.available_width() - 8.0).max(80.0)).height(400.0).show_ui(ui, |ui| {
+                if ui.selectable_label(self.compare.is_none(), "Nothing").clicked() {
+                    pick = Some(None);
+                }
+                // Local ones first, then each remote's.
+                for b in refs.branches.iter().filter(|b| !b.is_remote).chain(refs.branches.iter().filter(|b| b.is_remote)) {
+                    let on = self.compare.as_ref().is_some_and(|c| is(b, c));
+                    if ui.selectable_label(on, &b.name).clicked() {
+                        pick = Some(Some((b.name.clone(), b.is_remote)));
+                    }
+                }
+            });
+            combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Compare branches with"));
+            combo.response.on_hover_text("Count each local branch's commits against this one: ↑ what it has that this hasn't, ↓ what this has that it hasn't");
+            if let Some(c) = pick {
+                self.compare = c;
+            }
+        });
+        let key = sha.map(|s| (s, cx.data.refs_gen));
+        if key != self.compare_key {
+            // Another branch: the old counts would be wrong for it. The same one, moved or
+            // refreshed: they stay until the new ones come.
+            if key.as_ref().map(|k| &k.0) != self.compare_key.as_ref().map(|k| &k.0) {
+                self.compare_counts.stop();
+                self.compare_counts.value = None;
+            }
+            self.compare_key = key.clone();
+            if let Some((sha, _)) = key {
+                let r = cx.repo.clone();
+                self.compare_counts.spawn(ui.ctx(), move || r.ahead_behind_each(&sha).map(|v| v.into_iter().collect::<HashMap<_, _>>()));
+            }
         }
     }
 
@@ -440,6 +498,24 @@ impl Sidebar {
         if b.ahead > 0 {
             right = count_pill(ui, right, rect.center().y, &format!("\u{E08E}{}", b.ahead), p.outgoing());
         }
+        // Against the branch picked to compare with, quieter than the upstream's pills.
+        let versus = if b.is_remote { None } else { self.compare_counts.get().and_then(|c| c.get(&b.name).copied()).filter(|&(a, z)| a > 0 || z > 0) };
+        if let Some((ahead, behind)) = versus {
+            let mut t = String::new();
+            if ahead > 0 {
+                t.push_str(&format!("{}{ahead}", crate::chrome::icon::ARROW_UP));
+            }
+            if behind > 0 {
+                if !t.is_empty() {
+                    t.push(' ');
+                }
+                t.push_str(&format!("{}{behind}", crate::chrome::icon::ARROW_DOWN));
+            }
+            let g = ui.painter().layout_no_wrap(t, prop(10.5), p.dim);
+            right -= g.size().x;
+            ui.painter().galley(pos2(right, rect.center().y - g.size().y / 2.0), g, p.dim);
+            right -= 6.0;
+        }
         if b.upstream_gone {
             let g = ui.painter().layout_no_wrap("gone".to_string(), prop(10.5), p.warn);
             right -= g.size().x;
@@ -453,7 +529,8 @@ impl Sidebar {
             right -= 4.0;
         }
         paint_text(ui, egui::Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), pos2(right, rect.bottom())), label, prop(12.5), text_color);
-        let resp = resp.on_hover_text(format!("{}{}\n{}\n{} · {}", b.name, if b.is_current { " (current branch)" } else { "" }, b.subject, b.author, gitem_core::util::relative_time(b.date, gitem_core::util::now_ts())));
+        let against = versus.zip(self.compare.as_ref()).map(|((ahead, behind), c)| format!("\n{}", ahead_behind_words(ahead, behind, &c.0))).unwrap_or_default();
+        let resp = resp.on_hover_text(format!("{}{}\n{}\n{} · {}{against}", b.name, if b.is_current { " (current branch)" } else { "" }, b.subject, b.author, gitem_core::util::relative_time(b.date, gitem_core::util::now_ts())));
         let picking = !b.is_remote && ui.input(|i| i.modifiers.command);
         if resp.clicked() && picking {
             // Those that can't be deleted can't be picked, and say so only by not changing.
@@ -724,6 +801,16 @@ impl Sidebar {
     }
 }
 
+/// "3 commits ahead of main, 1 behind", for a branch counted against another.
+fn ahead_behind_words(ahead: u32, behind: u32, other: &str) -> String {
+    let commits = |n: u32| if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
+    match (ahead, behind) {
+        (0, z) => format!("{} behind {other}", commits(z)),
+        (a, 0) => format!("{} ahead of {other}", commits(a)),
+        (a, z) => format!("{} ahead of {other}, {z} behind", commits(a)),
+    }
+}
+
 /// A small coloured count, right-aligned at `right`. Returns the space left of it.
 fn count_pill(ui: &Ui, right: f32, y: f32, text: &str, color: egui::Color32) -> f32 {
     let g = ui.painter().layout_no_wrap(text.to_string(), mono(10.5), egui::Color32::WHITE);
@@ -836,6 +923,13 @@ fn section(ui: &mut Ui, salt: &str, glyph: &str, tint: egui::Color32, title: &st
 #[cfg(test)]
 mod tree_tests {
     use super::*;
+
+    #[test]
+    fn counts_against_another_branch_in_words() {
+        assert_eq!(ahead_behind_words(3, 1, "main"), "3 commits ahead of main, 1 behind");
+        assert_eq!(ahead_behind_words(1, 0, "main"), "1 commit ahead of main");
+        assert_eq!(ahead_behind_words(0, 2, "origin/dev"), "2 commits behind origin/dev");
+    }
 
     fn labels(lines: &[BranchLine]) -> Vec<String> {
         lines

@@ -2792,7 +2792,7 @@ fn the_editor_list_offers_what_was_detected() {
     for _ in 0..3 {
         h.step();
     }
-    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.query_all(egui_kittest::kittest::by().role(egui::accesskit::Role::ComboBox)).find(|n| n.accesskit_node().label().unwrap_or_default() != "Compare branches with").expect("a box besides the sidebar's").click();
     h.step();
     h.step();
     pump_for_label(&mut h, "Notepad");
@@ -7844,7 +7844,7 @@ fn a_switch_with_changes_in_the_way_can_bring_them_along_or_be_cancelled() {
     let ctx = h.ctx.clone();
     h.state_mut().apply_action(&ctx, Action::Run(ops::checkout("other")));
     pump_for_label(&mut h, "Changes are in the way of other");
-    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.query_all(egui_kittest::kittest::by().role(egui::accesskit::Role::ComboBox)).find(|n| n.accesskit_node().label().unwrap_or_default() != "Compare branches with").expect("a box besides the sidebar's").click();
     h.step();
     h.step();
     click(&mut h, "Bring the changes along, merging them. This can leave conflicts");

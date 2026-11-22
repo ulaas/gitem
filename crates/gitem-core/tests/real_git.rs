@@ -242,6 +242,28 @@ fn file_history_follows_renames_with_stats() {
 }
 
 #[test]
+fn every_local_branch_measured_against_one() {
+    let f = Fx::new();
+    f.write("a", "1\n");
+    let s1 = f.commit_all("c1");
+    f.write("b", "1\n");
+    f.commit_all("c2");
+    f.run(ops::branch_create("side", Some(&s1), true));
+    f.write("c", "1\n");
+    f.commit_all("c3");
+    f.run(ops::checkout("main"));
+    let mut each = f.repo.ahead_behind_each("side").unwrap();
+    each.sort();
+    assert_eq!(each, vec![("main".to_string(), (1, 1)), ("side".to_string(), (0, 0))]);
+    // Against a commit, and the same whichever branch is checked out.
+    f.run(ops::checkout("side"));
+    let mut each = f.repo.ahead_behind_each(&s1).unwrap();
+    each.sort();
+    assert_eq!(each, vec![("main".to_string(), (1, 0)), ("side".to_string(), (1, 0))]);
+    assert!(f.repo.ahead_behind_each("nothing-by-this-name").is_err());
+}
+
+#[test]
 fn branches_tags_tracking_and_graph() {
     let f = Fx::new();
     f.write("a", "1\n");

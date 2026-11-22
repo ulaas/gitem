@@ -516,6 +516,24 @@ impl Repo {
         Ok((p.next().unwrap_or(0), p.next().unwrap_or(0)))
     }
 
+    /// For each local branch, the commits it has that `base` hasn't, and the other way round.
+    /// One git command where git has `%(ahead-behind:)`, from 2.41, and one a branch before.
+    pub fn ahead_behind_each(&self, base: &str) -> Result<Vec<(String, (u32, u32))>> {
+        // By its commit id: a branch's name could hold the `)` that ends the atom.
+        let sha = self.resolve(base)?;
+        if let Ok(o) = self.run(&["for-each-ref", &format!("--format=%(refname)%00%(ahead-behind:{sha})"), "refs/heads"]) {
+            return Ok(parse::parse_ahead_behind(&o.text()));
+        }
+        let names = self.run(&["for-each-ref", "--format=%(refname)", "refs/heads"])?.text();
+        names
+            .lines()
+            .filter_map(|full| {
+                let name = parse::safe_ref_name("refs/heads/", full.strip_prefix("refs/heads/")?);
+                Some(self.ahead_behind(full, &sha).map(|c| (name, c)))
+            })
+            .collect()
+    }
+
     // ---- refs --------------------------------------------------------------
 
     pub fn branches(&self) -> Result<Vec<Branch>> {

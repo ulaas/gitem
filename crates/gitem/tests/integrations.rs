@@ -466,7 +466,7 @@ fn check_out_over_commits_of_mine_can_be_cancelled_or_told_to_replace() {
     assert_eq!(f.in_user(&["branch", "--show-current"]), "main");
     click(&mut h, "Check out");
     wait_for_text(&mut h, "pr/7 has commits of yours");
-    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.query_all(egui_kittest::kittest::by().role(egui::accesskit::Role::ComboBox)).find(|n| n.accesskit_node().label().unwrap_or_default() != "Compare branches with").expect("a box besides the sidebar's").click();
     h.step();
     h.step();
     click(&mut h, "Replace them. The reflog has them for a while");

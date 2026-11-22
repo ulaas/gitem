@@ -113,6 +113,19 @@ pub fn parse_branches(out: &str) -> Vec<Branch> {
     v
 }
 
+/// `refs/heads/x<NUL>2 1` lines from `%(refname)%00%(ahead-behind:...)`, to each branch's
+/// name and its (ahead, behind).
+pub fn parse_ahead_behind(out: &str) -> Vec<(String, (u32, u32))> {
+    out.lines()
+        .filter_map(|line| {
+            let (name, counts) = line.split_once('\0')?;
+            let name = safe_ref_name("refs/heads/", name.strip_prefix("refs/heads/")?);
+            let (a, b) = counts.trim().split_once(' ')?;
+            Some((name, (a.parse().ok()?, b.parse().ok()?)))
+        })
+        .collect()
+}
+
 /// `[ahead 2, behind 1]`, `[gone]`, or empty.
 pub fn parse_track(t: &str) -> (u32, u32, bool) {
     if t.contains("gone") {
@@ -646,6 +659,8 @@ mod tests {
         assert_eq!(parse_track("[ahead 2, behind 1]"), (2, 1, false));
         assert_eq!(parse_track("[behind 7]"), (0, 7, false));
         assert_eq!(parse_track("[gone]"), (0, 0, true));
+        let out = "refs/heads/a\x002 1\nrefs/heads/b/c\x000 0\nrefs/heads/x\x00\n";
+        assert_eq!(parse_ahead_behind(out), vec![("a".to_string(), (2, 1)), ("b/c".to_string(), (0, 0))]);
         assert_eq!(parse_track(""), (0, 0, false));
     }
 
