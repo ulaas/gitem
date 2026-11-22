@@ -2538,7 +2538,9 @@ fn toolbar_icons_have_names() {
     sample_history(&f);
     let mut h = harness(&f);
     settle(&mut h);
-    for name in ["Refresh", "Stash", "Details", "Sidebar", "Minimize window", "Maximize window", "Close window", "Command palette"] {
+    // On a Mac the window's controls are the system's, not drawn here.
+    let controls: &[&str] = if gitem::chrome::NATIVE_CONTROLS { &[] } else { &["Minimize window", "Maximize window", "Close window"] };
+    for &name in ["Refresh", "Stash", "Details", "Sidebar", "Command palette"].iter().chain(controls) {
         pump_for_label(&mut h, name);
     }
 }
@@ -7054,7 +7056,10 @@ fn a_dialog_keeps_clicks_off_the_app_behind_it_and_lets_the_window_close() {
     }
     wait_until_quiet(&mut h);
     assert!(h.query_by_label("Stage file").is_none(), "the click reached the list behind the dialog");
-    // The window's own controls aren't behind anything.
+    // The window's own controls aren't behind anything. On a Mac they're the system's.
+    if gitem::chrome::NATIVE_CONTROLS {
+        return;
+    }
     h.get_by_label("Close window").click();
     h.step();
     let closing = h.output().viewport_output.values().any(|v| v.commands.contains(&egui::ViewportCommand::Close));
@@ -7173,7 +7178,8 @@ fn many_repositories_leave_the_window_controls_on_screen() {
     }
     wait_until_quiet(&mut h);
     let edge = h.ctx.content_rect().right();
-    for name in ["Close window", "Maximize window", "Minimize window", "Command palette"] {
+    let controls: &[&str] = if gitem::chrome::NATIVE_CONTROLS { &[] } else { &["Close window", "Maximize window", "Minimize window"] };
+    for &name in controls.iter().chain(&["Command palette"]) {
         assert!(h.get_by_label(name).rect().right() <= edge + 0.5, "{name} is off screen");
     }
     // The ones that don't fit are in a list, and the one in use is on show.

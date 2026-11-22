@@ -219,13 +219,14 @@ fn helper_windows_have_their_own_titlebar() {
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(680.0, 474.0)).with_max_steps(5).build_ui_state(|ui, a: &mut HelperApp| a.frame(ui), app);
     h.step();
     h.step();
+    // On a Mac the system's own traffic lights are the controls, and none are drawn.
     for name in ["Minimize window", "Maximize window", "Close window"] {
-        assert!(h.query_by_label(name).is_some(), "{name}");
+        assert_eq!(h.query_by_label(name).is_some(), !gitem::chrome::NATIVE_CONTROLS, "{name}");
     }
     let prompt = HelperApp::new(Mode::Askpass { prompt: "Password".into(), value: String::new(), secret: true, confirm: false });
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(460.0, 204.0)).with_max_steps(5).build_ui_state(|ui, a: &mut HelperApp| a.frame(ui), prompt);
     h.step();
     h.step();
-    assert!(h.query_by_label("Close window").is_some());
+    assert_eq!(h.query_by_label("Close window").is_some(), !gitem::chrome::NATIVE_CONTROLS);
     assert!(h.query_by_label("Maximize window").is_none(), "a prompt only closes");
 }
