@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.7 (2026-11-22)
+
+Added:
+
+- Branches has a Compare with box at its top. Pick any local or remote branch, and each local branch shows how many commits it has that the picked one hasn't, and how many it's missing, in grey beside its other marks, with the same in words in its tooltip. It starts at Nothing, and nothing is counted until a branch is picked.
+
 ## 0.8.6 (2026-11-22)
 
 Changed:
