@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.8 (2026-11-22)
+
+Added:
+
+- The branch picked in Branches' Compare with box is remembered for each repository, and is picked again when the repository opens. Picking Nothing forgets it.
+
 ## 0.8.7 (2026-11-22)
 
 Added:
