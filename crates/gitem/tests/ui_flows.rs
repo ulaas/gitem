@@ -7163,7 +7163,8 @@ fn a_note_being_typed_counts_and_a_pull_request_being_written_counts() {
 fn many_repositories_leave_the_window_controls_on_screen() {
     let parent = tempfile::tempdir().unwrap();
     let mut roots = Vec::new();
-    for i in 0..9 {
+    // More than fit at the narrowest, with or without the window's controls: 15 tabs of 96.
+    for i in 0..14 {
         let root = parent.path().canonicalize().unwrap().join(format!("a-repository-with-a-really-rather-long-name-{i}"));
         std::fs::create_dir(&root).unwrap();
         real_git().run(Some(&root), &["init", "-q", "-b", "main"]).unwrap();
@@ -7183,7 +7184,7 @@ fn many_repositories_leave_the_window_controls_on_screen() {
         assert!(h.get_by_label(name).rect().right() <= edge + 0.5, "{name} is off screen");
     }
     // The ones that don't fit are in a list, and the one in use is on show.
-    assert!(h.query_by_label("a-repository-with-a-really-rather-long-name-8").is_some());
+    assert!(h.query_by_label("a-repository-with-a-really-rather-long-name-13").is_some());
     assert!(h.query_by_label_contains(gitem::chrome::icon::DOTS_THREE).is_some(), "the rest are a click away");
 }
 
