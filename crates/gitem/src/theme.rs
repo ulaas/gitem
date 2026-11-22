@@ -93,6 +93,11 @@ pub fn contrast(a: Color32, b: Color32) -> f32 {
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
 
+/// `a` moved towards `b` by `t`, from 0 to 1. Opaque.
+pub fn mix_colors(a: Color32, b: Color32, t: f32) -> Color32 {
+    mix(a, b, t.clamp(0.0, 1.0))
+}
+
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
@@ -179,20 +184,20 @@ impl Palette {
     pub fn dark() -> Self {
         Self {
             dark: true,
-            bg: hex(0x17191d),
-            panel: hex(0x1d2025),
-            panel2: hex(0x25292f),
-            hover: hex(0x2b3037),
-            selection: hex(0x1f3d6b),
-            border: hex(0x32363d),
-            button: hex(0x343b46),
-            button_hover: hex(0x424b59),
-            button_border: hex(0x4b5462),
-            status_bg: hex(0x1b3454),
-            text: hex(0xcdcecb),
-            dim: hex(0xa8a9a3),
-            faint: hex(0x7d7e79),
-            accent: hex(0x2875d3),
+            bg: hex(0x0f1115),
+            panel: hex(0x161920),
+            panel2: hex(0x1c2027),
+            hover: hex(0x232834),
+            selection: hex(0x1d2d4f),
+            border: hex(0x262b35),
+            button: hex(0x232834),
+            button_hover: hex(0x2c3240),
+            button_border: hex(0x3a4150),
+            status_bg: hex(0x16233f),
+            text: hex(0xc9ced8),
+            dim: hex(0x9aa1b0),
+            faint: hex(0x737b8c),
+            accent: hex(0x3b6fe8),
             on_accent: Color32::WHITE,
             add_bg: Color32::from_rgba_unmultiplied(25, 158, 112, 40),
             add_word: Color32::from_rgba_unmultiplied(25, 158, 112, 110),
@@ -216,20 +221,20 @@ impl Palette {
     pub fn light() -> Self {
         Self {
             dark: false,
-            bg: hex(0xfcfcfb),
-            panel: hex(0xf4f4f1),
-            panel2: hex(0xeaeae6),
-            hover: hex(0xe4e4df),
-            selection: hex(0xcde2fb),
-            border: hex(0xd6d5ce),
+            bg: hex(0xf1f2f5),
+            panel: hex(0xfbfbfc),
+            panel2: hex(0xf0f2f5),
+            hover: hex(0xe8ebf0),
+            selection: hex(0xd8e3fc),
+            border: hex(0xe0e3e9),
             button: hex(0xffffff),
-            button_hover: hex(0xe6effb),
-            button_border: hex(0xb6b5ad),
-            status_bg: hex(0xd3e4f9),
-            text: hex(0x1a1a18),
-            dim: hex(0x52514e),
-            faint: hex(0x7b7a75),
-            accent: hex(0x2875d3),
+            button_hover: hex(0xf0f3f8),
+            button_border: hex(0xc9ced7),
+            status_bg: hex(0xdfe7f8),
+            text: hex(0x1d2230),
+            dim: hex(0x4b5260),
+            faint: hex(0x666d7c),
+            accent: hex(0x2f63e6),
             on_accent: Color32::WHITE,
             add_bg: Color32::from_rgba_unmultiplied(27, 175, 122, 40),
             add_word: Color32::from_rgba_unmultiplied(27, 175, 122, 110),
@@ -294,9 +299,23 @@ impl Palette {
     }
 }
 
-/// Extend egui's bundled fonts with system fonts so arrows, symbols, and non-Latin
-/// names in commits and paths render. Missing files are skipped.
+/// The interface's own face, the same on every platform. SIL Open Font License 1.1, in
+/// `assets/fonts/inter/LICENSE.txt`.
+const INTER: &[u8] = include_bytes!("../assets/fonts/inter/Inter-Regular.ttf");
+const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/inter/Inter-SemiBold.ttf");
+
+/// The family for headings and titles: Inter SemiBold, then everything plain text falls back on.
+pub const SEMIBOLD: &str = "semibold";
+
+/// Inter for the interface, with the system's fonts behind it for symbols and other scripts.
 pub fn install_fonts(ctx: &egui::Context) {
+    install_fonts_with(ctx, false);
+}
+
+/// Extend egui's bundled fonts with system fonts so arrows, symbols, and non-Latin
+/// names in commits and paths render. Missing files are skipped. With `system_first`, the
+/// system's interface font comes before Inter, as it did before Inter was built in.
+pub fn install_fonts_with(ctx: &egui::Context, system_first: bool) {
     #[cfg(windows)]
     const CANDIDATES: &[&str] = &["C:/Windows/Fonts/seguisym.ttf", "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/YuGothM.ttc", "C:/Windows/Fonts/malgun.ttf"];
     #[cfg(target_os = "macos")]
@@ -315,14 +334,28 @@ pub fn install_fonts(ctx: &egui::Context) {
             }
         }
     }
-    // The bundled face is a light weight, thin at these sizes. The system's reads better.
+    // egui's bundled face is a light weight, thin at these sizes. The system's reads better.
     #[cfg(windows)]
-    if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional)
+    if system_first
+        && let Some(list) = fonts.families.get_mut(&FontFamily::Proportional)
         && let Some(at) = list.iter().position(|f| f == "system:C:/Windows/Fonts/segoeui.ttf")
     {
         let face = list.remove(at);
         list.insert(0, face);
     }
+    fonts.font_data.insert("inter".into(), std::sync::Arc::new(egui::FontData::from_static(INTER)));
+    fonts.font_data.insert("inter-semibold".into(), std::sync::Arc::new(egui::FontData::from_static(INTER_SEMIBOLD)));
+    let plain = fonts.families.entry(FontFamily::Proportional).or_default();
+    // Inter leads, unless the system's face was asked for: then the fonts are as they were
+    // before Inter was built in, with it last, behind them all.
+    if system_first {
+        plain.push("inter".into());
+    } else {
+        plain.insert(0, "inter".into());
+    }
+    let mut heavy = vec!["inter-semibold".to_string()];
+    heavy.extend(plain.iter().filter(|f| *f != "inter").cloned());
+    fonts.families.insert(FontFamily::Name(SEMIBOLD.into()), heavy);
     ctx.set_fonts(fonts);
 }
 
@@ -344,28 +377,33 @@ fn system_font(path: &str) -> Option<egui::FontData> {
     }
 }
 
-/// Flat dock tabs: the active one shares the panel's colour and runs into its content,
-/// the rest sit in a darker bar. An outline only appears for keyboard focus.
+/// Each pane is a card: rounded, with its tabs along the top in a header a shade off the body.
+/// The active tab shares the body's colour and runs into it; the rest are dimmer. An outline
+/// only appears for keyboard focus. Between panes is a gap of the window's background, which
+/// is also where they're resized from.
 pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
     use egui_dock::TabInteractionStyle;
-    let tab = |bg_fill: Color32, text_color: Color32, outline_color: Color32| TabInteractionStyle { outline_color, corner_radius: CornerRadius::ZERO, bg_fill, text_color };
+    let top = CornerRadius { nw: radius::ROW, ne: radius::ROW, sw: 0, se: 0 };
+    let tab = |bg_fill: Color32, text_color: Color32, outline_color: Color32| TabInteractionStyle { outline_color, corner_radius: top, bg_fill, text_color };
     let none = Color32::TRANSPARENT;
+    let header = mix(p.panel, p.bg, 0.45);
     let mut s = egui_dock::Style::from_egui(style);
-    s.tab_bar.bg_fill = p.bg;
-    s.tab_bar.height = 30.0;
+    s.tab_bar.bg_fill = header;
+    s.tab_bar.height = 32.0;
     s.tab_bar.hline_color = p.border;
+    s.tab_bar.corner_radius = CornerRadius { nw: radius::CARD, ne: radius::CARD, sw: 0, se: 0 };
     s.tab.hline_below_active_tab_name = false;
     s.tab.spacing = 0.0;
     s.tab.active = tab(p.panel, p.text, none);
     s.tab.focused = tab(p.panel, p.text, none);
-    s.tab.inactive = tab(p.bg, p.dim, none);
-    s.tab.hovered = tab(p.hover, p.text, none);
+    s.tab.inactive = tab(header, p.dim, none);
+    s.tab.hovered = tab(mix(header, p.hover, 0.7), p.text, none);
     s.tab.active_with_kb_focus = tab(p.panel, p.text, p.accent);
     s.tab.focused_with_kb_focus = tab(p.panel, p.text, p.accent);
-    s.tab.inactive_with_kb_focus = tab(p.bg, p.text, p.accent);
-    s.tab.tab_body.stroke = Stroke::NONE;
+    s.tab.inactive_with_kb_focus = tab(header, p.text, p.accent);
+    s.tab.tab_body.stroke = Stroke::new(1.0, p.border);
     s.tab.tab_body.bg_fill = p.panel;
-    s.tab.tab_body.corner_radius = CornerRadius::ZERO;
+    s.tab.tab_body.corner_radius = CornerRadius { nw: 0, ne: 0, sw: radius::CARD, se: radius::CARD };
     s.buttons.close_tab_color = p.faint;
     s.buttons.close_tab_active_color = p.text;
     s.buttons.close_tab_bg_fill = p.hover;
@@ -377,12 +415,12 @@ pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
     s.buttons.close_all_tabs_active_color = p.text;
     s.buttons.close_all_tabs_bg_fill = p.hover;
     s.buttons.close_all_tabs_border_color = none;
-    s.separator.color_idle = p.border;
-    s.separator.color_hovered = p.accent;
-    s.separator.color_dragged = p.accent;
-    // A thin line, with room either side to catch the pointer.
-    s.separator.width = 1.0;
-    s.separator.extra_interact_width = 6.0;
+    // The gap between panes: the window's background, lit under the pointer.
+    s.separator.color_idle = p.bg;
+    s.separator.color_hovered = p.accent.gamma_multiply(0.45);
+    s.separator.color_dragged = p.accent.gamma_multiply(0.7);
+    s.separator.width = GAP;
+    s.separator.extra_interact_width = 2.0;
     // Titles shorter than this still leave room to grab the tab, and long ones scroll.
     s.tab.minimum_width = Some(84.0);
     s.tab_bar.show_scroll_bar_on_overflow = true;
@@ -405,6 +443,55 @@ pub fn dock_style(style: &egui::Style, p: &Palette) -> egui_dock::Style {
 /// The one height for buttons, menus, text boxes and icon buttons, so a row of them lines up.
 pub const CONTROL_HEIGHT: f32 = 24.0;
 
+/// Corner radii, smallest first: controls, list rows, cards and menus, dialogs.
+pub mod radius {
+    pub const CONTROL: u8 = 5;
+    pub const ROW: u8 = 6;
+    pub const CARD: u8 = 8;
+    pub const MODAL: u8 = 10;
+}
+
+/// Room between the cards the window is made of.
+pub const GAP: f32 = 6.0;
+
+impl Palette {
+    /// The edge of a control at rest: there, but quieter than the one under the pointer.
+    pub fn control_edge(&self) -> Color32 {
+        mix(self.button, self.button_border, 0.55)
+    }
+
+    /// A quiet fill for something the pointer is over on the window's own background.
+    pub fn bar_hover(&self) -> Color32 {
+        mix(self.bg, self.text, if self.dark { 0.07 } else { 0.06 })
+    }
+
+    /// The fill of something switched on, or the view in front: the accent, faint.
+    pub fn accent_soft(&self) -> Color32 {
+        over(self.accent.gamma_multiply(if self.dark { 0.2 } else { 0.13 }), self.bg)
+    }
+
+    /// The shadow under menus and popups.
+    pub fn popup_shadow(&self) -> egui::epaint::Shadow {
+        egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(if self.dark { 90 } else { 30 }) }
+    }
+
+    /// The shadow under dialogs.
+    pub fn window_shadow(&self) -> egui::epaint::Shadow {
+        egui::epaint::Shadow { offset: [0, 12], blur: 40, spread: 0, color: Color32::from_black_alpha(if self.dark { 100 } else { 34 }) }
+    }
+}
+
+/// Inter SemiBold where it's been installed, plain text where it hasn't (a test that never
+/// installs fonts), so asking for it can never fail.
+pub fn semibold(ctx: &egui::Context, size: f32) -> FontId {
+    if has_semibold(ctx) { FontId::new(size, FontFamily::Name(SEMIBOLD.into())) } else { FontId::new(size, FontFamily::Proportional) }
+}
+
+/// Whether the fonts in use have Inter SemiBold yet. They change a frame after they're set.
+pub fn has_semibold(ctx: &egui::Context) -> bool {
+    ctx.fonts(|f| f.definitions().families.contains_key(&FontFamily::Name(SEMIBOLD.into())))
+}
+
 pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32, reduce_motion: bool) {
     let mut v = if p.dark { Visuals::dark() } else { Visuals::light() };
     v.panel_fill = p.panel;
@@ -418,23 +505,30 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32, reduce_motion: bool) 
     v.selection.bg_fill = p.selection;
     v.selection.stroke = Stroke::new(1.0, p.accent);
     v.window_stroke = Stroke::new(1.0, p.border);
-    v.window_corner_radius = CornerRadius::same(6);
-    v.menu_corner_radius = CornerRadius::same(5);
+    v.window_corner_radius = CornerRadius::same(radius::MODAL);
+    v.menu_corner_radius = CornerRadius::same(radius::CARD);
+    v.window_shadow = p.window_shadow();
+    v.popup_shadow = p.popup_shadow();
     v.override_text_color = Some(p.text);
+    v.weak_text_color = Some(p.dim);
+    v.text_cursor.stroke = Stroke::new(2.0, p.accent);
+    v.indent_has_left_vline = false;
+    v.collapsing_header_frame = false;
     let w = &mut v.widgets;
-    let radius = CornerRadius::same(3);
+    let radius = CornerRadius::same(radius::CONTROL);
     w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
     w.noninteractive.corner_radius = radius;
     w.inactive.bg_fill = p.button;
     w.inactive.weak_bg_fill = p.button;
     w.inactive.fg_stroke = Stroke::new(1.0, p.text);
-    w.inactive.bg_stroke = Stroke::new(1.0, p.button_border);
+    // At rest a control has a quiet edge; the pointer brings out a stronger one.
+    w.inactive.bg_stroke = Stroke::new(1.0, p.control_edge());
     w.inactive.corner_radius = radius;
     w.hovered.bg_fill = p.button_hover;
     w.hovered.weak_bg_fill = p.button_hover;
     w.hovered.fg_stroke = Stroke::new(1.0, p.text);
-    w.hovered.bg_stroke = Stroke::new(1.0, p.accent);
+    w.hovered.bg_stroke = Stroke::new(1.0, p.button_border);
     w.hovered.corner_radius = radius;
     // Being pressed, or having the keyboard. Selected and switched-on things use the
     // selection's fill, so this mustn't look like that: a thick outline says "here".
@@ -452,7 +546,10 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32, reduce_motion: bool) 
     let mut style = (*ctx.style_of(if p.dark { egui::Theme::Dark } else { egui::Theme::Light })).clone();
     style.visuals = v;
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-    style.spacing.button_padding = egui::vec2(7.0, 3.0);
+    style.spacing.button_padding = egui::vec2(8.0, 3.0);
+    style.spacing.menu_margin = egui::Margin::same(6);
+    style.spacing.window_margin = egui::Margin::same(12);
+    style.spacing.menu_spacing = 4.0;
     // Every control in a row has this height: buttons, menus, text boxes and icon buttons
     // alike. `widgets::small_button` and `widgets::input` keep to it too.
     style.spacing.interact_size.y = CONTROL_HEIGHT;
@@ -461,13 +558,14 @@ pub fn apply(ctx: &egui::Context, p: &Palette, scale: f32, reduce_motion: bool) 
     if reduce_motion {
         style.animation_time = 0.0;
     }
-    style.spacing.scroll.bar_width = 8.0;
-    style.spacing.scroll.floating = true;
+    // A thin handle that's quiet at rest and clear under the pointer, with no track behind it.
+    style.spacing.scroll = egui::style::ScrollStyle { bar_width: 8.0, floating: true, floating_allocated_width: 0.0, active_handle_opacity: 0.35, interact_handle_opacity: 0.6, active_background_opacity: 0.0, interact_background_opacity: 0.0, ..egui::style::ScrollStyle::floating() };
+    let heading = semibold(ctx, 17.0);
     style.text_styles = [
         (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
         (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
         (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
-        (TextStyle::Heading, FontId::new(17.0, FontFamily::Proportional)),
+        (TextStyle::Heading, heading),
         (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
     ]
     .into();

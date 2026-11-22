@@ -206,8 +206,8 @@ enum Peek {
 
 /// A view narrower than this has lost the point of showing it.
 const VIEW_MIN_WIDTH: f32 = 520.0;
-const SIDEBAR_WIDTH: f32 = 270.0;
-const DETAILS_WIDTH: f32 = 340.0;
+const SIDEBAR_WIDTH: f32 = 276.0;
+const DETAILS_WIDTH: f32 = 352.0;
 
 /// Which side panels give way, Details first, so the view keeps a usable width.
 fn squeeze_for(width: f32, rail: f32, sidebar: bool, details: bool) -> Squeeze {
@@ -231,7 +231,7 @@ fn details_give_way_first_and_then_the_sidebar() {
     // What's been turned off has no room to give.
     assert!(!squeeze_for(1000.0, chrome::RAIL_WIDTH, true, false).details);
     // A wider rail takes its room from the view: what just fitted with the narrow one doesn't.
-    let just_fits = 44.0 + SIDEBAR_WIDTH + DETAILS_WIDTH + VIEW_MIN_WIDTH;
+    let just_fits = chrome::RAIL_WIDTH + SIDEBAR_WIDTH + DETAILS_WIDTH + VIEW_MIN_WIDTH;
     assert!(!squeeze_for(just_fits, chrome::RAIL_WIDTH, true, true).details);
     assert!(squeeze_for(just_fits, chrome::RAIL_LABELLED_WIDTH, true, true).details);
 }
@@ -992,6 +992,21 @@ pub fn about_copy_text(facts: &[(&'static str, String)]) -> String {
     format!("gitem\n{}", lines.join("\n"))
 }
 
+/// Between two cards, each side keeps half the gap.
+const HALF_GAP: i8 = (theme::GAP / 2.0) as i8;
+const GAP: i8 = theme::GAP as i8;
+
+/// A panel drawn as a card: rounded, outlined, on the window's background, `left` and `right`
+/// apart from what's beside it.
+fn card_frame(p: &Palette, left: i8, right: i8) -> egui::Frame {
+    egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.border)).corner_radius(theme::radius::CARD).inner_margin(egui::Margin::symmetric(8, 6)).outer_margin(egui::Margin { left, right, top: 0, bottom: 0 })
+}
+
+/// A banner across the window: a rounded strip of `fill`, inset like the cards below it.
+fn banner_frame(fill: Color32) -> egui::Frame {
+    egui::Frame::new().fill(fill).corner_radius(theme::radius::CARD).inner_margin(egui::Margin::symmetric(10, 4)).outer_margin(egui::Margin { left: GAP, right: GAP, top: 0, bottom: GAP })
+}
+
 fn dialog_window<'a>(title: impl Into<egui::WidgetText>, settled: bool) -> egui::Window<'a> {
     egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_TOP, [0.0, 90.0]).order(egui::Order::Foreground).interactable(settled)
 }
@@ -1108,6 +1123,8 @@ pub struct GitemApp {
     global_queue: VecDeque<(GitOp, Option<PathBuf>)>,
     global_running: Option<Running>,
     applied: Option<(gitem_core::settings::ThemeChoice, u32, String)>,
+    /// Whether the fonts installed put the system's face first, once they've been installed.
+    fonts_system: Option<bool>,
     /// egui's zoom as last seen, to tell its own Ctrl+Plus from ours still waiting to apply.
     seen_zoom: Option<f32>,
     open_path: String,
@@ -1292,6 +1309,7 @@ impl GitemApp {
             global_queue: VecDeque::new(),
             global_running: None,
             applied: None,
+            fonts_system: Some(false),
             seen_zoom: None,
             open_path: String::new(),
             settings_dirty: false,
@@ -1967,7 +1985,12 @@ impl GitemApp {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        let want = (self.settings.theme, (self.settings.ui_scale * 100.0) as u32, format!("{}:{}:{}", self.settings.accent, self.settings.colorblind_diff, self.settings.reduce_motion));
+        if self.fonts_system != Some(self.settings.system_font) {
+            self.fonts_system = Some(self.settings.system_font);
+            theme::install_fonts_with(ctx, self.settings.system_font);
+        }
+        // Applied again once the heavier face for headings has arrived, a frame after the fonts.
+        let want = (self.settings.theme, (self.settings.ui_scale * 100.0) as u32, format!("{}:{}:{}:{}", self.settings.accent, self.settings.colorblind_diff, self.settings.reduce_motion, theme::has_semibold(ctx)));
         if self.applied.as_ref() != Some(&want) {
             self.applied = Some(want);
             self.pal = Palette::for_settings(self.settings.theme, &self.settings.accent).colorblind(self.settings.colorblind_diff);
@@ -2407,7 +2430,8 @@ impl GitemApp {
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
             ui.set_clip_rect(left.intersect(ui.clip_rect()));
-            ui.add_space(9.0);
+            // macOS's traffic lights are at the left, over the bar.
+            ui.add_space(10.0 + chrome::leading_inset(ui.ctx()));
             let (rect, logo) = ui.allocate_exact_size(egui::vec2(20.0, chrome::TITLE_BAR_HEIGHT), Sense::click());
             // Like the buttons beside it: a fill under the pointer, and the mark a little larger.
             let hover = ui.ctx().animate_bool_with_time(logo.id, logo.hovered(), 0.12);
@@ -3930,9 +3954,18 @@ impl GitemApp {
             }
         }
 
-        let bar_frame = egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::symmetric(8, 4));
+        // The window's own background, behind the cards everything else sits on, so the gaps
+        // between them are this and not the renderer's clear colour.
+        ui.painter().rect_filled(ctx.content_rect(), 0.0, self.pal.bg);
+        let bar_frame = egui::Frame::new().fill(self.pal.bg).inner_margin(egui::Margin { left: 8, right: 8, top: 3, bottom: 5 });
         egui::Panel::top("title-bar").frame(egui::Frame::new().fill(self.pal.bg)).resizable(false).exact_size(chrome::TITLE_BAR_HEIGHT).show_separator_line(false).show(ui, |ui| self.title_bar(ui, &mut out));
-        egui::Panel::bottom("status-bar").frame(egui::Frame::new().fill(self.pal.status_bg).inner_margin(egui::Margin::symmetric(8, 3))).show_separator_line(false).show(ui, |ui| self.status_bar(ui, &mut out));
+        egui::Panel::bottom("status-bar").frame(egui::Frame::new().fill(self.pal.bg).inner_margin(egui::Margin { left: 10, right: 10, top: 3, bottom: 4 })).show_separator_line(false).show(ui, |ui| {
+            // Quiet: the bar's buttons have no fill until the pointer is over them.
+            let w = &mut ui.visuals_mut().widgets.inactive;
+            w.weak_bg_fill = Color32::TRANSPARENT;
+            w.bg_stroke = egui::Stroke::NONE;
+            self.status_bar(ui, &mut out)
+        });
         let pal = self.pal.clone();
         let dialog_open = self.dialog_open();
         if let Some(tab) = self.repos.get_mut(self.active)
@@ -3973,7 +4006,7 @@ impl GitemApp {
         self.ide_was = self.settings.ide_mode;
         if self.ide_offer {
             let pal = self.pal.clone();
-            egui::Panel::top("ide-offer").frame(egui::Frame::new().fill(pal.panel2).inner_margin(egui::Margin::symmetric(10, 4))).show_separator_line(false).show(ui, |ui| {
+            egui::Panel::top("ide-offer").frame(banner_frame(pal.panel2)).show_separator_line(false).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{} IDE mode is on: a click in the Files tree opens the file for editing.", chrome::icon::CODE)).color(pal.text));
                     if crate::widgets::small_button(ui, "Use the IDE layout").on_hover_text("The editor, Changes beside it, the Console below and the Files sidebar. Every open tab is kept").clicked() {
@@ -3997,13 +4030,13 @@ impl GitemApp {
             let RepoTab { repo, data, dock, zoom, inspect, show_inspect, sidebar, show_sidebar, show_rail, squeeze: tab_squeeze, peek, show_wip, .. } = tab;
             if let Some(s) = data.status.get()
                 && s.op != RepoOp::None {
-                    let frame = egui::Frame::new().fill(pal.banner_fill());
+                    let frame = banner_frame(pal.banner_fill()).inner_margin(0);
                     let s = s.clone();
                     let ops_busy = data.ops_busy;
-                    egui::Panel::top("op-banner").frame(frame).show(ui, |ui| Self::op_banner(ui, &s, data.branches(), ops_busy, &mut out, &pal));
+                    egui::Panel::top("op-banner").frame(frame).show_separator_line(false).show(ui, |ui| Self::op_banner(ui, &s, data.branches(), ops_busy, &mut out, &pal));
                 }
             if let Some(problem) = data.read_failure().map(str::to_string).or_else(|| data.waiting_on().map(|(what, t)| format!("Still waiting: {what} has been running for {} s.", t.as_secs()))) {
-                let frame = egui::Frame::new().fill(pal.banner_fill()).inner_margin(egui::Margin::symmetric(8, 4));
+                let frame = banner_frame(pal.banner_fill());
                 let gone = !repo.root.exists();
                 egui::Panel::top("read-banner").frame(frame).show_separator_line(false).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -4029,7 +4062,7 @@ impl GitemApp {
                 });
             }
             if repo.trust.restricted() {
-                let frame = egui::Frame::new().fill(pal.banner_fill()).inner_margin(egui::Margin::symmetric(8, 4));
+                let frame = banner_frame(pal.banner_fill());
                 egui::Panel::top("trust-banner").frame(frame).show_separator_line(false).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.colored_label(pal.warn, "Programs from this repository's config are turned off.");
@@ -4048,7 +4081,7 @@ impl GitemApp {
                 *peek = None;
             }
             if *show_sidebar && !squeeze.sidebar {
-                egui::Panel::left("sidebar").resizable(true).default_size(SIDEBAR_WIDTH).size_range(180.0..=600.0).show(ui, |ui| {
+                egui::Panel::left("sidebar").frame(card_frame(&pal, if *show_rail { 0 } else { GAP }, HALF_GAP)).resizable(true).default_size(SIDEBAR_WIDTH).size_range(180.0..=600.0).show(ui, |ui| {
                     let mut cx = Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true };
                     ui.push_id(&cx.repo.root, |ui| sidebar.ui(ui, &mut cx));
                 });
@@ -4058,7 +4091,7 @@ impl GitemApp {
             // The tab it draws from can have been closed since.
             *show_wip = *show_wip && dock.iter_all_tabs().any(|(_, t)| matches!(t, Tab::Changes(_)));
             if *show_inspect && !squeeze.details && (inspect.sha.is_some() || *show_wip) && front_shows_commits {
-                egui::Panel::right("inspect").resizable(true).default_size(DETAILS_WIDTH).size_range(220.0..=800.0).show(ui, |ui| {
+                egui::Panel::right("inspect").frame(card_frame(&pal, HALF_GAP, GAP)).resizable(true).default_size(DETAILS_WIDTH).size_range(220.0..=800.0).show(ui, |ui| {
                     // A short message mustn't shrink the panel and move everything beside it.
                     ui.set_min_width(ui.available_width());
                     if *show_wip {
@@ -4090,7 +4123,7 @@ impl GitemApp {
             let panes = dock.iter_leaves().count();
             let zoomed = zoom.is_some();
             if zoomed {
-                egui::Panel::top("zoom-bar").frame(egui::Frame::new().fill(pal.panel2).inner_margin(egui::Margin::symmetric(8, 3))).show_separator_line(false).show(ui, |ui| {
+                egui::Panel::top("zoom-bar").frame(banner_frame(pal.panel2)).show_separator_line(false).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("{} One pane fills the window. The rest of the layout is kept.", chrome::icon::CORNERS_OUT)).color(pal.dim));
                         if crate::widgets::small_button(ui, "Restore layout").on_hover_text(crate::keys::chord_label(&self.settings.key_bindings, "zoom_pane")).clicked() {
@@ -4099,8 +4132,12 @@ impl GitemApp {
                     });
                 });
             }
+            // The panes are cards of their own (see `dock_style`); this leaves the gaps beside them.
+            let beside_left = if *show_sidebar && !squeeze.sidebar { HALF_GAP } else if *show_rail { 0 } else { GAP };
+            let inspect_shown = *show_inspect && !squeeze.details && (inspect.sha.is_some() || *show_wip) && front_shows_commits;
+            let beside_right = if inspect_shown { HALF_GAP } else { GAP };
             let mut viewer = Viewer { cx: Cx { repo, data, settings: &self.settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true }, front, pane_sizes, panes, zoomed };
-            egui::CentralPanel::no_frame().show(ui, |ui| {
+            egui::CentralPanel::no_frame().frame(egui::Frame::new().outer_margin(egui::Margin { left: beside_left, right: beside_right, top: 0, bottom: 0 })).show(ui, |ui| {
                 DockArea::new(dock).id(egui::Id::new(DOCK_ID)).style(style).show_add_buttons(true).show_leaf_collapse_buttons(false).show_leaf_close_all_buttons(false).show_inside(ui, &mut viewer);
                 paint_active_tab_markers(ui, dock, &pal);
                 // egui_dock shows a grab cursor on any hovered tab. Keep the usual pointer
@@ -4144,7 +4181,7 @@ impl GitemApp {
                     back = ui.button(format!("{} Back to the start", chrome::icon::ARROW_LEFT)).clicked();
                 });
                 let settings = &self.settings;
-                egui::CentralPanel::default().show(ui, |ui| {
+                egui::CentralPanel::default().frame(card_frame(&pal, GAP, GAP)).show(ui, |ui| {
                     let NoRepo { repo, data } = &**s;
                     let mut cx = Cx { repo, data, settings, pal: &pal, update: &self.update_status, out: &mut out, dialog_open, in_front: true };
                     tab.ui(ui, &mut cx);
@@ -4153,7 +4190,7 @@ impl GitemApp {
                     self.no_repo_tab = None;
                 }
             } else {
-                egui::CentralPanel::default().show(ui, |ui| self.welcome(ui, &mut out));
+                egui::CentralPanel::default().frame(card_frame(&pal, GAP, GAP)).show(ui, |ui| self.welcome(ui, &mut out));
             }
             if let (Some(pl), Some(s)) = (&mut self.palette, &self.no_repo) {
                 pl.outside = Some(self.git.is_ok());

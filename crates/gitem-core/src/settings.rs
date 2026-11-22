@@ -134,6 +134,9 @@ pub struct Settings {
     pub accent: String,
     pub ui_scale: f32,
     pub editor_font_size: f32,
+    /// The system's interface font in place of the built-in Inter.
+    #[serde(default)]
+    pub system_font: bool,
     /// IDE mode: a file clicked in the Files tree opens for editing rather than for reading.
     pub ide_mode: bool,
     /// Columns per indent in a file that doesn't show its own.
@@ -327,6 +330,7 @@ impl Default for Settings {
             accent: String::new(),
             ui_scale: 1.0,
             editor_font_size: 13.0,
+            system_font: false,
             ide_mode: false,
             editor_tab_size: 4,
             editor_insert_spaces: true,

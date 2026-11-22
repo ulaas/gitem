@@ -1,5 +1,7 @@
-//! The window's own frame, drawn by the app so it looks the same on every platform:
-//! logo, titlebar, window controls, resize edges, and the icon rail of views.
+//! The window's frame: logo, titlebar, window controls, resize edges, and the icon rail of
+//! views. On Windows and Linux the app draws all of it in an undecorated window. On macOS the
+//! window keeps the system's own traffic lights, over a transparent title bar with the app's
+//! drawn underneath, and the system moves, resizes and outlines it as it does any window.
 use egui::viewport::ResizeDirection;
 use egui::{Align2, Color32, CornerRadius, CursorIcon, IconData, Pos2, Rect, Response, RichText, Sense, Shape, Stroke, Ui, ViewportCommand, WidgetInfo, WidgetType, pos2, vec2};
 pub use egui_phosphor::regular as icon;
@@ -9,20 +11,74 @@ use crate::theme::Palette;
 use crate::views::Tab;
 use crate::widgets::prop;
 
-pub const TITLE_BAR_HEIGHT: f32 = 34.0;
-pub const RAIL_WIDTH: f32 = 44.0;
+/// On macOS, near the height of the system's own title bar, so its traffic lights, centred in
+/// that, line up with what the bar holds.
+pub const TITLE_BAR_HEIGHT: f32 = if cfg!(target_os = "macos") { 32.0 } else { 38.0 };
+pub const RAIL_WIDTH: f32 = 48.0;
 /// With each view's name beside its icon, for those who turn that on.
-pub const RAIL_LABELLED_WIDTH: f32 = 132.0;
-const RAIL_ITEM: f32 = 34.0;
+pub const RAIL_LABELLED_WIDTH: f32 = 136.0;
+const RAIL_ITEM: f32 = 36.0;
 const CONTROL_WIDTH: f32 = 46.0;
 /// Clear title bar kept for moving the window, however many repositories are open.
 pub const TITLE_DRAG_ROOM: f32 = 28.0;
-pub const COMMAND_FIELD_WIDTH: f32 = 250.0;
+pub const COMMAND_FIELD_WIDTH: f32 = 260.0;
 /// A repository's tab doesn't get narrower than this. Past that they go in a list.
 const MIN_REPO_TAB: f32 = 96.0;
 const RESIZE_EDGE: f32 = 6.0;
 const RESIZE_CORNER: f32 = 10.0;
 const CLOSE_HOVER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
+/// What the system's traffic lights take at the left of a macOS title bar.
+pub const MAC_TRAFFIC_LIGHTS: f32 = 78.0;
+/// The radius Windows 11 rounds a window's corners to.
+const WIN11_CORNER: u8 = 8;
+
+/// The system draws the window buttons, and moves, resizes and outlines the window: macOS.
+pub const NATIVE_CONTROLS: bool = cfg!(target_os = "macos");
+
+/// Room kept at the title bar's left for the system's window buttons. They go in full screen.
+pub fn leading_inset(ctx: &egui::Context) -> f32 {
+    if NATIVE_CONTROLS && !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) { MAC_TRAFFIC_LIGHTS } else { 0.0 }
+}
+
+/// Windows 11 or later, whose windows have round corners.
+pub fn is_windows_11() -> bool {
+    #[cfg(windows)]
+    {
+        static ELEVEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ELEVEN.get_or_init(|| windows_build() >= 22000)
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// The build number of Windows, from ntdll, which tells it as it is: the usual call reports
+/// whatever an app's manifest claims to know about.
+#[cfg(windows)]
+fn windows_build() -> u32 {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    #[repr(C)]
+    struct Version {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform: u32,
+        service_pack: [u16; 128],
+    }
+    let name: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
+    // SAFETY: ntdll is in every process; RtlGetVersion has this signature and only fills the
+    // struct, whose size field it reads first.
+    unsafe {
+        let module = GetModuleHandleW(name.as_ptr());
+        if module.is_null() {
+            return 0;
+        }
+        let Some(f) = GetProcAddress(module, c"RtlGetVersion".as_ptr().cast()) else { return 0 };
+        let get: unsafe extern "system" fn(*mut Version) -> i32 = std::mem::transmute(f);
+        let mut v = Version { size: size_of::<Version>() as u32, major: 0, minor: 0, build: 0, platform: 0, service_pack: [0; 128] };
+        if get(&mut v) == 0 { v.build } else { 0 }
+    }
+}
 
 // ---- logo --------------------------------------------------------------------
 
@@ -47,9 +103,11 @@ pub fn logo_icon(size: u32) -> IconData {
     IconData { rgba: logo::rgba(size), width: size, height: size }
 }
 
-/// An undecorated window with the logo, as every gitem window is.
+/// A gitem window with the logo. Undecorated, with the app's own frame; on macOS, the
+/// system's frame and traffic lights over a title bar the app draws.
 pub fn viewport(title: &str, size: [f32; 2]) -> egui::ViewportBuilder {
-    egui::ViewportBuilder::default().with_title(title).with_inner_size(size).with_decorations(false).with_icon(std::sync::Arc::new(logo_icon(64)))
+    let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size(size).with_icon(std::sync::Arc::new(logo_icon(64)));
+    if NATIVE_CONTROLS { builder.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false) } else { builder.with_decorations(false) }
 }
 
 // ---- buttons -----------------------------------------------------------------
@@ -72,10 +130,12 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, name: &str, tip: &str, on: bool, p:
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     crate::widgets::focus_ring(ui, &resp, p);
     if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.1);
+        let corner = CornerRadius::same(crate::theme::radius::ROW);
         if on {
-            ui.painter().rect_filled(rect, 4.0, p.selection);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(rect, 4.0, p.hover);
+            ui.painter().rect_filled(rect, corner, p.selection);
+        } else if hover > 0.0 {
+            ui.painter().rect_filled(rect, corner, p.hover.gamma_multiply(hover));
         }
         let color = if on || resp.hovered() { p.text } else { p.dim };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, prop(16.0), color);
@@ -83,19 +143,24 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, name: &str, tip: &str, on: bool, p:
     tooltip(resp, name, tip, p)
 }
 
-/// A toolbar button showing only an icon, on the same raised fill as text buttons.
+/// A toolbar button showing only an icon: no fill or edge until the pointer is over it, and
+/// the accent, faint, while it's switched on.
 pub fn tool_button(ui: &mut Ui, glyph: &str, tint: Color32, name: &str, tip: &str, on: bool, p: &Palette) -> Response {
     let side = ui.spacing().interact_size.y;
     let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     if ui.is_rect_visible(rect) {
-        let (fill, border) = match (on, resp.hovered()) {
-            (true, _) => (p.selection, p.accent),
-            (false, true) => (p.button_hover, p.accent),
-            (false, false) => (p.button, p.button_border),
-        };
-        ui.painter().rect(rect, 4.0, fill, Stroke::new(1.0, border), egui::StrokeKind::Inside);
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, prop(16.0), if on { p.text } else { tint });
+        let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.1);
+        let corner = CornerRadius::same(crate::theme::radius::ROW);
+        if resp.is_pointer_button_down_on() {
+            ui.painter().rect_filled(rect, corner, p.button_hover);
+        } else if on {
+            ui.painter().rect_filled(rect, corner, p.accent_soft());
+        } else if hover > 0.0 {
+            ui.painter().rect_filled(rect, corner, p.bar_hover().gamma_multiply(hover));
+        }
+        let color = if on { crate::theme::readable(p.accent, p.text, p.accent_soft(), 3.0) } else if resp.hovered() { p.text } else { tint };
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, prop(16.0), color);
         crate::widgets::focus_ring(ui, &resp, p);
     }
     tooltip(resp, name, tip, p)
@@ -168,6 +233,10 @@ pub fn drag_region(ui: &mut Ui) {
     } else if resp.drag_started_by(egui::PointerButton::Primary) {
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
+    // macOS has no window menu on its title bars.
+    if !NATIVE_CONTROLS {
+        resp.context_menu(window_menu);
+    }
 }
 
 const REPO_TAB_CLOSE: f32 = 20.0;
@@ -228,21 +297,39 @@ fn tabs_shrink_then_overflow_and_the_active_one_stays() {
 
 /// The palette's place in the title bar, looking like the search box it is.
 pub fn command_field(ui: &mut Ui, width: f32, p: &Palette) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Command palette"));
     if ui.is_rect_visible(rect) {
-        ui.painter().rect(rect, 4.0, if resp.hovered() { p.hover } else { p.panel }, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
-        ui.painter().text(rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, icon::MAGNIFYING_GLASS, prop(13.0), p.dim);
-        ui.painter().text(rect.left_center() + vec2(26.0, 0.0), Align2::LEFT_CENTER, "Search or run a command", prop(12.0), p.dim);
-        ui.painter().text(rect.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, "Ctrl+P", prop(11.0), p.faint);
+        let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.1);
+        let fill = crate::theme::over(p.bar_hover().gamma_multiply(0.6 + 0.4 * hover), p.bg);
+        let corner = CornerRadius::same(crate::theme::radius::ROW);
+        ui.painter().rect_filled(rect, corner, fill);
+        ui.painter().text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, icon::MAGNIFYING_GLASS, prop(13.0), p.dim);
+        ui.painter().text(rect.left_center() + vec2(29.0, 0.0), Align2::LEFT_CENTER, "Search or run a command", prop(12.5), p.dim);
+        key_badge(ui, rect.right_center() - vec2(6.0, 0.0), &palette_keys(), p);
         crate::widgets::focus_ring(ui, &resp, p);
     }
     tooltip(resp, "Command palette", "Every command, branch and file", p)
 }
 
+/// The palette's keys as this platform writes them.
+fn palette_keys() -> String {
+    if cfg!(target_os = "macos") { "\u{2318}P".to_string() } else { "Ctrl+P".to_string() }
+}
+
+/// A key, or keys, in a small box, its right end at `right`. Returns how wide it is.
+pub fn key_badge(ui: &Ui, right: Pos2, keys: &str, p: &Palette) -> f32 {
+    let g = ui.painter().layout_no_wrap(keys.to_string(), prop(11.0), p.faint);
+    let size = vec2(g.size().x + 10.0, 18.0);
+    let r = Rect::from_min_size(pos2(right.x - size.x, right.y - size.y / 2.0), size);
+    ui.painter().rect(r, CornerRadius::same(4), crate::theme::over(p.panel2.gamma_multiply(0.7), p.bg), Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    ui.painter().galley(r.center() - g.size() / 2.0, g, p.faint);
+    size.x
+}
+
 /// One open repository in the titlebar. Returns whether its close button was clicked.
 pub fn repo_tab(ui: &mut Ui, name: &str, dirty: bool, selected: bool, path: &str, cap: f32, p: &Palette) -> (Response, bool) {
-    const TOP_GAP: f32 = 5.0;
+    const PAD: f32 = (TITLE_BAR_HEIGHT - 26.0) / 2.0;
     const CLOSE: f32 = REPO_TAB_CLOSE;
     let color = if selected { p.text } else { p.dim };
     let room = (cap - repo_tab_chrome(dirty)).max(16.0);
@@ -256,18 +343,20 @@ pub fn repo_tab(ui: &mut Ui, name: &str, dirty: bool, selected: bool, path: &str
     let (outer, resp) = ui.allocate_exact_size(vec2(width, TITLE_BAR_HEIGHT), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     crate::widgets::focus_ring(ui, &resp, p);
-    let rect = Rect::from_min_max(pos2(outer.left(), outer.top() + TOP_GAP), outer.max);
+    // A rounded tile in the bar: raised for the one in use, a faint fill under the pointer.
+    let rect = outer.shrink2(vec2(1.0, PAD));
     let close_rect = Rect::from_center_size(pos2(rect.right() - 6.0 - CLOSE / 2.0, rect.center().y), vec2(CLOSE, CLOSE));
     let close = ui.interact(close_rect, resp.id.with("close"), Sense::click());
     close.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Close {name}")));
     let hovered = ui.rect_contains_pointer(rect);
-    let corners = CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
+    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), hovered, 0.1);
+    let corners = CornerRadius::same(crate::theme::radius::ROW);
     if selected {
-        ui.painter().rect_filled(rect, corners, p.panel);
-        let line = Rect::from_min_size(rect.left_top() + vec2(6.0, 0.0), vec2(rect.width() - 12.0, 2.0));
+        ui.painter().rect(rect, corners, p.panel, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+        let line = Rect::from_min_size(pos2(rect.left() + 10.0, rect.bottom() - 2.0), vec2(rect.width() - 20.0, 2.0));
         ui.painter().rect_filled(line, 1.0, p.accent);
-    } else if hovered {
-        ui.painter().rect_filled(rect, corners, p.hover);
+    } else if hover > 0.0 {
+        ui.painter().rect_filled(rect, corners, p.bar_hover().gamma_multiply(hover));
     }
     let mut x = rect.left() + 12.0;
     ui.painter().galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley.clone(), color);
@@ -298,46 +387,97 @@ fn control(ui: &mut Ui, kind: Control, name: &str, p: &Palette) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(CONTROL_WIDTH, TITLE_BAR_HEIGHT), Sense::click());
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     crate::widgets::focus_ring(ui, &resp, p);
-    let closing = matches!(kind, Control::Close) && resp.hovered();
-    if closing {
-        ui.painter().rect_filled(rect, 0.0, CLOSE_HOVER);
-    } else if resp.hovered() {
-        ui.painter().rect_filled(rect, 0.0, p.hover);
+    let ctx = ui.ctx().clone();
+    let (focused, floating) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), !i.viewport().maximized.unwrap_or(false) && !i.viewport().fullscreen.unwrap_or(false)));
+    let hover = ctx.animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.1);
+    let pressed = resp.is_pointer_button_down_on();
+    let close = matches!(kind, Control::Close);
+    // The close button's corner follows the window's when Windows rounds it.
+    let corner = if close && floating && rect.right() >= ctx.content_rect().right() - 0.5 && is_windows_11() { CornerRadius { ne: WIN11_CORNER, ..CornerRadius::ZERO } } else { CornerRadius::ZERO };
+    let mut ink = if focused { p.dim } else { p.faint };
+    if close {
+        if pressed {
+            ui.painter().rect_filled(rect, corner, CLOSE_HOVER.gamma_multiply(0.85));
+            ink = Color32::WHITE;
+        } else if hover > 0.0 {
+            ui.painter().rect_filled(rect, corner, CLOSE_HOVER.gamma_multiply(hover));
+            ink = crate::theme::mix_colors(ink, Color32::WHITE, hover);
+        }
+    } else if pressed {
+        ui.painter().rect_filled(rect, corner, p.button_hover);
+        ink = p.text;
+    } else if hover > 0.0 {
+        ui.painter().rect_filled(rect, corner, p.bar_hover().gamma_multiply(hover));
+        ink = crate::theme::mix_colors(ink, p.text, hover);
     }
-    let stroke = Stroke::new(1.0, if closing { Color32::WHITE } else { p.dim });
-    let c = rect.center();
-    const R: f32 = 5.0;
-    let square = Rect::from_center_size(c, vec2(2.0 * R, 2.0 * R));
-    let painter = ui.painter();
-    match kind {
-        Control::Minimize => {
-            painter.line_segment([c + vec2(-R, 0.0), c + vec2(R, 0.0)], stroke);
-        }
-        Control::Maximize => {
-            painter.rect_stroke(square, 1.0, stroke, egui::StrokeKind::Inside);
-        }
-        Control::Restore => {
-            let front = square.translate(vec2(-1.5, 1.5)).shrink(0.5);
-            let back = square.translate(vec2(1.5, -1.5)).shrink(0.5);
-            painter.line_segment([back.left_top(), back.right_top()], stroke);
-            painter.line_segment([back.right_top(), back.right_bottom()], stroke);
-            painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Inside);
-        }
-        Control::Close => {
-            painter.line_segment([c + vec2(-R, -R), c + vec2(R, R)], stroke);
-            painter.line_segment([c + vec2(-R, R), c + vec2(R, -R)], stroke);
-        }
-    }
+    paint_control_glyph(ui.painter(), kind, rect.center(), ink, ctx.pixels_per_point());
     resp
 }
 
-/// How much of the title bar's right end the window controls take.
-pub fn window_controls_width() -> f32 {
-    CONTROL_WIDTH * 3.0
+/// Windows 11's caption glyphs, ten points across, with strokes a whole number of pixels wide
+/// on pixel centres, so they're sharp at any display scale.
+fn paint_control_glyph(painter: &egui::Painter, kind: Control, center: Pos2, color: Color32, ppp: f32) {
+    let px = 1.0 / ppp;
+    let stroke = Stroke::new(ppp.round().max(1.0) * px, color);
+    let snap = |v: f32| ((v * ppp).floor() + 0.5) / ppp;
+    let c = pos2(snap(center.x), snap(center.y));
+    const R: f32 = 5.0;
+    match kind {
+        Control::Minimize => {
+            painter.line_segment([pos2(c.x - R, c.y), pos2(c.x + R, c.y)], stroke);
+        }
+        Control::Maximize => {
+            painter.rect_stroke(Rect::from_center_size(c, vec2(2.0 * R, 2.0 * R)), 1.0, stroke, egui::StrokeKind::Middle);
+        }
+        Control::Restore => {
+            let front = Rect::from_min_max(pos2(c.x - R, c.y - R + 2.0), pos2(c.x + R - 2.0, c.y + R));
+            painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Middle);
+            // Only the top and right edges of the window behind show.
+            painter.line_segment([pos2(c.x - R + 2.0, c.y - R), pos2(c.x + R, c.y - R)], stroke);
+            painter.line_segment([pos2(c.x + R, c.y - R), pos2(c.x + R, c.y + R - 2.0)], stroke);
+        }
+        Control::Close => {
+            painter.line_segment([pos2(c.x - R, c.y - R), pos2(c.x + R, c.y + R)], stroke);
+            painter.line_segment([pos2(c.x - R, c.y + R), pos2(c.x + R, c.y - R)], stroke);
+        }
+    }
 }
 
-/// Minimize, maximize and close, for a right-to-left layout.
+/// How much of the title bar's right end the window controls take: none on macOS, where the
+/// system's are at the left.
+pub fn window_controls_width() -> f32 {
+    if NATIVE_CONTROLS { 0.0 } else { CONTROL_WIDTH * 3.0 }
+}
+
+/// The window menu, for a right-click on the title bar: what the system's would have.
+pub fn window_menu(ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    let item = |ui: &mut Ui, glyph: &str, text: &str, enabled: bool, why: &str| ui.add_enabled(enabled, egui::Button::new((RichText::new(glyph), RichText::new(text))).frame_when_inactive(false).min_size(vec2(180.0, 0.0))).on_disabled_hover_text(why).clicked();
+    if item(ui, icon::ARROWS_IN_SIMPLE, "Restore", maximized, "The window isn't maximized.") {
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+        ui.close();
+    }
+    if item(ui, icon::MINUS, "Minimize", true, "") {
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        ui.close();
+    }
+    if item(ui, icon::ARROWS_OUT_SIMPLE, "Maximize", !maximized, "The window is maximized already.") {
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+        ui.close();
+    }
+    ui.separator();
+    if item(ui, icon::X, "Close", true, "") {
+        ctx.send_viewport_cmd(ViewportCommand::Close);
+        ui.close();
+    }
+}
+
+/// Minimize, maximize and close, for a right-to-left layout. macOS has its own.
 pub fn window_controls(ui: &mut Ui, p: &Palette) {
+    if NATIVE_CONTROLS {
+        return;
+    }
     let ctx = ui.ctx().clone();
     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
     ui.spacing_mut().item_spacing.x = 0.0;
@@ -357,8 +497,9 @@ pub fn window_controls(ui: &mut Ui, p: &Palette) {
 /// Prompts pass `compact`, which leaves only the close button.
 pub fn helper_title_bar(ui: &mut Ui, title: &str, compact: bool, p: &Palette) {
     drag_region(ui);
+    let inset = leading_inset(ui.ctx());
     ui.horizontal(|ui| {
-        ui.add_space(9.0);
+        ui.add_space(9.0 + inset);
         let (rect, _) = ui.allocate_exact_size(vec2(20.0, TITLE_BAR_HEIGHT), Sense::hover());
         paint_logo(ui.painter(), Rect::from_center_size(rect.center(), vec2(18.0, 18.0)));
         ui.add_space(4.0);
@@ -366,7 +507,7 @@ pub fn helper_title_bar(ui: &mut Ui, title: &str, compact: bool, p: &Palette) {
         let (rect, _) = ui.allocate_exact_size(vec2(0.0, TITLE_BAR_HEIGHT), Sense::hover());
         ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, title, prop(12.5), p.dim);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if compact {
+            if compact && !NATIVE_CONTROLS {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 if control(ui, Control::Close, "Close window", p).clicked() {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
@@ -400,13 +541,19 @@ pub fn resize_direction(pos: Pos2, size: egui::Vec2) -> Option<ResizeDirection> 
 /// Resizing from the window's edges, and its outline. Call this after everything
 /// else has been drawn, so the cursor it sets wins.
 pub fn window_edges(ctx: &egui::Context, p: &Palette) {
+    if NATIVE_CONTROLS {
+        return;
+    }
     let (maximized, fullscreen) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().fullscreen.unwrap_or(false)));
     if maximized || fullscreen {
         return;
     }
     let screen = ctx.content_rect();
     let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("window-outline"));
-    ctx.layer_painter(layer).rect_stroke(screen, 0.0, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    // Round like the corners Windows 11 clips the window to, and stronger while it's in front.
+    let corner = if is_windows_11() { CornerRadius::same(WIN11_CORNER) } else { CornerRadius::ZERO };
+    let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+    ctx.layer_painter(layer).rect_stroke(screen, corner, Stroke::new(1.0, if focused { p.button_border } else { p.border }), egui::StrokeKind::Inside);
 
     let (pos, pressed, busy) = ctx.input(|i| (i.pointer.latest_pos(), i.pointer.primary_pressed(), i.pointer.any_down() && !i.pointer.primary_pressed()));
     if busy {
@@ -563,15 +710,18 @@ fn rail_button(ui: &mut Ui, item: &RailItem, tint: Color32, active: bool, labels
     let name = crate::i18n::t(item.name);
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
     if ui.is_rect_visible(rect) {
-        let tile = rect.shrink2(vec2(5.0, 1.0));
+        let tile = rect.shrink2(vec2(6.0, 2.0));
+        let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.1);
+        let corner = CornerRadius::same(crate::theme::radius::ROW);
         if active {
-            ui.painter().rect_filled(tile, 5.0, tint.gamma_multiply(0.22));
-            let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 7.0), vec2(2.5, RAIL_ITEM - 14.0));
-            ui.painter().rect_filled(bar, 1.0, tint);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(tile, 5.0, p.hover);
+            ui.painter().rect_filled(tile, corner, crate::theme::over(tint.gamma_multiply(if p.dark { 0.18 } else { 0.14 }), p.bg));
+            let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 9.0), vec2(3.0, RAIL_ITEM - 18.0));
+            ui.painter().rect_filled(bar, CornerRadius { nw: 0, sw: 0, ne: 2, se: 2 }, tint);
+        } else if hover > 0.0 {
+            ui.painter().rect_filled(tile, corner, p.bar_hover().gamma_multiply(hover));
         }
-        let color = if active { tint } else if resp.hovered() { p.text } else { tint.gamma_multiply(0.8) };
+        // Quiet until it's the view in front, which takes its group's colour.
+        let color = if active { tint } else { crate::theme::mix_colors(p.dim, p.text, hover) };
         if labels {
             ui.painter().text(pos2(rect.left() + RAIL_WIDTH / 2.0, rect.center().y), Align2::CENTER_CENTER, item.glyph, prop(20.0), color);
             let ink = if active || resp.hovered() { p.text } else { p.dim };

@@ -439,6 +439,7 @@ impl SettingsView {
             g.row("Code font size", "", |ui| {
                 ui.add(egui::Slider::new(&mut s.editor_font_size, 9.0..=22.0).step_by(1.0).suffix(" pt"));
             });
+            g.switch(&mut s.system_font, "System interface font", "The system's own font for menus and labels, in place of the built-in Inter.");
             g.switch(&mut s.colorblind_diff, "Colour-blind safe diffs", "Blue and orange in place of green and red.");
             g.switch(&mut s.reduce_motion, "Reduce motion", "No spinning or animated transitions.");
             g.switch(&mut s.rail_full, "All views on the rail", "Every view gets an icon of its own, in place of the More list.");

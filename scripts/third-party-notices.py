@@ -41,6 +41,10 @@ egui, the interface toolkit, builds these fonts into the binary (crate `epaint_d
 - **Noto Emoji**, under the SIL Open Font License 1.1.
 - **emoji-icon-font**, under the MIT License.
 
+The interface text is set in **Inter** (Regular and SemiBold), copyright 2016 The Inter Project
+Authors (https://github.com/rsms/inter), under the SIL Open Font License 1.1. The license is in
+`crates/gitem/assets/fonts/inter/LICENSE.txt`.
+
 The interface icons are [Phosphor Icons](https://phosphoricons.com), under the MIT License, through
 the `egui-phosphor` crate. On Windows, macOS and Linux gitem also uses fonts already installed on the
 system, for symbols and non-Latin text; those aren't distributed with it.

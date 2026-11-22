@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Changed:
+
+- A new look. The window is a set of rounded cards on a darker background: the sidebar, each pane of views, and Details, with room between them. Each pane's tabs sit along the top of its card. Buttons, rows, menus and dialogs have rounder corners, menus and dialogs have soft shadows, and the status bar is quiet, on the window's background in place of the accent.
+- The Dark and Light themes are cooler slate tones, with a blue accent.
+- The interface is set in Inter, built in, so it looks the same on every system. Settings, Appearance, System interface font goes back to the system's own.
+- The title bar's repository tabs are rounded tiles, and the command palette's field shows its keys in a badge.
+- The rail's icons are quiet until a view is in front, and then take their group's colour. Toolbar icon buttons have no outline until the pointer is over them.
+- On Windows, the window controls are drawn as Windows 11's are, crisp at any display scale, dimmed while the window isn't in front, and the close button follows Windows 11's round corner. The window's outline is rounded to match.
+- On a Mac, the window keeps the system's own traffic lights, and macOS moves, resizes and outlines it as it does any other window. The title bar is drawn underneath, with room for the lights at its left, and the command palette's field says ⌘P.
+
+Added:
+
+- A right-click on the title bar's empty space opens the window menu: Restore, Minimize, Maximize and Close. Not on a Mac, where title bars don't have one.
+
 ## 0.8.5 (2026-11-21)
 
 Fixed:

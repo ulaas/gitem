@@ -210,10 +210,12 @@ pub fn keep_neighbours_in_view(ui: &Ui, rect: Rect, resp: &Response) {
 }
 
 fn row_look(ui: &mut Ui, rect: Rect, resp: Response, selected: bool, p: &Palette) -> (Rect, Response) {
+    // Rounded, as everything else that can be picked is.
+    let corner = crate::theme::radius::CONTROL;
     if selected {
-        ui.painter().rect_filled(rect, 0.0, p.selection);
+        ui.painter().rect_filled(rect, corner, p.selection);
     } else if resp.hovered() {
-        ui.painter().rect_filled(rect, 0.0, p.hover);
+        ui.painter().rect_filled(rect, corner, p.hover);
     }
     focus_ring(ui, &resp, p);
     keep_neighbours_in_view(ui, rect, &resp);
@@ -224,7 +226,7 @@ fn row_look(ui: &mut Ui, rect: Rect, resp: Response, selected: bool, p: &Palette
 /// can't be taken for selected or switched on.
 pub fn focus_ring(ui: &Ui, resp: &Response, p: &Palette) {
     if resp.has_focus() {
-        ui.painter().rect_stroke(resp.rect.shrink(1.0), 2.0, Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(resp.rect.shrink(1.0), crate::theme::radius::CONTROL, Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
     }
 }
 

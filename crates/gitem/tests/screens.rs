@@ -1087,6 +1087,11 @@ fn build_demo(git: &GitExe, root: &Path) -> Demo {
 
 fn site_harness(git: &GitExe, root: &Path, tweak: impl FnOnce(&mut Settings)) -> Harness<'static, GitemApp> {
     let mut settings = Settings { details_on_open: true, theme: ThemeChoice::Black, accent: "Amber".into(), ..Default::default() };
+    // To see the pictures in another theme, with its own accent: SITE_SHOTS_THEME=Light.
+    if let Ok(name) = std::env::var("SITE_SHOTS_THEME") {
+        settings.theme = ThemeChoice::ALL.into_iter().find(|t| t.name() == name).expect("SITE_SHOTS_THEME names a theme");
+        settings.accent.clear();
+    }
     tweak(&mut settings);
     let ctx = egui::Context::default();
     let mut app = GitemApp::with_settings(&ctx, settings);

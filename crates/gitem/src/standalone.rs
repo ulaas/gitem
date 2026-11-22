@@ -36,6 +36,8 @@ pub struct HelperApp {
     read_status: bool,
     pal: Palette,
     themed: bool,
+    /// Whether the style has been applied since the heavier face for headings arrived.
+    headings: bool,
     error: Option<String>,
     /// Exit code and any text for stdout, once the window has an answer.
     pub result: Option<(i32, Option<String>)>,
@@ -96,7 +98,7 @@ impl HelperApp {
         let settings = Settings::load();
         let pal = Palette::for_settings(settings.theme, &settings.accent);
         let shot = test_switch("GITEM_SHOT").map(|p| (PathBuf::from(p), std::time::Instant::now(), false));
-        Self { mode, repo: repo_here(), data: RepoData::default(), settings, read_status: false, pal, themed: false, error: None, result: None, shot, accept: test_switch("GITEM_TEST_ACCEPT").map(|v| (v.to_string_lossy().into_owned(), 0)), #[cfg(windows)] styled_window: false }
+        Self { mode, repo: repo_here(), data: RepoData::default(), settings, read_status: false, pal, themed: false, headings: false, error: None, result: None, shot, accept: test_switch("GITEM_TEST_ACCEPT").map(|v| (v.to_string_lossy().into_owned(), 0)), #[cfg(windows)] styled_window: false }
     }
 
     fn auto_accept(&mut self, ctx: &egui::Context) {
@@ -210,7 +212,11 @@ impl HelperApp {
         let ctx = ui.ctx().clone();
         if !self.themed {
             self.themed = true;
-            theme::install_fonts(&ctx);
+            theme::install_fonts_with(&ctx, self.settings.system_font);
+            theme::apply(&ctx, &self.pal, self.settings.ui_scale, self.settings.reduce_motion);
+        } else if !self.headings && theme::has_semibold(&ctx) {
+            // The fonts arrive a frame after they're set, and headings take the heavier face then.
+            self.headings = true;
             theme::apply(&ctx, &self.pal, self.settings.ui_scale, self.settings.reduce_motion);
         }
         self.auto_accept(&ctx);
