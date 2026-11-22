@@ -153,6 +153,8 @@ pub struct Settings {
     pub editor_autosave: bool,
     /// Files edited lately, newest first, by repository.
     pub editor_recent: std::collections::HashMap<String, Vec<String>>,
+    /// The branch the sidebar counts local branches against, as a full ref, by repository.
+    pub branch_compare: std::collections::HashMap<String, String>,
     /// Dock layouts saved under a name, for any repository.
     pub dock_layouts: std::collections::BTreeMap<String, String>,
     pub recent_repos: Vec<String>,
@@ -307,6 +309,7 @@ impl Settings {
             session_tabs: c.session_tabs,
             session_layouts: c.session_layouts,
             editor_recent: c.editor_recent,
+            branch_compare: c.branch_compare,
             dock_layouts: c.dock_layouts,
             unknown: c.unknown,
             ..Self::default()
@@ -341,6 +344,7 @@ impl Default for Settings {
             editor_trim_on_save: false,
             editor_autosave: false,
             editor_recent: std::collections::HashMap::new(),
+            branch_compare: std::collections::HashMap::new(),
             dock_layouts: std::collections::BTreeMap::new(),
             recent_repos: Vec::new(),
             open_repos: Vec::new(),
@@ -484,6 +488,7 @@ impl Settings {
         new.session_tabs = std::mem::take(&mut self.session_tabs);
         new.session_layouts = std::mem::take(&mut self.session_layouts);
         new.editor_recent = std::mem::take(&mut self.editor_recent);
+        new.branch_compare = std::mem::take(&mut self.branch_compare);
         new.git_path = std::mem::take(&mut self.git_path);
         *self = new;
         Ok(())

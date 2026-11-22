@@ -263,6 +263,61 @@ fn every_view_renders_on_an_ordinary_repo() {
     visit_all(&mut h);
 }
 
+/// The app as `harness` makes it, with these settings.
+fn harness_with<'a>(f: &Fx, settings: gitem_core::settings::Settings) -> Harness<'a, GitemApp> {
+    let ctx = egui::Context::default();
+    let mut app = GitemApp::with_settings(&ctx, settings);
+    app.git = Ok(f.git.clone());
+    let root = f.root.clone();
+    let mut opened = false;
+    let builder: HarnessBuilder<GitemApp> = Harness::builder().with_size(vec2(1500.0, 940.0)).with_max_steps(5);
+    builder.build_ui_state(
+        move |ui, app: &mut GitemApp| {
+            if !opened {
+                opened = true;
+                let c = ui.ctx().clone();
+                app.open_repo(&c, &root, false);
+            }
+            app.frame(ui);
+        },
+        app,
+    )
+}
+
+#[test]
+fn the_branch_compared_with_is_remembered_for_the_repository() {
+    let f = Fx::new();
+    sample_history(&f);
+    f.git(&["branch", "side", "HEAD~1"]);
+    let mut h = harness(&f);
+    settle(&mut h);
+    pump_for_label(&mut h, "Compare branches with");
+    let compare = || egui_kittest::kittest::by().role(egui::accesskit::Role::ComboBox).label("Compare branches with");
+    assert_eq!(h.query(compare()).unwrap().accesskit_node().value().as_deref(), Some("Nothing"));
+    h.query(compare()).unwrap().click();
+    h.step();
+    h.step();
+    h.get_all_by_label("side").last().unwrap().click();
+    pump(&mut h, |a| !a.settings.branch_compare.is_empty(), "the choice saved");
+    assert_eq!(h.state().settings.branch_compare.values().collect::<Vec<_>>(), vec!["refs/heads/side"]);
+
+    // Next time the repository opens, it's still picked.
+    let settings = h.state().settings.clone();
+    drop(h);
+    let mut h = harness_with(&f, settings);
+    settle(&mut h);
+    pump_for_label(&mut h, "Compare branches with");
+    assert_eq!(h.query(compare()).unwrap().accesskit_node().value().as_deref(), Some("side"));
+
+    // Back to Nothing forgets it.
+    h.query(compare()).unwrap().click();
+    h.step();
+    h.step();
+    h.get_all_by_label("Nothing").last().unwrap().click();
+    pump(&mut h, |a| a.settings.branch_compare.is_empty(), "the choice forgotten");
+    no_errors(&h);
+}
+
 #[test]
 fn every_view_renders_on_an_empty_repo() {
     let f = Fx::new();

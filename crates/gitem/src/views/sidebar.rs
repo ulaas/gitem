@@ -45,6 +45,8 @@ pub struct Sidebar {
     /// The branch every local one is counted against, by name and whether it's a remote one.
     /// None at first: counting runs git, and most of the time nobody's asking.
     compare: Option<(String, bool)>,
+    /// Whether `compare` has been read from the settings, once for this repository.
+    compare_read: bool,
     /// What `compare_counts` was counted against: the commit, and `refs_gen` then.
     compare_key: Option<(String, u64)>,
     /// Each local branch's (ahead, behind) of the compared one.
@@ -149,7 +151,7 @@ struct Lists {
 
 impl Default for Sidebar {
     fn default() -> Self {
-        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), searching: false, find: crate::views::find::FindView::compact(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None, clicked: None, compare: None, compare_key: None, compare_counts: Task::default() }
+        Self { picked: Default::default(), closed_folders: Default::default(), filter: String::new(), commits: Task::default(), commits_gen: None, files: Default::default(), searching: false, find: crate::views::find::FindView::compact(), contributors: Task::default(), contributors_gen: None, commits_limit: COMMITS_PAGE, contributors_shown: CONTRIBUTORS_PAGE, tracking: HashMap::new(), expanded: HashMap::new(), expanded_gen: 0, lists: None, clicked: None, compare: None, compare_read: false, compare_key: None, compare_counts: Task::default() }
     }
 }
 
@@ -351,6 +353,10 @@ impl Sidebar {
     fn compare_row(&mut self, ui: &mut Ui, cx: &mut Cx, refs: &Refs) {
         let p = cx.pal.clone();
         let is = |b: &Branch, c: &(String, bool)| b.name == c.0 && b.is_remote == c.1;
+        let key = cx.repo.root.to_string_lossy().replace('\\', "/");
+        if !std::mem::replace(&mut self.compare_read, true) {
+            self.compare = cx.settings.branch_compare.get(&key).and_then(|r| compare_from_ref(r));
+        }
         // One that's been deleted isn't compared with any more.
         let target = self.compare.as_ref().and_then(|c| refs.branches.iter().find(|b| is(b, c)));
         if target.is_none() {
@@ -377,19 +383,29 @@ impl Sidebar {
             combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Compare branches with"));
             combo.response.on_hover_text("Count each local branch's commits against this one: ↑ what it has that this hasn't, ↓ what this has that it hasn't");
             if let Some(c) = pick {
+                let stored = c.as_ref().map(compare_to_ref);
+                let repo = key.clone();
+                cx.out.push(crate::action::Action::Settings(Box::new(move |s| match stored {
+                    Some(r) => {
+                        s.branch_compare.insert(repo, r);
+                    }
+                    None => {
+                        s.branch_compare.remove(&repo);
+                    }
+                })));
                 self.compare = c;
             }
         });
-        let key = sha.map(|s| (s, cx.data.refs_gen));
-        if key != self.compare_key {
+        let counted = sha.map(|s| (s, cx.data.refs_gen));
+        if counted != self.compare_key {
             // Another branch: the old counts would be wrong for it. The same one, moved or
             // refreshed: they stay until the new ones come.
-            if key.as_ref().map(|k| &k.0) != self.compare_key.as_ref().map(|k| &k.0) {
+            if counted.as_ref().map(|k| &k.0) != self.compare_key.as_ref().map(|k| &k.0) {
                 self.compare_counts.stop();
                 self.compare_counts.value = None;
             }
-            self.compare_key = key.clone();
-            if let Some((sha, _)) = key {
+            self.compare_key = counted.clone();
+            if let Some((sha, _)) = counted {
                 let r = cx.repo.clone();
                 self.compare_counts.spawn(ui.ctx(), move || r.ahead_behind_each(&sha).map(|v| v.into_iter().collect::<HashMap<_, _>>()));
             }
@@ -801,6 +817,20 @@ impl Sidebar {
     }
 }
 
+/// The compared branch as the settings keep it: its full ref, so a local `x` and a remote
+/// branch called `x` stay apart.
+fn compare_to_ref(c: &(String, bool)) -> String {
+    format!("{}{}", if c.1 { "refs/remotes/" } else { "refs/heads/" }, c.0)
+}
+
+fn compare_from_ref(r: &str) -> Option<(String, bool)> {
+    let (name, remote) = match r.strip_prefix("refs/heads/") {
+        Some(n) => (n, false),
+        None => (r.strip_prefix("refs/remotes/")?, true),
+    };
+    (!name.is_empty()).then(|| (name.to_string(), remote))
+}
+
 /// "3 commits ahead of main, 1 behind", for a branch counted against another.
 fn ahead_behind_words(ahead: u32, behind: u32, other: &str) -> String {
     let commits = |n: u32| if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
@@ -923,6 +953,15 @@ fn section(ui: &mut Ui, salt: &str, glyph: &str, tint: egui::Color32, title: &st
 #[cfg(test)]
 mod tree_tests {
     use super::*;
+
+    #[test]
+    fn the_compared_branch_keeps_whether_its_remote() {
+        for c in [("main".to_string(), false), ("origin/main".to_string(), true), ("team/x".to_string(), false)] {
+            assert_eq!(compare_from_ref(&compare_to_ref(&c)), Some(c.clone()));
+        }
+        assert_eq!(compare_from_ref("refs/tags/v1"), None);
+        assert_eq!(compare_from_ref("refs/heads/"), None);
+    }
 
     #[test]
     fn counts_against_another_branch_in_words() {
