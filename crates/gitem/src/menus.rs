@@ -227,7 +227,7 @@ pub fn undo_commit_action(repo: &gitem_core::Repo, pushed: bool, confirming: boo
     let repo = repo.clone();
     Action::Later(Box::new(move || {
         if repo.resolve("HEAD~1").is_err() {
-            return Ok(Later::Toast("This is the first commit on this branch, so there's nothing to go back to.".to_string()));
+            return Ok(Later::note("This is the first commit on this branch, so there's nothing to go back to."));
         }
         Ok(if pushed {
             Later::Confirm { title: "Undo a pushed commit".to_string(), body: "This commit is already on the remote. Undoing it here means the next push has to overwrite it. Your changes stay in the working tree.".to_string(), label: "Undo commit".to_string(), op: ops::undo_commit() }
@@ -498,7 +498,7 @@ pub fn stash_menu(ui: &mut Ui, cx: &mut Cx, s: &Stash) {
             let third = format!("{sha}^3");
             Ok(match repo.resolve(&third) {
                 Ok(found) => crate::action::Later::Diff(DiffSource::Commit(found), None),
-                Err(_) => crate::action::Later::Toast("This stash has no untracked files.".to_string()),
+                Err(_) => crate::action::Later::note("This stash has no untracked files."),
             })
         })));
     }
@@ -566,7 +566,7 @@ pub fn worktree_menu(ui: &mut Ui, cx: &mut Cx, w: &Worktree) {
     if !w.is_current && item(ui, "Copy my changes here") {
         let (repo, path) = (cx.repo.clone(), path.clone());
         cx.out.push(Action::Later(Box::new(move || match repo.patch_bytes(&DiffSource::WorkingVsHead) {
-            Ok(p) if p.iter().all(u8::is_ascii_whitespace) => Ok(crate::action::Later::Toast("There are no changes to copy.".to_string())),
+            Ok(p) if p.iter().all(u8::is_ascii_whitespace) => Ok(crate::action::Later::note("There are no changes to copy.")),
             Ok(p) => Ok(crate::action::Later::Run(ops::apply_patch_in(&path, &p))),
             Err(e) => Err(e.to_string()),
         })));

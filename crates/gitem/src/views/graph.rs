@@ -656,7 +656,7 @@ impl GraphView {
                 self.last_clicked = Some(sha.clone());
                 cx.inspect(&sha);
             }
-            None => cx.toast(format!("{name} isn't among the commits showing. A filter may be hiding it.")),
+            None => cx.note(format!("{name} isn't among the commits showing. A filter may be hiding it.")),
         }
     }
 

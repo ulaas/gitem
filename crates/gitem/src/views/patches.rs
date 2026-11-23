@@ -83,7 +83,7 @@ impl PatchesView {
                     }
                 }
                 cx.copy(url);
-                cx.toast("Gist created; link copied");
+                cx.done("Gist created; link copied");
             }
             if let Some(e) = self.share.error.take() {
                 cx.error(e);

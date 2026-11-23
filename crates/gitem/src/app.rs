@@ -14,7 +14,7 @@ use gitem_core::ops::{self, GitOp};
 use gitem_core::settings::Settings;
 use gitem_core::{GitExe, Repo};
 
-use crate::action::{Action, Cx};
+use crate::action::{Action, Cx, ToastKind};
 use crate::data::{RepoData, RepoWatcher};
 use crate::forms::{self, FormDialog};
 use crate::palette::PaletteState;
@@ -472,7 +472,7 @@ impl RepoTab {
                 match r.rx.try_recv() {
                     Ok(OpMsg::Line(l)) => r.last_line = l,
                     Ok(OpMsg::Undo(entry)) => r.undo = Some(*entry),
-                    Ok(OpMsg::NoUndo(why)) => out.push(Action::Toast(why)),
+                    Ok(OpMsg::NoUndo(why)) => out.push(Action::note(why)),
                     Ok(OpMsg::Done(res)) => {
                         done = Some(res);
                         break;
@@ -514,7 +514,7 @@ impl RepoTab {
                         }
                         out.extend(then);
                         if !note.is_empty() || self.queue.is_empty() {
-                            out.push(Action::Toast(ops::done_message(&title, &note)));
+                            out.push(Action::done(ops::done_message(&title, &note)));
                         }
                     }
                     Err(e) => {
@@ -532,7 +532,7 @@ impl RepoTab {
                             out.push(Action::OfferLockRemoval(self.repo.root.clone(), format!("{title} failed:\n{e}{not_run}")));
                         } else if stopped_midway && e.contains("CONFLICT") {
                             // Not a failure: the banner has what to do next.
-                            out.push(Action::Toast(format!("{title} stopped at a conflict. Resolve it, then continue.")));
+                            out.push(Action::warn(format!("{title} stopped at a conflict. Resolve it, then continue.")));
                             if dropped > 0 {
                                 out.push(Action::Error(format!("{title} stopped at a conflict.{not_run}")));
                             }
@@ -1118,7 +1118,7 @@ pub struct GitemApp {
     form_repo: Option<PathBuf>,
     confirm: Option<Confirm>,
     errors: Vec<String>,
-    toasts: Vec<(String, Instant)>,
+    toasts: Vec<(ToastKind, String, Instant)>,
     palette: Option<PaletteState>,
     global_queue: VecDeque<(GitOp, Option<PathBuf>)>,
     global_running: Option<Running>,
@@ -1492,7 +1492,7 @@ impl GitemApp {
             }
             self.lock_prompt = None;
             match std::fs::remove_file(&lock) {
-                Ok(()) => self.toasts.push(("Lock removed. Try that again.".to_string(), Instant::now())),
+                Ok(()) => self.toasts.push((ToastKind::Done, "Lock removed. Try that again.".to_string(), Instant::now())),
                 Err(e) => self.errors.push(format!("Could not remove {}: {e}", lock.display())),
             }
         }
@@ -1908,7 +1908,7 @@ impl GitemApp {
                 self.dirty_answered = true;
                 self.apply_action(ctx, g.action);
             } else {
-                self.toasts.push(("Not run: a file couldn't be saved.".to_string(), Instant::now()));
+                self.toasts.push((ToastKind::Warn, "Not run: a file couldn't be saved.".to_string(), Instant::now()));
             }
         } else if go {
             let Some(g) = self.dirty_guard.take() else { return };
@@ -2079,12 +2079,12 @@ impl GitemApp {
             Action::OpenFile(path) => open_file(&path, &self.settings.default_external_editor, &mut self.errors),
             // Dialogs don't block the window, so something behind one can ask for another.
             // A question already showing stays, and so do values typed into a form.
-            Action::Confirm { .. } if self.confirm.is_some() => self.toasts.push(("Answer the open question first.".to_string(), Instant::now())),
+            Action::Confirm { .. } if self.confirm.is_some() => self.toasts.push((ToastKind::Warn, "Answer the open question first.".to_string(), Instant::now())),
             Action::Confirm { title, body, label, op } => {
                 let repo = self.repos.get(self.active).map(|r| r.repo.root.clone());
                 self.confirm = Some(Confirm { title, body, label, op, repo });
             }
-            Action::Form(_) if self.form.as_ref().is_some_and(FormDialog::touched) => self.toasts.push(("Finish or cancel the open dialog first.".to_string(), Instant::now())),
+            Action::Form(_) if self.form.as_ref().is_some_and(FormDialog::touched) => self.toasts.push((ToastKind::Warn, "Finish or cancel the open dialog first.".to_string(), Instant::now())),
             Action::Form(f) => {
                 self.form_repo = self.repos.get(self.active).map(|r| r.repo.root.clone());
                 self.form = Some(f);
@@ -2125,7 +2125,7 @@ impl GitemApp {
                 } else {
                     match without_repo(t) {
                         Some(t) => self.no_repo_tab = Some(t),
-                        None => self.toasts.push(("That needs a repository. Open or clone one first.".to_string(), Instant::now())),
+                        None => self.toasts.push((ToastKind::Warn, "That needs a repository. Open or clone one first.".to_string(), Instant::now())),
                     }
                 }
             }
@@ -2164,9 +2164,9 @@ impl GitemApp {
             }
             Action::Copy(s) => {
                 ctx.copy_text(s);
-                self.toasts.push(("Copied".to_string(), Instant::now()));
+                self.toasts.push((ToastKind::Done, "Copied".to_string(), Instant::now()));
             }
-            Action::Toast(s) => self.toasts.push((s, Instant::now())),
+            Action::Toast(kind, s) => self.toasts.push((kind, s, Instant::now())),
             Action::Error(e) => self.errors.push(e),
             Action::OpenRepo(p) => self.open_in_background(ctx, p, None),
             Action::DeepLink(d) => {
@@ -2213,7 +2213,7 @@ impl GitemApp {
                 if let Some(r) = self.repos.get_mut(self.active) {
                     let toast = r.dock_op(&key, op, &mut self.close_guard);
                     if let Some(t) = toast {
-                        self.toasts.push((t, Instant::now()));
+                        self.toasts.push((ToastKind::Warn, t, Instant::now()));
                     }
                 }
             }
@@ -2241,7 +2241,7 @@ impl GitemApp {
                                 self.settings_dirty = true;
                             }
                         }
-                        None => self.toasts.push(("That layout can't be read any more.".to_string(), Instant::now())),
+                        None => self.toasts.push((ToastKind::Warn, "That layout can't be read any more.".to_string(), Instant::now())),
                     }
                 }
             }
@@ -2274,7 +2274,7 @@ impl GitemApp {
                     }
                 }
                 if !found {
-                    self.toasts.push(("No file is open in the editor.".to_string(), Instant::now()));
+                    self.toasts.push((ToastKind::Note, "No file is open in the editor.".to_string(), Instant::now()));
                 }
                 for a in out {
                     self.apply_action(ctx, a);
@@ -2321,7 +2321,7 @@ impl GitemApp {
                 }
             }
             Action::ForgeChanged(message) => {
-                self.toasts.push((message, Instant::now()));
+                self.toasts.push((ToastKind::Done, message, Instant::now()));
                 if let Some(r) = self.repos.get_mut(self.active) {
                     r.data.refresh(ctx, &r.repo);
                     r.data.forge_gen += 1;
@@ -2385,7 +2385,7 @@ impl GitemApp {
                 let found = self.repos.get(self.active).map(|r| (r.repo.clone(), r.undo_entry.clone()));
                 match found {
                     Some((repo, Some(entry))) => self.apply_action(ctx, undo_action(&repo, entry, confirming)),
-                    Some((_, None)) => self.toasts.push(("There's nothing to undo right now. The reflog has older states.".to_string(), Instant::now())),
+                    Some((_, None)) => self.toasts.push((ToastKind::Note, "There's nothing to undo right now. The reflog has older states.".to_string(), Instant::now())),
                     None => {}
                 }
             }
@@ -3245,27 +3245,87 @@ impl GitemApp {
             }
         }
         // Toasts
-        self.toasts.retain(|(_, t)| t.elapsed() < Duration::from_secs(4));
+        // Rounded cards stacked against the right edge. Each fades in, stays, and fades out;
+        // under the pointer they all stay, fully shown. Screenshots draw them settled.
+        const LIFE: Duration = Duration::from_secs(4);
+        const FADE_IN: f32 = 0.15;
+        const FADE_OUT: f32 = 0.35;
+        self.toasts.retain(|(_, _, t)| t.elapsed() < LIFE);
+        let mut toasts_height = 0.0;
         if !self.toasts.is_empty() {
-            ctx.request_repaint_after(Duration::from_millis(500));
-            let shown = egui::Area::new("toasts".into()).anchor(Align2::RIGHT_BOTTOM, [-14.0, -34.0]).order(egui::Order::Foreground).show(ctx, |ui| {
-                for (t, _) in &self.toasts {
-                    egui::Frame::new().fill(p.panel2).stroke(egui::Stroke::new(1.0, p.border)).inner_margin(egui::Margin::symmetric(10, 5)).corner_radius(4.0).show(ui, |ui| {
-                        ui.add(egui::Label::new(t.as_str()).selectable(true));
+            const ICON: f32 = 16.0;
+            const CLOSE: f32 = 18.0;
+            const SPACE: f32 = 10.0;
+            let margin = egui::Margin { left: 12, right: 8, top: 9, bottom: 9 };
+            let still = self.shot.is_some();
+            let (mut closed, mut fading, mut held) = (None, false, false);
+            // Each card is its own area, measured first so it's as wide as what it says and sits
+            // against the right edge. One area around them all took clicks meant for what's beside
+            // the narrower ones.
+            let mut bottom = ctx.content_rect().right_bottom() - egui::vec2(14.0, 34.0);
+            for (i, (kind, text, born)) in self.toasts.iter().enumerate().rev() {
+                let body = egui::TextStyle::Body.resolve(&ctx.global_style());
+                let galley = ctx.fonts_mut(|f| f.layout(text.clone(), body, p.text, 340.0));
+                let inner = egui::vec2((ICON + SPACE + galley.size().x + SPACE + CLOSE).ceil(), galley.size().y.max(CLOSE).ceil());
+                let outer = inner + margin.sum() + egui::vec2(2.0, 2.0);
+                let age = born.elapsed().as_secs_f32();
+                let opacity = if still { 1.0 } else { (age / FADE_IN).min((LIFE.as_secs_f32() - age) / FADE_OUT).clamp(0.0, 1.0) };
+                fading |= opacity < 1.0;
+                // The icon says which kind, not the colour alone. A warning's edge is tinted too.
+                let (glyph, tint, edge) = match kind {
+                    ToastKind::Done => (egui_phosphor::regular::CHECK_CIRCLE, p.good, p.button_border),
+                    ToastKind::Warn => (egui_phosphor::regular::WARNING, p.warn, crate::theme::over(p.warn.gamma_multiply(0.45), p.panel)),
+                    ToastKind::Note => (egui_phosphor::regular::INFO, p.accent, p.button_border),
+                };
+                let frame = egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, edge)).corner_radius(theme::radius::MODAL).shadow(p.popup_shadow()).inner_margin(margin);
+                let shown = egui::Area::new(egui::Id::new("toast").with(i)).fixed_pos(bottom - outer).order(egui::Order::Foreground).show(ctx, |ui| {
+                    ui.multiply_opacity(opacity);
+                    frame.show(ui, |ui| {
+                        ui.set_width(inner.x);
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE;
+                            let (icon, _) = ui.allocate_exact_size(egui::vec2(ICON, galley.size().y.min(CLOSE)), egui::Sense::hover());
+                            ui.painter().text(icon.center(), Align2::CENTER_CENTER, glyph, crate::widgets::prop(15.0), tint);
+                            ui.add(egui::Label::new(galley.clone()).selectable(true));
+                            // To dismiss it sooner.
+                            let (rect, x) = ui.allocate_exact_size(egui::vec2(CLOSE, CLOSE), egui::Sense::click());
+                            x.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Close notification"));
+                            let x = x.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Close notification");
+                            if x.hovered() {
+                                ui.painter().circle_filled(rect.center(), 9.0, p.hover);
+                            }
+                            let color = if x.hovered() { p.text } else { p.faint };
+                            ui.painter().text(rect.center(), Align2::CENTER_CENTER, egui_phosphor::regular::X, crate::widgets::prop(11.5), color);
+                            if x.clicked() {
+                                closed = Some(i);
+                            }
+                        });
                     });
-                }
-            });
-            // Being read, or copied from.
-            if ctx.input(|i| i.pointer.hover_pos()).is_some_and(|at| shown.response.rect.contains(at)) {
+                });
+                held |= shown.response.contains_pointer();
+                bottom.y -= shown.response.rect.height().max(outer.y) + 8.0;
+            }
+            toasts_height = ctx.content_rect().bottom() - 34.0 - bottom.y;
+            if let Some(i) = closed {
+                self.toasts.remove(i);
+            }
+            if fading {
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            // Being read, or copied from. Set back to just past fading in, so it doesn't fade in again.
+            if held {
                 let now = Instant::now();
-                self.toasts.iter_mut().for_each(|(_, t)| *t = now);
+                let settled = now.checked_sub(Duration::from_secs_f32(FADE_IN)).unwrap_or(now);
+                self.toasts.iter_mut().for_each(|(_, _, t)| *t = settled);
             }
         }
         // The offer of an update, which stays until it's answered. About has the same.
         if self.update_notice && self.update_found.is_some() && !self.about_open && self.shot.is_none() {
             let mut out = Vec::new();
-            egui::Area::new("update-notice".into()).anchor(Align2::RIGHT_BOTTOM, [-14.0, -34.0 - 34.0 * self.toasts.len() as f32]).order(egui::Order::Foreground).show(ctx, |ui| {
-                egui::Frame::new().fill(p.panel2).stroke(egui::Stroke::new(1.0, p.accent)).inner_margin(egui::Margin::symmetric(10, 7)).corner_radius(4.0).show(ui, |ui| {
+            egui::Area::new("update-notice".into()).anchor(Align2::RIGHT_BOTTOM, [-14.0, -34.0 - toasts_height]).order(egui::Order::Foreground).show(ctx, |ui| {
+                egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.accent)).shadow(p.popup_shadow()).inner_margin(egui::Margin::symmetric(12, 9)).corner_radius(theme::radius::MODAL).show(ui, |ui| {
                     crate::update_view::offer(ui, &self.update_status, &p, &mut out, true);
                 });
             });
@@ -3569,7 +3629,7 @@ impl GitemApp {
                 self.global_running = None;
                 match res {
                     Ok(_) => {
-                        out.push(Action::Toast(ops::done_message(&title, "")));
+                        out.push(Action::done(ops::done_message(&title, "")));
                         if let Some(p) = open {
                             // Only a clone. `git init` can run in a folder that's already a repository.
                             if let (true, Ok(git)) = (is_clone, &self.git) {
@@ -3916,7 +3976,7 @@ impl GitemApp {
                     return true;
                 }
                 if let Some(m) = t.value.take().filter(|m| !m.is_empty()) {
-                    out.push(Action::Toast(m));
+                    out.push(Action::done(m));
                 }
                 if let Some(e) = t.error.take() {
                     out.push(Action::Error(e));

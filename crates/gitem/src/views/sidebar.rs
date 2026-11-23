@@ -659,7 +659,7 @@ impl Sidebar {
                     if ui.button("Copy URL").clicked() {
                         cx.copy(r.fetch_url.clone());
                         if gitem_core::util::mask_url_credentials(&r.fetch_url) != r.fetch_url {
-                            cx.toast("Copied, with the password or token in this URL.");
+                            cx.warn("Copied, with the password or token in this URL.");
                         }
                         ui.close();
                     }

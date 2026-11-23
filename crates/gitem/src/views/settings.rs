@@ -882,7 +882,7 @@ impl SettingsView {
                     cx.form(FormDialog::new(format!("{} API key", provider.label()), "Save").password("key", "Key").on_submit(move |v| {
                         let k = v.opt("key").ok_or("A key is required.")?;
                         cred::set_ai_key(name, &k).map_err(|e| e.to_string())?;
-                        Ok(vec![Action::Toast("API key saved".into())])
+                        Ok(vec![Action::done("API key saved")])
                     }));
                 }
                 if has && ui.button("Remove").clicked() {
@@ -960,13 +960,13 @@ impl SettingsView {
                 g.row("Open in gitem", "Adds an entry to folders' right-click menu in Explorer, for you only.", |ui| {
                     if ui.button("Add").clicked() {
                         match run_reg(&explorer_entries(&exe)) {
-                            Ok(()) => cx.toast("Folders now have Open in gitem"),
+                            Ok(()) => cx.done("Folders now have Open in gitem"),
                             Err(e) => cx.error(format!("Could not add it: {e}")),
                         }
                     }
                     if ui.button("Remove").clicked() {
                         match run_reg(&removal_entries(false)) {
-                            Ok(()) => cx.toast("Open in gitem is gone from Explorer"),
+                            Ok(()) => cx.done("Open in gitem is gone from Explorer"),
                             Err(e) => cx.error(format!("Could not remove it: {e}")),
                         }
                     }
@@ -976,13 +976,13 @@ impl SettingsView {
                 g.row("Link handler", "Makes \"Copy gitem link\" URLs open here. Adds a per-user registry entry.", |ui| {
                     if ui.button("Unregister").clicked() {
                         match run_reg(&removal_entries(true)) {
-                            Ok(()) => cx.toast("gitem:// links no longer open here"),
+                            Ok(()) => cx.done("gitem:// links no longer open here"),
                             Err(e) => cx.error(format!("Could not remove it: {e}")),
                         }
                     }
                     if ui.button("Register").clicked() {
                         match register_links(&exe) {
-                            Ok(()) => cx.toast("gitem:// links now open here"),
+                            Ok(()) => cx.done("gitem:// links now open here"),
                             Err(e) => cx.error(e),
                         }
                     }
@@ -996,7 +996,7 @@ fn secret_form(title: &str, host: &'static str) -> FormDialog {
     FormDialog::new(title, "Save").password("key", "Value").on_submit(move |v| {
         let k = v.opt("key").ok_or("A value is required.")?;
         cred::set_forge_token(host, "", &k).map_err(|e| e.to_string())?;
-        Ok(vec![Action::Toast("Saved".into())])
+        Ok(vec![Action::done("Saved")])
     })
 }
 
@@ -1005,7 +1005,7 @@ pub fn export_settings_form(current: Settings) -> crate::forms::FormDialog {
     crate::forms::FormDialog::new("Export settings", "Export").new_file("path", "Save as", "").on_submit(move |v| {
         let path = v.opt("path").ok_or("Choose where to save it.")?;
         current.export_to(std::path::Path::new(&path)).map_err(|e| format!("Could not write {path}: {e}"))?;
-        Ok(vec![crate::action::Action::Toast(format!("Settings saved to {path}"))])
+        Ok(vec![crate::action::Action::done(format!("Settings saved to {path}"))])
     })
 }
 
@@ -1018,7 +1018,7 @@ pub fn import_settings_form() -> crate::forms::FormDialog {
             crate::action::Action::Settings(Box::new(move |s| {
                 let _ = s.import_from(std::path::Path::new(&path));
             })),
-            crate::action::Action::Toast("Settings imported".to_string()),
+            crate::action::Action::done("Settings imported"),
         ])
     })
 }

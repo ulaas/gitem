@@ -129,7 +129,7 @@ impl ReviewView {
             saved.reviewed.retain(|f| saved.reviewed_blobs.get(f).is_none_or(|b| blobs.get(f) == Some(b)));
             saved.reviewed_blobs.retain(|f, _| saved.reviewed.contains(f));
             if saved.reviewed.len() != before {
-                cx.toast("A file changed since you marked it reviewed, so it's unmarked.");
+                cx.note("A file changed since you marked it reviewed, so it's unmarked.");
                 self.save(cx);
             }
         }

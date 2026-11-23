@@ -191,7 +191,7 @@ pub fn token_form(repo: &RemoteRepo) -> FormDialog {
     f.password("token", "Token").on_submit(move |v| {
         let t = v.opt("token").ok_or("A token is required.")?;
         cred::set_forge_token(&host, &v.text("user"), &t).map_err(|e| e.to_string())?;
-        Ok(vec![Action::Toast(format!("Saved token for {host}")), Action::Refresh])
+        Ok(vec![Action::done(format!("Saved token for {host}")), Action::Refresh])
     })
 }
 
@@ -337,7 +337,7 @@ impl LaunchpadView {
         self.issues.poll();
         if self.action.poll() {
             if let Some(m) = self.action.value.take() {
-                cx.toast(m);
+                cx.done(m);
                 self.refresh(&ctx, cx);
             }
             if let Some(e) = self.action.error.take() {
@@ -804,7 +804,7 @@ impl LaunchpadView {
         }
         if self.create.poll() {
             if let Some(url) = self.create.value.take() {
-                cx.toast(format!("Created {url}"));
+                cx.done(format!("Created {url}"));
                 cx.url(url);
                 self.title.clear();
                 self.body.clear();

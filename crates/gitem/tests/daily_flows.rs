@@ -805,10 +805,10 @@ fn run_then_goes_on_only_if_it_worked() {
     let f = Fx::new();
     let mut h = f.harness(|_| {});
     let ctx = h.ctx.clone();
-    h.state_mut().apply_action(&ctx, Action::RunThen(gitem_core::ops::branch_create("made", None, false), Box::new(Action::Toast("then this".into()))));
+    h.state_mut().apply_action(&ctx, Action::RunThen(gitem_core::ops::branch_create("made", None, false), Box::new(Action::done("then this"))));
     wait_for_text(&mut h, "then this");
     settle(&mut h);
-    h.state_mut().apply_action(&ctx, Action::RunThen(gitem_core::ops::branch_create("made", None, false), Box::new(Action::Toast("not this".into()))));
+    h.state_mut().apply_action(&ctx, Action::RunThen(gitem_core::ops::branch_create("made", None, false), Box::new(Action::done("not this"))));
     settle(&mut h);
     assert!(h.query_by_label_contains("not this").is_none());
     assert!(!h.state().errors_showing().is_empty());

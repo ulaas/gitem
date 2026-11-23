@@ -15,6 +15,15 @@ use crate::forms::FormDialog;
 use crate::theme::Palette;
 use crate::views::Tab;
 
+/// What a toast is about, which picks its icon and colour: something finished, something to
+/// watch out for, or only a note.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToastKind {
+    Note,
+    Done,
+    Warn,
+}
+
 pub enum Action {
     /// Show the About box.
     About,
@@ -68,7 +77,7 @@ pub enum Action {
     /// Read the repository again, but not what's on its host.
     ReloadRepository,
     Copy(String),
-    Toast(String),
+    Toast(ToastKind, String),
     Error(String),
     OpenRepo(PathBuf),
     /// Run on this repo's queue, then open a repository if it succeeded.
@@ -127,7 +136,7 @@ pub enum Action {
 /// What slow work comes back with. Plain data, since it's made on another thread.
 pub enum Later {
     Copy(String),
-    Toast(String),
+    Toast(ToastKind, String),
     Run(GitOp),
     RunGlobal(GitOp),
     Diff(DiffSource, Option<String>),
@@ -142,11 +151,33 @@ pub enum Later {
     Many(Vec<Later>),
 }
 
+impl Action {
+    pub fn done(s: impl Into<String>) -> Self {
+        Action::Toast(ToastKind::Done, s.into())
+    }
+
+    pub fn warn(s: impl Into<String>) -> Self {
+        Action::Toast(ToastKind::Warn, s.into())
+    }
+
+    pub fn note(s: impl Into<String>) -> Self {
+        Action::Toast(ToastKind::Note, s.into())
+    }
+}
+
 impl Later {
+    pub fn done(s: impl Into<String>) -> Self {
+        Later::Toast(ToastKind::Done, s.into())
+    }
+
+    pub fn note(s: impl Into<String>) -> Self {
+        Later::Toast(ToastKind::Note, s.into())
+    }
+
     pub fn into_action(self) -> Action {
         match self {
             Later::Copy(s) => Action::Copy(s),
-            Later::Toast(s) => Action::Toast(s),
+            Later::Toast(k, s) => Action::Toast(k, s),
             Later::Run(op) => Action::Run(op),
             Later::RunGlobal(op) => Action::RunGlobal { op, open_after: None },
             Later::Diff(src, path) => Action::OpenTab(Tab::diff(src, path)),
@@ -210,8 +241,19 @@ impl Cx<'_> {
         self.out.push(Action::OpenUrl(s.into()));
     }
 
-    pub fn toast(&mut self, s: impl Into<String>) {
-        self.out.push(Action::Toast(s.into()));
+    /// A toast saying something finished.
+    pub fn done(&mut self, s: impl Into<String>) {
+        self.out.push(Action::done(s));
+    }
+
+    /// A toast about something to watch out for.
+    pub fn warn(&mut self, s: impl Into<String>) {
+        self.out.push(Action::warn(s));
+    }
+
+    /// A toast that only says how things are.
+    pub fn note(&mut self, s: impl Into<String>) {
+        self.out.push(Action::note(s));
     }
 
     pub fn error(&mut self, s: impl Into<String>) {

@@ -514,7 +514,7 @@ impl MergeView {
             }
             if crate::widgets::small_button(ui, "Whitespace").on_hover_text("Auto-resolve conflicts that differ only in whitespace").clicked() {
                 let n = doc.resolve_whitespace_only();
-                cx.toast(format!("Resolved {} that differed only in whitespace", plural(n, "conflict", "conflicts")));
+                cx.done(format!("Resolved {} that differed only in whitespace", plural(n, "conflict", "conflicts")));
             }
             toggle(ui, &mut self.show_base, "Base", "Also show the common ancestor: the file as it was before either side changed it");
             if ui.add(egui::Button::new("Edit text").selected(self.raw_mode)).on_hover_text("Edit the merged result as plain text").clicked() {
@@ -585,7 +585,7 @@ impl MergeView {
                     self.expanded.clear();
                 }
                 None => {
-                    cx.toast("The conflict markers aren't complete. Fix them to leave plain editing, so nothing typed is lost.");
+                    cx.warn("The conflict markers aren't complete. Fix them to leave plain editing, so nothing typed is lost.");
                     return;
                 }
             }

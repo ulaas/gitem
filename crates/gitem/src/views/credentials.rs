@@ -64,7 +64,7 @@ fn add_token_form() -> FormDialog {
             let h = v.opt("host").ok_or("A host is required.")?;
             let t = v.opt("token").ok_or("A token is required.")?;
             cred::set_forge_token(&h, &v.text("user"), &t).map_err(|e| e.to_string())?;
-            Ok(vec![Action::Toast(format!("Saved token for {h}"))])
+            Ok(vec![Action::done(format!("Saved token for {h}"))])
         })
 }
 
@@ -80,7 +80,7 @@ fn add_git_cred_form() -> FormDialog {
             let target = cred::git_credential_target(&u, v.on("path")).map_err(|e| e.to_string())?;
             cred::store(&target, &v.text("user"), &v.text("pass")).map_err(|e| e.to_string())?;
             let saved = target.strip_prefix(PREFIX_GIT).unwrap_or(&target).to_string();
-            Ok(vec![Action::Toast(format!("Credential saved for {saved}"))])
+            Ok(vec![Action::done(format!("Credential saved for {saved}"))])
         })
 }
 
@@ -94,7 +94,7 @@ fn generate_key_form(helper: Option<std::path::PathBuf>) -> FormDialog {
         .on_submit(move |v| {
             let name = v.opt("name").ok_or("A file name is required.")?;
             let path = cred::ssh_generate(&name, &v.text("comment"), &v.text("pass"), helper.as_deref()).map_err(|e| e.to_string())?;
-            Ok(vec![Action::Toast(format!("Created {path}"))])
+            Ok(vec![Action::done(format!("Created {path}"))])
         })
 }
 
@@ -184,7 +184,7 @@ impl CredentialsView {
             if ui.button("Import from GitHub CLI").on_hover_text("Reads the token from `gh auth token`").clicked() {
                 match import_gh() {
                     Ok(()) => {
-                        cx.toast("Imported the GitHub CLI token");
+                        cx.done("Imported the GitHub CLI token");
                         self.loaded = false;
                     }
                     Err(e) => cx.error(e),
@@ -310,7 +310,7 @@ impl CredentialsView {
                     if !k.private_path.is_empty() && crate::widgets::small_button(ui, "Add to agent").clicked() {
                         match cred::ssh_agent_add(&k.private_path) {
                             Ok(m) => {
-                                cx.toast(m.trim().to_string());
+                                cx.done(m.trim().to_string());
                                 self.ssh_loaded = false;
                             }
                             Err(e) => cx.error(e.to_string()),
@@ -458,7 +458,7 @@ impl CredentialsView {
                     if configured.is_none() {
                         cx.run(ops::config_set("gpg.ssh.allowedSignersFile", &path.to_string_lossy().replace('\\', "/"), "global"));
                     }
-                    cx.toast("Saved allowed signers");
+                    cx.done("Saved allowed signers");
                 }
                 Err(e) => cx.error(format!("Could not save: {e}")),
             }

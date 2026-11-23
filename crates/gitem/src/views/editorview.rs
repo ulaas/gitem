@@ -312,7 +312,7 @@ impl EditorView {
         match gitem_core::util::write_file_atomically(&abs, &bytes) {
             Ok(in_place) => {
                 if in_place {
-                    cx.toast(format!("Saved {} in place: it couldn't be swapped for a new copy.", self.path));
+                    cx.warn(format!("Saved {} in place: it couldn't be swapped for a new copy.", self.path));
                 }
                 self.disk = Some(hash(&bytes));
                 self.gone = false;

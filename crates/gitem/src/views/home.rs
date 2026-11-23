@@ -653,7 +653,7 @@ impl HomeView {
         let w = &ws[self.workspace_idx];
         if self.sweep.poll() {
             if let Some(m) = self.sweep.value.take() {
-                cx.toast(m);
+                cx.done(m);
             }
             if let Some(e) = self.sweep.error.take() {
                 cx.error(e);
@@ -714,7 +714,7 @@ impl HomeView {
                     cx.out.push(Action::Later(Box::new(move || {
                         let found = gitem_core::repo::find_repos(&dir, 3);
                         Ok(crate::action::Later::Many(vec![
-                            crate::action::Later::Toast(format!("Found {} repositories", found.len())),
+                            crate::action::Later::done(format!("Found {} repositories", found.len())),
                             crate::action::Later::Settings(Box::new(move |s| {
                                 if let Some(x) = s.workspaces.iter_mut().find(|x| x.name == name) {
                                     for f in found {

@@ -899,6 +899,16 @@ fn scene_set(out: &Out, theme: ThemeChoice) {
         settle_a_moment(&mut h);
         out.save(&mut h, "drop");
     }
+    if wanted("toasts") {
+        let mut h = f.harness(set, vec![]);
+        let ctx = h.ctx.clone();
+        use gitem::action::Action;
+        for t in [Action::note("No layouts are saved."), Action::done("Committed 3f2a91c \"Tidy the parser\" on main"), Action::warn("That needs a repository. Open or clone one first, then try again from the palette.")] {
+            h.state_mut().apply_action(&ctx, t);
+        }
+        settle_a_moment(&mut h);
+        out.save(&mut h, "toasts");
+    }
     if wanted("credentials") {
         gitem_core::cred::set_forge_token("git.example.invalid", "someone", "FAKE_SECRET_VALUE").unwrap();
         gitem_core::cred::set_ai_key("anthropic", "FAKE_SECRET_VALUE").unwrap();

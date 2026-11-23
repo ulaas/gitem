@@ -351,7 +351,7 @@ impl FileView {
                     self.rev = Some(sha);
                     self.path = path;
                 }
-                Some(None) => cx.toast("No more revisions of this file in that direction."),
+                Some(None) => cx.note("No more revisions of this file in that direction."),
                 None => {}
             }
         }
@@ -562,7 +562,7 @@ impl FileView {
             cx.out.push(Action::Later(Box::new(move || {
                 Ok(match repo.prev_revision(&path, &cur) {
                     Some((prev, _)) => Later::Diff(DiffSource::Range(prev, cur), Some(path)),
-                    None => Later::Toast("This is the first revision of the file.".to_string()),
+                    None => Later::note("This is the first revision of the file."),
                 })
             })));
             ui.close();
@@ -572,7 +572,7 @@ impl FileView {
             cx.out.push(Action::Later(Box::new(move || {
                 Ok(match repo.next_revision(&path, &cur) {
                     Some(next) => Later::Diff(DiffSource::Range(cur, next), Some(path)),
-                    None => Later::Toast("This is the latest revision of the file.".to_string()),
+                    None => Later::note("This is the latest revision of the file."),
                 })
             })));
             ui.close();

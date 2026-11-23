@@ -257,7 +257,7 @@ pub fn commands() -> Vec<Item> {
         v.push(item("Git", label, move |cx| {
             let list: Vec<(String, String)> = cx.data.stashes().iter().map(|s| (format!("{}: {}", s.selector, s.message), s.sha.clone())).collect();
             if list.is_empty() {
-                cx.toast("There are no stashes.");
+                cx.note("There are no stashes.");
                 return;
             }
             let names = list.iter().map(|x| x.0.clone()).collect();
@@ -300,7 +300,7 @@ pub fn commands() -> Vec<Item> {
     v.push(item("Git", "Remove a Worktree…", |cx| {
         let names: Vec<String> = cx.data.worktrees().iter().filter(|w| !w.is_main && !w.is_current).map(|w| w.path.clone()).collect();
         if names.is_empty() {
-            cx.toast("There's no other worktree to remove from here.");
+            cx.note("There's no other worktree to remove from here.");
             return;
         }
         cx.form(forms::FormDialog::new("Remove a worktree", "Next").pick("path", "Worktree", names, "").on_submit(|v| {
@@ -349,20 +349,20 @@ pub fn commands() -> Vec<Item> {
     }));
     v.push(item("Remote", "Open Repository on Remote", |cx| match cx.forge().map(|f| f.web_url()) {
         Some(u) => cx.url(u),
-        None => cx.toast("No hosting provider among the remotes."),
+        None => cx.note("No hosting provider among the remotes."),
     }));
     v.push(item("Remote", "Copy Repository Link", |cx| match cx.forge().map(|f| f.web_url()) {
         Some(u) => cx.copy(u),
-        None => cx.toast("No hosting provider among the remotes."),
+        None => cx.note("No hosting provider among the remotes."),
     }));
     v.push(item("Remote", "Open Current Branch on Remote", |cx| {
         let Some(b) = cx.current_branch() else {
-            cx.toast("HEAD is detached, so there's no current branch to open.");
+            cx.note("HEAD is detached, so there's no current branch to open.");
             return;
         };
         match cx.forge().map(|f| f.branch_url(&b)) {
             Some(u) => cx.url(u),
-            None => cx.toast("No hosting provider among the remotes."),
+            None => cx.note("No hosting provider among the remotes."),
         }
     }));
     v.push(item("Remote", "Open File from Remote Link…", |cx| {
@@ -408,7 +408,7 @@ pub fn commands() -> Vec<Item> {
     v.push(item("View", "Layout: Open Saved…", |cx| {
         let names: Vec<String> = cx.settings.dock_layouts.keys().cloned().collect();
         if names.is_empty() {
-            return cx.toast("No layouts are saved yet. Layout: Save Current As… keeps one.");
+            return cx.note("No layouts are saved yet. Layout: Save Current As… keeps one.");
         }
         let first = names[0].clone();
         cx.form(forms::FormDialog::new("Open a saved layout", "Open").pick("name", "Layout", names, &first).on_submit(|v| Ok(vec![Action::Layout(crate::layouts::Preset::Saved(v.text("name").to_string()))])));
@@ -416,7 +416,7 @@ pub fn commands() -> Vec<Item> {
     v.push(item("View", "Layout: Delete Saved…", |cx| {
         let names: Vec<String> = cx.settings.dock_layouts.keys().cloned().collect();
         if names.is_empty() {
-            return cx.toast("No layouts are saved.");
+            return cx.note("No layouts are saved.");
         }
         let first = names[0].clone();
         cx.form(forms::FormDialog::new("Delete a saved layout", "Delete").pick("name", "Layout", names, &first).on_submit(|v| {

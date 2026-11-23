@@ -210,7 +210,7 @@ impl ToolsView {
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
                 match std::fs::write(&path, text.as_bytes()) {
-                    Ok(()) => cx.toast("Saved .gitignore"),
+                    Ok(()) => cx.done("Saved .gitignore"),
                     Err(e) => cx.error(format!("Could not save: {e}")),
                 }
             }

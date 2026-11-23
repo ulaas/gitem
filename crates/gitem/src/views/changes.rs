@@ -220,7 +220,7 @@ impl ChangesView {
             {
                 self.message = draft.clone();
                 self.draft_saved = draft;
-                cx.toast("Restored the commit message you were writing.");
+                cx.note("Restored the commit message you were writing.");
             }
         }
         self.save_draft(ui.ctx(), cx);
@@ -1370,7 +1370,7 @@ pub fn ignore_form(repo: &gitem_core::Repo, path: &str) -> forms::FormDialog {
             _ => repo.global_ignore_path().map_err(|e| e.to_string())?,
         };
         append_rule(&file, &rule).map_err(|e| format!("Could not update {}: {e}", file.display()))?;
-        Ok(vec![crate::action::Action::Toast(format!("Added {rule} to {}", file.display())), crate::action::Action::ReloadRepository])
+        Ok(vec![crate::action::Action::done(format!("Added {rule} to {}", file.display())), crate::action::Action::ReloadRepository])
     })
 }
 
@@ -1392,7 +1392,7 @@ pub fn add_to_gitignore(cx: &mut Cx, path: &str) {
     let file = cx.repo.ignore_path();
     let r = append_rule(&file, &gitignore_entry(path));
     match r {
-        Ok(()) => cx.toast(format!("Ignored {path}")),
+        Ok(()) => cx.done(format!("Ignored {path}")),
         Err(e) => cx.error(format!("Could not update .gitignore: {e}")),
     }
 }
